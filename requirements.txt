@@ -1,1 +1,5 @@
-
+MetaTrader5==5.0.43
+pandas==2.0.3
+matplotlib==3.7.2
+python-dotenv==1.0.0
+requests==2.31.0
