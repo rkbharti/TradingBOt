@@ -1,7 +1,7 @@
 {
-    "login": "YOUR_DEMO_ACCOUNT_NUMBER",
-    "password": "YOUR_MT5_PASSWORD",
-    "server": "YOUR_DEMO_SERVER",
+    "login": 99789073,
+    "password": "Q_5mEmVb",
+    "server": "MetaQuotes-Demo",
     "symbol": "XAUUSD",
     "timeframe": "M5",
     "lot_size": 0.01,

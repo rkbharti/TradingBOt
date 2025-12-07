@@ -28,14 +28,20 @@ class MT5Connection:
                 return False
             
             # Login to demo account
-            account_info = mt5.login(
+            login_result = mt5.login(
                 login=self.config["login"],
                 password=self.config["password"],
                 server=self.config["server"]
             )
             
-            if account_info is None:
+            if not login_result:
                 print("❌ MT5 login failed")
+                return False
+            
+            # Get account info after successful login
+            account_info = mt5.account_info()
+            if account_info is None:
+                print("❌ Could not retrieve account info")
                 return False
             
             self.connected = True
@@ -47,6 +53,13 @@ class MT5Connection:
         except Exception as e:
             print(f"❌ MT5 connection error: {e}")
             return False
+    
+    def get_account_info(self):
+        """Get account information"""
+        if not self.connected:
+            print("⚠️ MT5 not connected")
+            return None
+        return mt5.account_info()
     
     def get_current_price(self, symbol=None):
         """Get current bid/ask price for symbol"""
