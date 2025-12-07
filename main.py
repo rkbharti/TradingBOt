@@ -8,7 +8,7 @@ from strategy.smc_strategy import SMCStrategy
 from strategy.stoploss_calc import StopLossCalculator
 
 class XAUUSDTradingBot:
-    """Main trading bot class for XAUUSD demo trading"""
+    """Enhanced trading bot with advanced SMC strategy for XAUUSD"""
     
     def __init__(self, config_path="config.json"):
         self.config_path = config_path
@@ -17,11 +17,12 @@ class XAUUSDTradingBot:
         self.risk_calculator = None
         self.running = False
         self.trade_log = []
+        self.open_positions = []
         
     def initialize(self):
         """Initialize the trading bot"""
-        print("🚀 Initializing XAUUSD Trading Bot...")
-        print("=" * 50)
+        print("🚀 Initializing Enhanced XAUUSD Trading Bot...")
+        print("=" * 60)
         
         # Connect to MT5
         if not self.mt5.initialize_mt5():
@@ -42,15 +43,16 @@ class XAUUSDTradingBot:
         
         print(f"💰 Account Balance: ${balance:,.2f}")
         print(f"🎯 Risk per Trade: {self.mt5.config.get('risk_per_trade', 1.0)}%")
-        print("=" * 50)
+        print(f"🌍 Time Zone: IST (UTC+5:30)")
+        print("=" * 60)
         
         return True
     
     def fetch_market_data(self):
         """Fetch current market data"""
-        # Get historical data for analysis
+        # Get historical data for analysis (increased for better indicators)
         historical_data = self.mt5.get_historical_data(
-            bars=200  # Get enough data for indicators
+            bars=300  # More data for enhanced indicators
         )
         
         if historical_data is None:
@@ -66,8 +68,8 @@ class XAUUSDTradingBot:
         return historical_data, current_price
     
     def analyze_and_trade(self):
-        """Main analysis and trading logic"""
-        print(f"\n📊 Analyzing market at {datetime.now()}")
+        """Main analysis and trading logic with enhanced SMC"""
+        print(f"\n📊 Analyzing market at {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
         
         # Fetch market data
         market_data = self.fetch_market_data()
@@ -79,35 +81,60 @@ class XAUUSDTradingBot:
         # Generate trading signal
         signal, reason = self.strategy.generate_signal(historical_data)
         
-        # Get strategy statistics
+        # Get enhanced strategy statistics
         stats = self.strategy.get_strategy_stats(historical_data)
         
-        # Display analysis
-        self.display_analysis(current_price, signal, reason, stats)
+        # Display enhanced analysis
+        self.display_enhanced_analysis(current_price, signal, reason, stats)
         
-        # Execute trade if signal is not HOLD
+        # Check risk limits before trading
+        total_risk = sum([pos.get('risk_percent', 0) for pos in self.open_positions])
+        can_trade, risk_msg = self.risk_calculator.check_risk_limits(
+            self.open_positions, total_risk
+        )
+        
+        # Execute trade if signal is not HOLD and risk limits allow
         if signal != "HOLD":
-            self.execute_trade(signal, current_price, historical_data)
+            if can_trade:
+                self.execute_enhanced_trade(signal, current_price, historical_data, stats)
+            else:
+                print(f"⚠️  Trade blocked: {risk_msg}")
         
         # Log this analysis
         self.log_trade_analysis(signal, reason, current_price, stats)
     
-    def display_analysis(self, price, signal, reason, stats):
-        """Display current market analysis"""
-        print(f"🎯 XAUUSD Current Price: ${price['bid']:.2f} (Spread: {price['spread']:.2f})")
-        print(f"📈 Technical Levels:")
-        print(f"   MA5: ${stats.get('ma5', 0):.2f} | MA20: ${stats.get('ma20', 0):.2f}")
-        print(f"   Support: ${stats.get('support', 0):.2f} | Resistance: ${stats.get('resistance', 0):.2f}")
-        print(f"💡 Signal: {signal} - {reason}")
-        print("-" * 50)
-    
-    def execute_trade(self, signal, price, historical_data):
-        """Execute a demo trade"""
-        entry_price = price['ask'] if signal == "BUY" else price['bid']
+    def display_enhanced_analysis(self, price, signal, reason, stats):
+        """Display enhanced market analysis with SMC indicators"""
+        print(f"🎯 XAUUSD Price: ${price['bid']:.2f} (Spread: ${price['spread']:.2f})")
+        print(f"\n📈 Market Structure: {stats.get('market_structure', 'UNKNOWN')}")
+        print(f"🎯 Zone: {stats.get('zone', 'UNKNOWN')}")
+        print(f"⏰ Session: {stats.get('session', 'UNKNOWN')} {'✅' if stats.get('in_trading_hours') else '⛔'}")
         
-        # Calculate stop loss and take profit
+        print(f"\n📊 Technical Levels:")
+        print(f"   EMA200: ${stats.get('ema200', 0):.2f}")
+        print(f"   MA20: ${stats.get('ma20', 0):.2f} | MA50: ${stats.get('ma50', 0):.2f}")
+        print(f"   Support: ${stats.get('support', 0):.2f} | Resistance: ${stats.get('resistance', 0):.2f}")
+        print(f"   ATR: ${stats.get('atr', 0):.2f}")
+        
+        print(f"\n💡 SMC Indicators:")
+        print(f"   FVG Bullish: {'✅' if stats.get('fvg_bullish') else '❌'}")
+        print(f"   FVG Bearish: {'✅' if stats.get('fvg_bearish') else '❌'}")
+        print(f"   Last BOS: {stats.get('bos', 'NONE')}")
+        
+        print(f"\n🔔 Signal: {signal}")
+        print(f"   Reason: {reason}")
+        print("-" * 60)
+    
+    def execute_enhanced_trade(self, signal, price, historical_data, stats):
+        """Execute trade with enhanced SMC-based parameters"""
+        entry_price = price['ask'] if signal == "BUY" else price['bid']
+        atr = stats.get('atr', entry_price * 0.01)
+        zone = stats.get('zone', 'EQUILIBRIUM')
+        market_structure = stats.get('market_structure', 'NEUTRAL')
+        
+        # Calculate stop loss and take profit with ATR
         stop_loss, take_profit = self.risk_calculator.calculate_stop_loss_take_profit(
-            signal, entry_price
+            signal, entry_price, atr, zone, market_structure
         )
         
         # Calculate position size
@@ -115,47 +142,97 @@ class XAUUSDTradingBot:
             entry_price, stop_loss
         )
         
-        # Get risk metrics
+        # Get comprehensive risk metrics
         risk_metrics = self.risk_calculator.get_risk_metrics(
-            entry_price, stop_loss, lot_size
+            entry_price, stop_loss, lot_size, take_profit
         )
         
-        print(f"💼 Trade Execution:")
+        print(f"\n💼 Trade Execution Details:")
         print(f"   Direction: {signal}")
         print(f"   Entry: ${entry_price:.2f}")
-        print(f"   Stop Loss: ${stop_loss:.2f}")
-        print(f"   Take Profit: ${take_profit:.2f}")
+        print(f"   Stop Loss: ${stop_loss:.2f} ({risk_metrics['stop_loss_pips']:.2f} pips)")
+        print(f"   Take Profit: ${take_profit:.2f} ({risk_metrics['take_profit_pips']:.2f} pips)")
         print(f"   Lot Size: {lot_size}")
-        print(f"   Risk: ${risk_metrics['risk_amount']:.2f} ({risk_metrics['risk_percent']:.1f}%)")
+        print(f"   Position Value: ${risk_metrics['position_value']:,.2f}")
+        print(f"   Risk: ${risk_metrics['risk_amount']:.2f} ({risk_metrics['risk_percent']:.2f}%)")
+        print(f"   Potential Reward: ${risk_metrics['reward_amount']:.2f}")
+        print(f"   R:R Ratio: 1:{risk_metrics['reward_ratio']:.1f}")
+        print(f"   ATR: ${atr:.2f}")
+        print(f"   Zone: {zone} | Structure: {market_structure}")
         
         # Place demo order
-        self.mt5.place_demo_order(signal, lot_size, stop_loss, take_profit)
+        order_placed = self.mt5.place_demo_order(signal, lot_size, stop_loss, take_profit)
+        
+        if order_placed:
+            # Track position
+            position = {
+                'signal': signal,
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'lot_size': lot_size,
+                'entry_time': datetime.now(),
+                'risk_percent': risk_metrics['risk_percent'],
+                'atr': atr
+            }
+            self.open_positions.append(position)
+            print(f"\n✅ Order placed successfully!")
+        else:
+            print(f"\n❌ Order placement failed")
     
     def log_trade_analysis(self, signal, reason, price, stats):
-        """Log trade analysis for later review"""
+        """Log enhanced trade analysis for review"""
         log_entry = {
             'timestamp': datetime.now(),
             'signal': signal,
             'reason': reason,
             'price': price['bid'],
-            'ma5': stats.get('ma5', 0),
+            'spread': price['spread'],
             'ma20': stats.get('ma20', 0),
-            'spread': price['spread']
+            'ema200': stats.get('ema200', 0),
+            'atr': stats.get('atr', 0),
+            'market_structure': stats.get('market_structure', 'UNKNOWN'),
+            'zone': stats.get('zone', 'UNKNOWN'),
+            'session': stats.get('session', 'UNKNOWN'),
+            'in_trading_hours': stats.get('in_trading_hours', False),
+            'fvg_bullish': stats.get('fvg_bullish', False),
+            'fvg_bearish': stats.get('fvg_bearish', False)
         }
         self.trade_log.append(log_entry)
     
+    def save_trade_log(self, filename="trade_log.json"):
+        """Save trade log to file"""
+        try:
+            with open(filename, 'w') as f:
+                json.dump(self.trade_log, f, indent=2, default=str)
+            print(f"\n💾 Trade log saved to {filename}")
+        except Exception as e:
+            print(f"\n❌ Error saving trade log: {e}")
+    
     def run(self, interval_seconds=60):
-        """Run the trading bot main loop"""
+        """Run the enhanced trading bot main loop"""
         if not self.initialize():
             return
         
         self.running = True
-        print(f"\n🤖 Trading Bot Started - Monitoring XAUUSD every {interval_seconds} seconds")
-        print("Press Ctrl+C to stop...")
+        print(f"\n🤖 Enhanced SMC Trading Bot Started")
+        print(f"⏱️  Monitoring XAUUSD every {interval_seconds} seconds")
+        print(f"🛡️  Features: FVG, BOS, Liquidity Sweeps, ATR Stops, Session Filters")
+        print("\nPress Ctrl+C to stop...\n")
         
         try:
+            iteration = 0
             while self.running:
+                iteration += 1
+                print(f"\n{'='*60}")
+                print(f"Iteration #{iteration}")
+                print(f"{'='*60}")
+                
                 self.analyze_and_trade()
+                
+                # Save log every 10 iterations
+                if iteration % 10 == 0:
+                    self.save_trade_log()
                 
                 # Wait for next iteration
                 for _ in range(interval_seconds):
@@ -164,18 +241,26 @@ class XAUUSDTradingBot:
                     time.sleep(1)
                     
         except KeyboardInterrupt:
-            print("\n🛑 Bot stopped by user")
+            print("\n\n🛑 Bot stopped by user")
         finally:
             self.shutdown()
     
     def shutdown(self):
         """Shutdown the trading bot"""
         self.running = False
+        self.save_trade_log()
         self.mt5.shutdown()
-        print("🔚 Trading bot shutdown complete")
+        print("\n🔚 Trading bot shutdown complete")
+        print(f"Total iterations: {len(self.trade_log)}")
+        print(f"Open positions: {len(self.open_positions)}")
 
 def main():
     """Main function to run the trading bot"""
+    print("\n" + "="*60)
+    print(" " * 10 + "XAUUSD SMC TRADING BOT v2.0")
+    print(" " * 15 + "Enhanced Algorithm")
+    print("="*60 + "\n")
+    
     bot = XAUUSDTradingBot()
     bot.run(interval_seconds=60)  # Check every minute
 
