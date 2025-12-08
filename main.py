@@ -10,12 +10,15 @@ import threading
 import sys
 import os
 
+
 # Add API path for dashboard integration
 sys.path.append(os.path.join(os.path.dirname(__file__), 'api'))
+
 
 # Import dashboard functions at module level
 DASHBOARD_AVAILABLE = False
 update_bot_state = None
+
 
 try:
     from api.server import update_bot_state as _update_bot_state
@@ -24,6 +27,7 @@ try:
     print("✅ Dashboard integration loaded")
 except ImportError as e:
     print(f"⚠️ Dashboard not available: {e}")
+
 
 
 class XAUUSDTradingBot:
@@ -41,6 +45,72 @@ class XAUUSDTradingBot:
         # Dashboard state tracking
         self.last_signal = "HOLD"
         self.last_analysis = {}
+    
+    def load_historical_trades(self, max_trades=50):
+        """Load recent trades from trade_log.json for dashboard"""
+        try:
+            if os.path.exists("trade_log.json"):
+                with open("trade_log.json", 'r') as f:
+                    log_data = json.load(f)
+                
+                # Get only BUY/SELL signals (not HOLD)
+                trades = []
+                for entry in log_data[-max_trades:]:
+                    if entry.get('signal') in ['BUY', 'SELL']:
+                        trades.append({
+                            "id": len(trades) + 1,
+                            "type": entry['signal'],
+                            "entry": entry['price'],
+                            "time": entry['timestamp'],
+                            "status": "LOGGED",
+                            "session": entry.get('session', 'UNKNOWN'),
+                            "zone": entry.get('zone', 'UNKNOWN'),
+                            "atr": entry.get('atr', 0),
+                            "spread": entry.get('spread', 0),
+                            "market_structure": entry.get('market_structure', 'UNKNOWN')
+                        })
+                
+                return trades
+        except Exception as e:
+            print(f"⚠️ Error loading historical trades: {e}")
+        
+        return []
+    
+    def calculate_current_pnl(self):
+        """Calculate current P&L from open positions"""
+        total_pnl = 0.0
+        
+        try:
+            # Get current price
+            current_price = self.mt5.get_current_price()
+            if not current_price:
+                return 0.0
+            
+            current_bid = current_price['bid']
+            current_ask = current_price['ask']
+            
+            # Calculate P&L for each open position
+            for pos in self.open_positions:
+                signal = pos['signal']
+                entry = pos['entry_price']
+                lot_size = pos['lot_size']
+                
+                if signal == "SELL":
+                    # SELL: Profit when price goes DOWN
+                    # P&L = (Entry - Current) * 100 * Lot Size
+                    pnl = (entry - current_ask) * 100 * lot_size
+                else:  # BUY
+                    # BUY: Profit when price goes UP
+                    # P&L = (Current - Entry) * 100 * Lot Size
+                    pnl = (current_bid - entry) * 100 * lot_size
+                
+                total_pnl += pnl
+            
+            return total_pnl
+            
+        except Exception as e:
+            print(f"⚠️ P&L calculation error: {e}")
+            return 0.0
         
     def initialize(self):
         """Initialize the trading bot"""
@@ -68,6 +138,10 @@ class XAUUSDTradingBot:
         print(f"🎯 Risk per Trade: {self.mt5.config.get('risk_per_trade', 1.0)}%")
         print(f"🌍 Time Zone: IST (UTC+5:30)")
         print("=" * 60)
+        
+        # Load historical trades for dashboard
+        historical_trades = self.load_historical_trades()
+        print(f"📜 Loaded {len(historical_trades)} historical trades from trade_log.json")
         
         # Initial dashboard update
         self.update_dashboard_state()
@@ -211,7 +285,7 @@ class XAUUSDTradingBot:
         print(f"   Zone: {zone} | Structure: {market_structure}")
         
         # Place demo order
-        order_placed = self.mt5.place_demo_order(signal, lot_size, stop_loss, take_profit)
+        order_placed = self.mt5.place_order(signal, lot_size, stop_loss, take_profit)
         
         if order_placed:
             # Track position
@@ -223,7 +297,9 @@ class XAUUSDTradingBot:
                 'lot_size': lot_size,
                 'entry_time': datetime.now(),
                 'risk_percent': risk_metrics['risk_percent'],
-                'atr': atr
+                'atr': atr,
+                'zone': zone,
+                'market_structure': market_structure
             }
             self.open_positions.append(position)
             print(f"\n✅ Order placed successfully!")
@@ -233,7 +309,7 @@ class XAUUSDTradingBot:
     def log_trade_analysis(self, signal, reason, price, stats):
         """Log enhanced trade analysis for review"""
         log_entry = {
-            'timestamp': datetime.now(),
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S IST'),
             'signal': signal,
             'reason': reason,
             'price': price['bid'],
@@ -278,9 +354,79 @@ class XAUUSDTradingBot:
             smc = self.last_analysis.get('smc_indicators', {})
             tech = self.last_analysis.get('technical_levels', {})
             
+            # Format open positions for dashboard WITH P&L
+            trades_list = []
+            
+            # Part 1: Add OPEN positions (actual trades)
+            for idx, pos in enumerate(self.open_positions):
+                # Calculate individual P&L
+                pnl = 0.0
+                if current_price:
+                    entry = pos['entry_price']
+                    lot_size = pos['lot_size']
+                    
+                    if pos['signal'] == "SELL":
+                        pnl = (entry - current_price['ask']) * 100 * lot_size
+                    else:  # BUY
+                        pnl = (current_price['bid'] - entry) * 100 * lot_size
+                
+                trades_list.append({
+                    "id": idx + 1,
+                    "type": pos['signal'],
+                    "lot_size": pos['lot_size'],
+                    "entry": pos['entry_price'],
+                    "sl": pos['stop_loss'],
+                    "tp": pos['take_profit'],
+                    "time": pos['entry_time'].strftime("%Y-%m-%d %H:%M:%S IST"),
+                    "status": "OPEN",
+                    "pnl": round(pnl, 2),
+                    "risk_percent": pos.get('risk_percent', 0),
+                    "atr": pos.get('atr', 0),
+                    "zone": pos.get('zone', 'UNKNOWN'),
+                    "market_structure": pos.get('market_structure', 'UNKNOWN')
+                })
+            
+            # Part 2: Add recent SIGNALS (not executed, just logged)
+            # Only add signals that are NOT already in open_positions
+            open_times = [pos['entry_time'].strftime("%Y-%m-%d %H:%M:%S IST") for pos in self.open_positions]
+            
+            signal_count = 0
+            for entry in reversed(self.trade_log):  # Most recent first
+                if signal_count >= 5:  # Limit to 5 signals
+                    break
+                    
+                if entry.get('signal') in ['BUY', 'SELL']:
+                    timestamp = entry['timestamp']
+                    
+                    # Skip if this signal became an open position
+                    if timestamp in open_times:
+                        continue
+                    
+                    trades_list.append({
+                        "id": len(trades_list) + 1,
+                        "type": entry['signal'],
+                        "lot_size": 0.0,  # SIGNAL trades don't have lot_size
+                        "entry": entry['price'],
+                        "time": timestamp,
+                        "status": "SIGNAL",
+                        "pnl": 0.0,
+                        "session": entry.get('session', 'UNKNOWN'),
+                        "zone": entry.get('zone', 'UNKNOWN'),
+                        "spread": entry.get('spread', 0)
+                    })
+                    signal_count += 1
+            
+            # Calculate current P&L
+            current_pnl = self.calculate_current_pnl()
+            initial_balance = float(account_info.balance) if account_info else 100000.0
+            current_balance = initial_balance + current_pnl
+            
             state = {
                 "running": bool(self.running),
-                "balance": float(account_info.balance) if account_info else 100000.0,
+                "balance": current_balance,
+                "initial_balance": initial_balance,
+                "pnl": round(current_pnl, 2),
+                "open_positions_count": len(self.open_positions),
                 "current_price": current_price if current_price else {"bid": 0.0, "ask": 0.0, "spread": 0.0},
                 "last_signal": str(self.last_signal),
                 "smc_indicators": {
@@ -299,10 +445,11 @@ class XAUUSDTradingBot:
                 },
                 "market_structure": str(self.last_analysis.get('market_structure', 'NEUTRAL')),
                 "zone": str(self.last_analysis.get('zone', 'EQUILIBRIUM')),
+                "trades": trades_list
             }
             
             update_bot_state(state)
-            print("📊 Dashboard updated")
+            print(f"📊 Dashboard updated - Balance: ${current_balance:,.2f} | P&L: ${current_pnl:,.2f} | Trades: {len(trades_list)}")
             
         except Exception as e:
             print(f"⚠️ Dashboard update error: {e}")
@@ -362,8 +509,10 @@ class XAUUSDTradingBot:
         print(f"Open positions: {len(self.open_positions)}")
 
 
+
 # Global bot instance for API access
 bot_instance = None
+
 
 
 def execute_manual_trade(trade_type: str, lot_size: float):
@@ -407,6 +556,7 @@ def execute_manual_trade(trade_type: str, lot_size: float):
         return False
 
 
+
 def start_api_server():
     """Start the dashboard API server"""
     try:
@@ -433,6 +583,7 @@ def start_api_server():
         print(f"❌ API Server error: {e}")
 
 
+
 def main():
     """Main function to run the trading bot with dashboard"""
     global bot_instance
@@ -454,6 +605,7 @@ def main():
     # Create and run bot
     bot_instance = XAUUSDTradingBot()
     bot_instance.run(interval_seconds=60)  # Check every minute
+
 
 
 if __name__ == "__main__":

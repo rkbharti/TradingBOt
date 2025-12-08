@@ -113,6 +113,16 @@
             font-weight: bold;
         }
         
+        .pnl-display {
+            text-align: center;
+            font-size: 1.3em;
+            margin: 10px 0;
+            font-weight: bold;
+        }
+        
+        .pnl-positive { color: #00ff00; }
+        .pnl-negative { color: #ff6b6b; }
+        
         .trade-buttons {
             display: flex;
             gap: 15px;
@@ -202,7 +212,7 @@
         }
         
         .trade-history {
-            max-height: 300px;
+            max-height: 400px;
             overflow-y: auto;
         }
         
@@ -236,6 +246,8 @@
         
         .trade-buy { border-color: #00ff00; }
         .trade-sell { border-color: #ff0000; }
+        .trade-open { background: rgba(0, 255, 0, 0.1); }
+        .trade-signal { background: rgba(255, 165, 0, 0.1); }
         
         .last-update {
             text-align: center;
@@ -258,11 +270,38 @@
         .connected {
             background: #00ff00;
             color: black;
+            box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
         }
         
         .disconnected {
             background: #ff0000;
             color: white;
+            box-shadow: 0 0 10px rgba(255, 0, 0, 0.5);
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        .stat-box {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .stat-label {
+            font-size: 0.8em;
+            opacity: 0.7;
+            margin-bottom: 5px;
+        }
+        
+        .stat-value {
+            font-size: 1.2em;
+            font-weight: bold;
         }
         
         @media (max-width: 768px) {
@@ -271,6 +310,7 @@
             .balance { font-size: 1.5em; }
             .btn { font-size: 1.1em; padding: 15px; }
             .grid { grid-template-columns: 1fr; }
+            .stats-grid { grid-template-columns: 1fr; }
         }
         
         .loading {
@@ -283,6 +323,21 @@
             font-size: 3em;
             display: block;
             margin-bottom: 10px;
+        }
+        
+        .update-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #00ff00;
+            border-radius: 50%;
+            margin-left: 10px;
+            animation: blink 1s infinite;
+        }
+        
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
         }
     </style>
 </head>
@@ -302,9 +357,27 @@
             <div class="card">
                 <h2>💰 Account Overview</h2>
                 <div class="balance" id="balance">$100,000.00</div>
+                <div class="pnl-display" id="pnl-display">
+                    P&L: <span id="pnl">$0.00</span>
+                </div>
                 <div class="price-display" id="price">Loading...</div>
                 <div style="text-align: center; opacity: 0.8;">
+                    Bid: $<span id="bid">0.00</span> | Ask: $<span id="ask">0.00</span><br>
                     Spread: $<span id="spread">0.00</span>
+                </div>
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="stat-label">Open Positions</div>
+                        <div class="stat-value" id="open-positions">0</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Session</div>
+                        <div class="stat-value" id="session-mini">-</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Structure</div>
+                        <div class="stat-value" id="structure-mini">-</div>
+                    </div>
                 </div>
             </div>
             
@@ -385,7 +458,7 @@
         
         <!-- Trade History Card (Full Width) -->
         <div class="card">
-            <h2>📜 Recent Trades</h2>
+            <h2>📜 Recent Trades <span class="update-indicator" id="update-indicator"></span></h2>
             <div class="trade-history" id="trade-history">
                 <div class="loading">
                     <span class="emoji-large">⏳</span>
@@ -404,13 +477,16 @@
         let reconnectAttempts = 0;
         const MAX_RECONNECT_ATTEMPTS = 5;
         const API_URL = window.location.origin;
+        let lastUpdateTime = Date.now();
+        let pollingInterval;
         
+        // WebSocket Connection
         function connectWebSocket() {
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
             
             ws.onopen = () => {
-                console.log('✅ Connected to bot');
+                console.log('✅ WebSocket connected');
                 reconnectAttempts = 0;
                 updateConnectionStatus(true);
             };
@@ -418,29 +494,53 @@
             ws.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
+                    console.log('📥 WebSocket data:', data);
                     updateDashboard(data);
                 } catch (error) {
-                    console.error('Error parsing message:', error);
+                    console.error('❌ Error parsing message:', error);
                 }
             };
             
             ws.onerror = (error) => {
-                console.error('WebSocket error:', error);
+                console.error('❌ WebSocket error:', error);
                 updateConnectionStatus(false);
             };
             
             ws.onclose = () => {
-                console.log('❌ Disconnected from bot');
+                console.log('🔌 WebSocket disconnected');
                 updateConnectionStatus(false);
                 
                 if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                     reconnectAttempts++;
-                    console.log(`Reconnecting... Attempt ${reconnectAttempts}`);
-                    setTimeout(connectWebSocket, 3000);
+                    const delay = Math.min(1000 * reconnectAttempts, 5000);
+                    console.log(`🔄 Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+                    setTimeout(connectWebSocket, delay);
                 }
             };
         }
         
+        // Polling Function (Every 2 seconds)
+        async function pollStatus() {
+            try {
+                console.log('🔄 Polling data...');
+                const response = await fetch(`${API_URL}/api/status`);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const data = await response.json();
+                console.log('📊 Polled data:', data);
+                updateDashboard(data);
+                updateConnectionStatus(true);
+                
+            } catch (error) {
+                console.error('❌ Polling error:', error);
+                updateConnectionStatus(false);
+            }
+        }
+        
+        // Update Connection Status
         function updateConnectionStatus(connected) {
             const statusEl = document.getElementById('connection-status');
             if (connected) {
@@ -452,7 +552,10 @@
             }
         }
         
+        // Main Dashboard Update Function
         function updateDashboard(data) {
+            lastUpdateTime = Date.now();
+            
             // Status badge
             const statusBadge = document.getElementById('status-badge');
             if (data.running) {
@@ -463,12 +566,30 @@
                 statusBadge.textContent = '⏸️ STOPPED';
             }
             
-            // Price & Balance
-            document.getElementById('balance').textContent = `$${data.balance.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+            // Balance & P&L
+            if (data.balance !== undefined) {
+                document.getElementById('balance').textContent = 
+                    `$${data.balance.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+            }
             
+            if (data.pnl !== undefined) {
+                const pnlEl = document.getElementById('pnl');
+                const pnlValue = parseFloat(data.pnl);
+                pnlEl.textContent = `${pnlValue >= 0 ? '+' : ''}$${Math.abs(pnlValue).toFixed(2)}`;
+                pnlEl.className = pnlValue >= 0 ? 'pnl-positive' : 'pnl-negative';
+            }
+            
+            // Price
             if (data.current_price && data.current_price.bid) {
                 document.getElementById('price').textContent = `$${data.current_price.bid.toFixed(2)}`;
+                document.getElementById('bid').textContent = data.current_price.bid.toFixed(2);
+                document.getElementById('ask').textContent = data.current_price.ask.toFixed(2);
                 document.getElementById('spread').textContent = data.current_price.spread.toFixed(2);
+            }
+            
+            // Open Positions
+            if (data.open_positions_count !== undefined) {
+                document.getElementById('open-positions').textContent = data.open_positions_count;
             }
             
             // Signal
@@ -478,38 +599,70 @@
             signalBadge.className = `signal-badge signal-${signal.toLowerCase()}`;
             
             // SMC Indicators
-            document.getElementById('market-structure').textContent = data.market_structure || 'NEUTRAL';
-            document.getElementById('zone').textContent = data.zone || 'EQUILIBRIUM';
-            document.getElementById('session').textContent = data.smc_indicators?.session || 'CLOSED';
-            document.getElementById('fvg-bullish').textContent = data.smc_indicators?.fvg_bullish ? '✅' : '❌';
-            document.getElementById('fvg-bearish').textContent = data.smc_indicators?.fvg_bearish ? '✅' : '❌';
-            document.getElementById('bos').textContent = data.smc_indicators?.bos || 'None';
+            if (data.smc_indicators) {
+                document.getElementById('session').textContent = data.smc_indicators.session || 'CLOSED';
+                document.getElementById('session-mini').textContent = data.smc_indicators.session || '-';
+                document.getElementById('fvg-bullish').textContent = data.smc_indicators.fvg_bullish ? '✅' : '❌';
+                document.getElementById('fvg-bearish').textContent = data.smc_indicators.fvg_bearish ? '✅' : '❌';
+                document.getElementById('bos').textContent = data.smc_indicators.bos || 'None';
+            }
+            
+            // Market Structure
+            if (data.market_structure) {
+                document.getElementById('market-structure').textContent = data.market_structure;
+                document.getElementById('structure-mini').textContent = data.market_structure;
+            }
+            
+            if (data.zone) {
+                document.getElementById('zone').textContent = data.zone;
+            }
             
             // Technical Levels
-            const levels = data.technical_levels || {};
-            document.getElementById('ema200').textContent = `$${(levels.ema200 || 0).toFixed(2)}`;
-            document.getElementById('ma20').textContent = `$${(levels.ma20 || 0).toFixed(2)}`;
-            document.getElementById('ma50').textContent = `$${(levels.ma50 || 0).toFixed(2)}`;
-            document.getElementById('support').textContent = `$${(levels.support || 0).toFixed(2)}`;
-            document.getElementById('resistance').textContent = `$${(levels.resistance || 0).toFixed(2)}`;
-            document.getElementById('atr').textContent = `$${(levels.atr || 0).toFixed(2)}`;
+            if (data.technical_levels) {
+                const levels = data.technical_levels;
+                document.getElementById('ema200').textContent = `$${(levels.ema200 || 0).toFixed(2)}`;
+                document.getElementById('ma20').textContent = `$${(levels.ma20 || 0).toFixed(2)}`;
+                document.getElementById('ma50').textContent = `$${(levels.ma50 || 0).toFixed(2)}`;
+                document.getElementById('support').textContent = `$${(levels.support || 0).toFixed(2)}`;
+                document.getElementById('resistance').textContent = `$${(levels.resistance || 0).toFixed(2)}`;
+                document.getElementById('atr').textContent = `$${(levels.atr || 0).toFixed(2)}`;
+            }
             
             // Trade History
             if (data.trades && data.trades.length > 0) {
-                const historyHTML = data.trades.slice(0, 10).map(trade => `
-                    <div class="trade-item trade-${trade.type.toLowerCase()}">
-                        <div style="display: flex; justify-content: space-between;">
-                            <strong>#${trade.id} ${trade.type}</strong>
-                            <span>${trade.lot_size} lots</span>
+                const historyHTML = data.trades.slice(0, 15).map(trade => {
+                    const pnlDisplay = trade.pnl !== undefined && trade.status === 'OPEN' 
+                        ? `<div style="margin-top: 5px; font-weight: bold; color: ${trade.pnl >= 0 ? '#00ff00' : '#ff6b6b'};">
+                             P&L: ${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)}
+                           </div>`
+                        : '';
+                    
+                    const lotDisplay = trade.lot_size > 0 ? `${trade.lot_size} lots` : '0.00 lots';
+                    const statusClass = trade.status === 'OPEN' ? 'trade-open' : 'trade-signal';
+                    
+                    return `
+                        <div class="trade-item trade-${trade.type.toLowerCase()} ${statusClass}">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <strong>#${trade.id} ${trade.type}</strong>
+                                <span style="background: rgba(255,255,255,0.1); padding: 3px 8px; border-radius: 5px; font-size: 0.9em;">
+                                    ${lotDisplay}
+                                </span>
+                            </div>
+                            <div style="margin-top: 8px;">
+                                Entry: $${trade.entry.toFixed(2)}
+                                ${trade.sl ? `| SL: $${trade.sl.toFixed(2)} | TP: $${trade.tp.toFixed(2)}` : ''}
+                            </div>
+                            ${pnlDisplay}
+                            <div style="font-size: 0.85em; opacity: 0.7; margin-top: 8px; display: flex; justify-content: space-between;">
+                                <span>${trade.time}</span>
+                                <span style="font-weight: bold; color: ${trade.status === 'OPEN' ? '#00ff00' : '#ffaa00'};">
+                                    ${trade.status}
+                                </span>
+                            </div>
                         </div>
-                        <div style="margin-top: 5px;">
-                            Entry: $${trade.entry.toFixed(2)}
-                        </div>
-                        <div style="font-size: 0.9em; opacity: 0.8; margin-top: 5px;">
-                            ${trade.time} • ${trade.status}
-                        </div>
-                    </div>
-                `).join('');
+                    `;
+                }).join('');
+                
                 document.getElementById('trade-history').innerHTML = historyHTML;
             } else {
                 document.getElementById('trade-history').innerHTML = `
@@ -521,9 +674,20 @@
             }
             
             // Last update
-            document.getElementById('last-update').textContent = `Last update: ${data.last_update || 'Just now'}`;
+            const now = new Date();
+            const timeString = now.toLocaleString('en-IN', { 
+                timeZone: 'Asia/Kolkata',
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+            document.getElementById('last-update').textContent = `Last update: ${timeString} IST`;
+            
+            console.log('✅ Dashboard updated successfully');
         }
         
+        // Execute Manual Trade
         async function executeTrade(type) {
             const confirmed = confirm(`🔔 Execute ${type.toUpperCase()} trade for 0.01 lots?\n\nThis will send a manual trade order.`);
             if (!confirmed) return;
@@ -536,6 +700,8 @@
                 
                 if (result.status === 'success') {
                     alert(`✅ ${type.toUpperCase()} trade executed successfully!\n\nEntry: $${result.trade.entry.toFixed(2)}\nLot Size: ${result.trade.lot_size}`);
+                    // Immediate refresh after trade
+                    pollStatus();
                 } else {
                     alert(`❌ Error: ${result.message}`);
                 }
@@ -545,24 +711,38 @@
             }
         }
         
-        // Fallback polling if WebSocket fails
-        async function pollStatus() {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                try {
-                    const response = await fetch(`${API_URL}/api/status`);
-                    const data = await response.json();
-                    updateDashboard(data);
-                    updateConnectionStatus(true);
-                } catch (error) {
-                    console.error('Polling error:', error);
-                    updateConnectionStatus(false);
-                }
-            }
+        // Initialize Dashboard
+        function initDashboard() {
+            console.log('🚀 Initializing dashboard...');
+            
+            // Try WebSocket connection
+            connectWebSocket();
+            
+            // Start polling immediately
+            pollStatus();
+            
+            // Set up polling interval (every 2 seconds)
+            pollingInterval = setInterval(pollStatus, 2000);
+            console.log('✅ Polling started (every 2 seconds)');
         }
         
-        // Initialize
-        connectWebSocket();
-        setInterval(pollStatus, 5000); // Poll every 5 seconds as backup
+        // Check for stale data
+        setInterval(() => {
+            const timeSinceUpdate = Date.now() - lastUpdateTime;
+            if (timeSinceUpdate > 10000) { // 10 seconds
+                console.log('⚠️ Data is stale, forcing refresh...');
+                pollStatus();
+            }
+        }, 5000);
+        
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', initDashboard);
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (ws) ws.close();
+            if (pollingInterval) clearInterval(pollingInterval);
+        });
         
         // Prevent page from sleeping on mobile
         if ('wakeLock' in navigator) {
@@ -570,8 +750,9 @@
             const requestWakeLock = async () => {
                 try {
                     wakeLock = await navigator.wakeLock.request('screen');
+                    console.log('🔒 Wake Lock active');
                 } catch (err) {
-                    console.log('Wake Lock error:', err);
+                    console.log('⚠️ Wake Lock error:', err);
                 }
             };
             requestWakeLock();

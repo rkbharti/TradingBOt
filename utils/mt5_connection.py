@@ -116,50 +116,60 @@ class MT5Connection:
         print(f"📊 Fetched {len(df)} bars of {symbol} {timeframe} data")
         return df
     
-    def place_demo_order(self, order_type, lot_size, stop_loss, take_profit):
-        """Place a demo trade order (paper trading only)"""
-        if not self.connected:
-            print("⚠️ MT5 not connected")
-            return False
+    def place_order(self, signal, lot_size, stop_loss, take_profit):
+        """Place a REAL order in MT5"""
+        try:
+            symbol = self.symbol
             
-        symbol = self.config["symbol"]
-        price = self.get_current_price(symbol)
-        
-        if price is None:
+            # Get current price
+            price = self.get_current_price()
+            if not price:
+                print("❌ Cannot get current price")
+                return False
+            
+            # Determine order type and price
+            if signal == "BUY":
+                order_type = mt5.ORDER_TYPE_BUY
+                price_value = price['ask']
+            else:  # SELL
+                order_type = mt5.ORDER_TYPE_SELL
+                price_value = price['bid']
+            
+            # Prepare order request
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": lot_size,
+                "type": order_type,
+                "price": price_value,
+                "sl": stop_loss,
+                "tp": take_profit,
+                "deviation": 20,
+                "magic": 234000,
+                "comment": "XAUUSD Bot",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+            
+            # Send order
+            result = mt5.order_send(request)
+            
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                print(f"❌ Order failed: {result.comment} (Code: {result.retcode})")
+                return False
+            
+            print(f"✅ REAL ORDER PLACED:")
+            print(f"   Order: {result.order}")
+            print(f"   Volume: {result.volume}")
+            print(f"   Price: {result.price}")
+            print(f"   Deal: {result.deal}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Order placement error: {e}")
             return False
-        
-        # Calculate order parameters
-        if order_type.upper() == "BUY":
-            order_type_mt5 = mt5.ORDER_TYPE_BUY
-            price_exec = price['ask']
-        elif order_type.upper() == "SELL":
-            order_type_mt5 = mt5.ORDER_TYPE_SELL
-            price_exec = price['bid']
-        else:
-            print("❌ Invalid order type")
-            return False
-        
-        # Prepare order request
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": lot_size,
-            "type": order_type_mt5,
-            "price": price_exec,
-            "sl": stop_loss,
-            "tp": take_profit,
-            "deviation": 10,
-            "magic": 12345,
-            "comment": "SMC Bot Demo",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        
-        # In demo mode, we'll just log the order instead of actually placing it
-        print(f"📋 DEMO ORDER: {order_type} {lot_size} lots | SL: {stop_loss:.2f} | TP: {take_profit:.2f}")
-        print(f"💡 Note: This is paper trading - no real order placed")
-        
-        return True
+
     
     def shutdown(self):
         """Shutdown MT5 connection"""
