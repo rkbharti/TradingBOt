@@ -284,8 +284,8 @@ class XAUUSDTradingBot:
         print(f"   ATR: ${atr:.2f}")
         print(f"   Zone: {zone} | Structure: {market_structure}")
         
-        # Place demo order
-        order_placed = self.mt5.place_order(signal, lot_size, stop_loss, take_profit)
+        # ⚠️ CHANGE THIS LINE - Place REAL order instead of demo
+        order_placed = self.mt5.place_order(signal, lot_size, stop_loss, take_profit)  # ✅ REAL ORDER
         
         if order_placed:
             # Track position
@@ -302,9 +302,9 @@ class XAUUSDTradingBot:
                 'market_structure': market_structure
             }
             self.open_positions.append(position)
-            print(f"\n✅ Order placed successfully!")
         else:
             print(f"\n❌ Order placement failed")
+
     
     def log_trade_analysis(self, signal, reason, price, stats):
         """Log enhanced trade analysis for review"""

@@ -3,7 +3,7 @@
     "password": "Q_5mEmVb",
     "server": "MetaQuotes-Demo",
     "symbol": "XAUUSD",
-    "timeframe": "M5",
+    "timeframe": "TIMEFRAME_M5",
     "lot_size": 0.01,
     "max_spread": 2.0,
     "risk_per_trade": 1.0

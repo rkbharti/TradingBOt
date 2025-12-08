@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, time
 
+
 class SMCStrategy:
     """
     Enhanced Smart Money Concept (SMC) Strategy for XAUUSD
@@ -13,6 +14,16 @@ class SMCStrategy:
         self.last_signal = "HOLD"
         self.market_structure = "NEUTRAL"  # BULLISH, BEARISH, NEUTRAL
         self.last_bos = None
+    
+    def convert_mt5_data_to_dataframe(self, data):
+        """Convert MT5 numpy array to pandas DataFrame with proper columns"""
+        df = pd.DataFrame(data)
+        
+        # MT5 returns: time, open, high, low, close, tick_volume, spread, real_volume
+        if 'close' not in df.columns and len(df.columns) >= 5:
+            df.columns = ['time', 'open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']
+        
+        return df
         
     def calculate_atr(self, df, period=14):
         """Calculate Average True Range for volatility measurement"""
@@ -191,10 +202,13 @@ class SMCStrategy:
         # Asian session - lower volume, avoid for gold
         return False, "ASIAN"
     
-    def generate_signal(self, df):
+    def generate_signal(self, data):
         """Generate enhanced SMC-based trading signals"""
-        if len(df) < 200:
+        if data is None or len(data) < 200:
             return "HOLD", "Insufficient data for analysis"
+        
+        # Convert MT5 numpy array to DataFrame with proper columns
+        df = self.convert_mt5_data_to_dataframe(data)
         
         # Apply all indicators
         df = self.calculate_indicators(df)
@@ -306,17 +320,23 @@ class SMCStrategy:
         self.last_signal = signal
         return signal, reason
     
-    def get_strategy_stats(self, df):
+    def get_strategy_stats(self, data):
         """Return enhanced strategy statistics"""
-        if len(df) < 2:
+        if data is None or len(data) < 2:
             return {}
+        
+        # Convert MT5 data to DataFrame
+        df = self.convert_mt5_data_to_dataframe(data)
+        df = self.calculate_indicators(df)
+        df = self.detect_fair_value_gaps(df)
+        df = self.detect_break_of_structure(df)
+        df = self.calculate_premium_discount_zones(df)
         
         current = df.iloc[-1]
         in_session, session_name = self.check_trading_session()
         
         return {
             'current_price': current['close'],
-            'ma5': current.get('MA5', 0),
             'ma20': current.get('MA20', 0),
             'ma50': current.get('MA50', 0),
             'ema200': current.get('EMA200', 0),
