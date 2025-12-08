@@ -6,6 +6,25 @@ import matplotlib.pyplot as plt
 from utils.mt5_connection import MT5Connection
 from strategy.smc_strategy import SMCStrategy
 from strategy.stoploss_calc import StopLossCalculator
+import threading
+import sys
+import os
+
+# Add API path for dashboard integration
+sys.path.append(os.path.join(os.path.dirname(__file__), 'api'))
+
+# Import dashboard functions at module level
+DASHBOARD_AVAILABLE = False
+update_bot_state = None
+
+try:
+    from api.server import update_bot_state as _update_bot_state
+    update_bot_state = _update_bot_state
+    DASHBOARD_AVAILABLE = True
+    print("✅ Dashboard integration loaded")
+except ImportError as e:
+    print(f"⚠️ Dashboard not available: {e}")
+
 
 class XAUUSDTradingBot:
     """Enhanced trading bot with advanced SMC strategy for XAUUSD"""
@@ -18,6 +37,10 @@ class XAUUSDTradingBot:
         self.running = False
         self.trade_log = []
         self.open_positions = []
+        
+        # Dashboard state tracking
+        self.last_signal = "HOLD"
+        self.last_analysis = {}
         
     def initialize(self):
         """Initialize the trading bot"""
@@ -45,6 +68,9 @@ class XAUUSDTradingBot:
         print(f"🎯 Risk per Trade: {self.mt5.config.get('risk_per_trade', 1.0)}%")
         print(f"🌍 Time Zone: IST (UTC+5:30)")
         print("=" * 60)
+        
+        # Initial dashboard update
+        self.update_dashboard_state()
         
         return True
     
@@ -84,6 +110,27 @@ class XAUUSDTradingBot:
         # Get enhanced strategy statistics
         stats = self.strategy.get_strategy_stats(historical_data)
         
+        # Store for dashboard
+        self.last_signal = signal
+        self.last_analysis = {
+            'smc_indicators': {
+                'fvg_bullish': stats.get('fvg_bullish', False),
+                'fvg_bearish': stats.get('fvg_bearish', False),
+                'bos': str(stats.get('bos', 'None')) if stats.get('bos') else 'None',
+                'session': stats.get('session', 'CLOSED')
+            },
+            'technical_levels': {
+                'ma20': stats.get('ma20', 0),
+                'ma50': stats.get('ma50', 0),
+                'ema200': stats.get('ema200', 0),
+                'support': stats.get('support', 0),
+                'resistance': stats.get('resistance', 0),
+                'atr': stats.get('atr', 0)
+            },
+            'market_structure': stats.get('market_structure', 'NEUTRAL'),
+            'zone': stats.get('zone', 'EQUILIBRIUM')
+        }
+        
         # Display enhanced analysis
         self.display_enhanced_analysis(current_price, signal, reason, stats)
         
@@ -102,6 +149,9 @@ class XAUUSDTradingBot:
         
         # Log this analysis
         self.log_trade_analysis(signal, reason, current_price, stats)
+        
+        # Update dashboard after analysis
+        self.update_dashboard_state()
     
     def display_enhanced_analysis(self, price, signal, reason, stats):
         """Display enhanced market analysis with SMC indicators"""
@@ -200,6 +250,63 @@ class XAUUSDTradingBot:
         }
         self.trade_log.append(log_entry)
     
+    def update_dashboard_state(self):
+        """Update dashboard with current bot state"""
+        if not DASHBOARD_AVAILABLE or update_bot_state is None:
+            return
+        
+        try:
+            # Get current data
+            account_info = self.mt5.get_account_info()
+            current_price = self.mt5.get_current_price()
+            
+            # Helper function to convert numpy types to Python types
+            def convert_value(val):
+                """Convert numpy/pandas types to native Python types"""
+                import numpy as np
+                if isinstance(val, (np.bool_, bool)) or str(type(val).__name__) == 'bool_':
+                    return bool(val)
+                elif isinstance(val, (np.integer, np.int64, np.int32)):
+                    return int(val)
+                elif isinstance(val, (np.floating, np.float64, np.float32)):
+                    return float(val)
+                elif val is None:
+                    return None
+                return val
+            
+            # Get SMC indicators with type conversion
+            smc = self.last_analysis.get('smc_indicators', {})
+            tech = self.last_analysis.get('technical_levels', {})
+            
+            state = {
+                "running": bool(self.running),
+                "balance": float(account_info.balance) if account_info else 100000.0,
+                "current_price": current_price if current_price else {"bid": 0.0, "ask": 0.0, "spread": 0.0},
+                "last_signal": str(self.last_signal),
+                "smc_indicators": {
+                    "fvg_bullish": bool(convert_value(smc.get('fvg_bullish', False))),
+                    "fvg_bearish": bool(convert_value(smc.get('fvg_bearish', False))),
+                    "bos": str(smc.get('bos', 'None')) if smc.get('bos') else 'None',
+                    "session": str(smc.get('session', 'CLOSED'))
+                },
+                "technical_levels": {
+                    "ma20": float(convert_value(tech.get('ma20', 0))),
+                    "ma50": float(convert_value(tech.get('ma50', 0))),
+                    "ema200": float(convert_value(tech.get('ema200', 0))),
+                    "support": float(convert_value(tech.get('support', 0))),
+                    "resistance": float(convert_value(tech.get('resistance', 0))),
+                    "atr": float(convert_value(tech.get('atr', 0)))
+                },
+                "market_structure": str(self.last_analysis.get('market_structure', 'NEUTRAL')),
+                "zone": str(self.last_analysis.get('zone', 'EQUILIBRIUM')),
+            }
+            
+            update_bot_state(state)
+            print("📊 Dashboard updated")
+            
+        except Exception as e:
+            print(f"⚠️ Dashboard update error: {e}")
+    
     def save_trade_log(self, filename="trade_log.json"):
         """Save trade log to file"""
         try:
@@ -254,15 +361,100 @@ class XAUUSDTradingBot:
         print(f"Total iterations: {len(self.trade_log)}")
         print(f"Open positions: {len(self.open_positions)}")
 
+
+# Global bot instance for API access
+bot_instance = None
+
+
+def execute_manual_trade(trade_type: str, lot_size: float):
+    """Execute manual trade from dashboard"""
+    global bot_instance
+    
+    if bot_instance is None:
+        return False
+    
+    try:
+        # Get current price
+        current_price = bot_instance.mt5.get_current_price()
+        if not current_price:
+            return False
+        
+        # Simple execution for manual trades
+        entry_price = current_price['ask'] if trade_type.upper() == "BUY" else current_price['bid']
+        
+        # Use basic stop loss (50 pips) for manual trades
+        pip_value = 0.01
+        if trade_type.upper() == "BUY":
+            stop_loss = entry_price - (50 * pip_value)
+            take_profit = entry_price + (100 * pip_value)
+        else:
+            stop_loss = entry_price + (50 * pip_value)
+            take_profit = entry_price - (100 * pip_value)
+        
+        # Place order
+        result = bot_instance.mt5.place_demo_order(
+            trade_type.upper(),
+            lot_size,
+            stop_loss,
+            take_profit
+        )
+        
+        print(f"📝 Manual {trade_type.upper()} trade executed from dashboard")
+        return result
+        
+    except Exception as e:
+        print(f"❌ Manual trade error: {e}")
+        return False
+
+
+def start_api_server():
+    """Start the dashboard API server"""
+    try:
+        from api.server import app
+        import uvicorn
+        import socket
+        
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        
+        print("\n" + "="*60)
+        print("📱 DASHBOARD SERVER STARTING...")
+        print("="*60)
+        print(f"🖥️  Laptop Access:  http://localhost:8000/dashboard")
+        print(f"📱 Phone Access:    http://{local_ip}:8000/dashboard")
+        print(f"📊 API Docs:        http://localhost:8000/docs")
+        print("="*60)
+        print("✨ Copy the Phone Access URL to use on your mobile")
+        print("🌐 Make sure phone is on the same WiFi network")
+        print("="*60 + "\n")
+        
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+    except Exception as e:
+        print(f"❌ API Server error: {e}")
+
+
 def main():
-    """Main function to run the trading bot"""
+    """Main function to run the trading bot with dashboard"""
+    global bot_instance
+    
     print("\n" + "="*60)
     print(" " * 10 + "XAUUSD SMC TRADING BOT v2.0")
     print(" " * 15 + "Enhanced Algorithm")
     print("="*60 + "\n")
     
-    bot = XAUUSDTradingBot()
-    bot.run(interval_seconds=60)  # Check every minute
+    print("⏳ Starting dashboard server...")
+    
+    # Start API server in background thread
+    api_thread = threading.Thread(target=start_api_server, daemon=True)
+    api_thread.start()
+    
+    # Give API server time to start
+    time.sleep(3)
+    
+    # Create and run bot
+    bot_instance = XAUUSDTradingBot()
+    bot_instance.run(interval_seconds=60)  # Check every minute
+
 
 if __name__ == "__main__":
     main()
