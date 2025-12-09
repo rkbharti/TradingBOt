@@ -21,6 +21,13 @@ class StopLossCalculator:
         # ✅ DAY 3 FIX: Get broker specifications
         self.min_stop_distance = self._get_min_stop_distance()
         self.symbol_info = mt5.symbol_info(self.symbol)
+        
+        print(f"🔧 StopLoss Calculator initialized:")
+        print(f"   Broker min stop distance: ${self.min_stop_distance:.2f}")
+        if self.symbol_info:
+            print(f"   Min lot: {self.symbol_info.volume_min}")
+            print(f"   Max lot: {self.symbol_info.volume_max}")
+            print(f"   Lot step: {self.symbol_info.volume_step}")
     
     def _get_min_stop_distance(self):
         """
@@ -42,13 +49,16 @@ class StopLossCalculator:
                 # Add safety buffer (10 points = $0.10)
                 buffer = 10 * point
                 
-                return min_distance + buffer
+                total_min = min_distance + buffer
+                
+                # Ensure at least $0.50 minimum
+                return max(total_min, 0.50)
             else:
-                # Default fallback: 0.5 USD
-                return 0.5
+                # Default fallback: 0.50 USD
+                return 0.50
         except Exception as e:
             print(f"⚠️ Could not get broker stop distance: {e}")
-            return 0.5  # Safe default
+            return 0.50  # Safe default
     
     def calculate_stop_loss_take_profit(self, signal, entry_price, atr, zone="EQUILIBRIUM", market_structure="NEUTRAL"):
         """
@@ -105,11 +115,11 @@ class StopLossCalculator:
         min_distance_with_spread = self.min_stop_distance + spread
         
         if sl_distance < min_distance_with_spread:
-            print(f"⚠️ SL too close ({sl_distance:.2f}), adjusting to broker minimum + spread")
+            print(f"🔧 SL distance too small (${sl_distance:.2f}), adjusting to ${min_distance_with_spread:.2f}")
             sl_distance = min_distance_with_spread
         
         if tp_distance < min_distance_with_spread:
-            print(f"⚠️ TP too close ({tp_distance:.2f}), adjusting to broker minimum + spread")
+            print(f"🔧 TP distance too small (${tp_distance:.2f}), adjusting to ${min_distance_with_spread:.2f}")
             tp_distance = min_distance_with_spread
         
         # Calculate actual SL/TP prices
@@ -125,14 +135,14 @@ class StopLossCalculator:
         actual_tp_distance = abs(take_profit - entry_price)
         
         if actual_sl_distance < self.min_stop_distance:
-            print(f"🔧 Final SL adjustment needed")
+            print(f"🔧 Final SL adjustment needed (${actual_sl_distance:.2f} < ${self.min_stop_distance:.2f})")
             if signal == "BUY":
                 stop_loss = entry_price - self.min_stop_distance - spread
             else:
                 stop_loss = entry_price + self.min_stop_distance + spread
         
         if actual_tp_distance < self.min_stop_distance:
-            print(f"🔧 Final TP adjustment needed")
+            print(f"🔧 Final TP adjustment needed (${actual_tp_distance:.2f} < ${self.min_stop_distance:.2f})")
             if signal == "BUY":
                 take_profit = entry_price + self.min_stop_distance + spread
             else:
@@ -178,13 +188,15 @@ class StopLossCalculator:
             required_margin = self._calculate_required_margin(entry_price, lot_size)
             free_margin = self._get_free_margin()
             
-            if required_margin > free_margin:
+            if required_margin > free_margin * 0.8:  # Use only 80% of free margin
                 # Reduce lot size to fit available margin
-                safe_lot_size = (free_margin / required_margin) * lot_size * 0.9  # 90% safety factor
+                safe_lot_size = (free_margin * 0.8 / required_margin) * lot_size
                 safe_lot_size = round(safe_lot_size / lot_step) * lot_step
                 safe_lot_size = max(min_lot, safe_lot_size)
                 
                 print(f"⚠️ Margin insufficient for {lot_size:.2f} lots")
+                print(f"   Required margin: ${required_margin:.2f}")
+                print(f"   Free margin: ${free_margin:.2f}")
                 print(f"   Reducing to {safe_lot_size:.2f} lots (margin-safe)")
                 
                 lot_size = safe_lot_size
