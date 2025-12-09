@@ -197,20 +197,49 @@ class XAUUSDTradingBot:
         historical_trades = self.load_historical_trades()
         print(f"📜 Loaded {len(historical_trades)} historical trades from trade_log.json")
         
-        # ✅ DAY 2 FIX: Check for stale position tracking on startup
+        # ✅ IMPROVED: Load existing MT5 positions on startup
         print("\n🔄 Checking position tracking on startup...")
         print(f"   Bot was tracking: {len(self.open_positions)} positions")
         
-        # Sync with MT5 to clean up any stale tracking
+        # First, try to load existing MT5 positions
+        mt5_positions = self.mt5.get_open_positions()
+        if mt5_positions and len(mt5_positions) > 0:
+            print(f"   Found {len(mt5_positions)} open positions in MT5")
+            
+            # Import existing MT5 positions into bot tracking
+            for pos in mt5_positions:
+                # Create position entry for bot tracking
+                position = {
+                    'ticket': pos['ticket'],
+                    'signal': pos['type'],  # 'BUY' or 'SELL'
+                    'entry_price': pos['price_open'],
+                    'stop_loss': pos['sl'],
+                    'take_profit': pos['tp'],
+                    'lot_size': pos['volume'],
+                    'entry_time': datetime.now(),  # Approximate
+                    'risk_percent': 0,  # Unknown
+                    'atr': 0,  # Unknown
+                    'zone': 'UNKNOWN',
+                    'market_structure': 'UNKNOWN'
+                }
+                self.open_positions.append(position)
+                print(f"   ✅ Imported: {pos['type']} | Ticket: {pos['ticket']} | {pos['volume']} lots | P&L: ${pos['profit']:.2f}")
+            
+            print(f"   Imported {len(self.open_positions)} positions from MT5")
+        else:
+            print(f"   No open positions in MT5")
+        
+        # Then sync to ensure consistency
         self.sync_positions_with_mt5()
         
-        print(f"   After sync: {len(self.open_positions)} positions")
+        print(f"   Now tracking: {len(self.open_positions)} positions")
         print("✅ Position tracking initialized")
         
         # Initial dashboard update
         self.update_dashboard_state()
         
         return True
+
     
     def fetch_market_data(self):
         """Fetch current market data"""
@@ -237,11 +266,12 @@ class XAUUSDTradingBot:
             # ✅ DAY 2 FIX: Sync positions with MT5 FIRST (before any checks)
             self.sync_positions_with_mt5()
             
-            # Check if we've reached max positions
-            if len(self.open_positions) >= self.max_positions:
-                print(f"⚠️ Max positions ({self.max_positions}) reached. Waiting...")
+            # ✅ IMPROVED: Always analyze market, but block trades if at max
+            at_max_positions = len(self.open_positions) >= self.max_positions
+            
+            if at_max_positions:
+                print(f"⚠️ Max positions ({self.max_positions}) reached. Monitoring only...")
                 print(f"   Currently tracking: {len(self.open_positions)} positions")
-                return
             
             print(f"\n📊 Analyzing market at {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
             
@@ -282,18 +312,20 @@ class XAUUSDTradingBot:
             # Display enhanced analysis
             self.display_enhanced_analysis(current_price, signal, reason, stats)
             
-            # Check risk limits before trading
-            total_risk = sum([pos.get('risk_percent', 0) for pos in self.open_positions])
-            can_trade, risk_msg = self.risk_calculator.check_risk_limits(
-                self.open_positions, total_risk
-            )
-            
-            # Execute trade if signal is not HOLD and risk limits allow
-            if signal != "HOLD":
+            # ✅ Only execute trades if NOT at max positions
+            if not at_max_positions and signal != "HOLD":
+                # Check risk limits before trading
+                total_risk = sum([pos.get('risk_percent', 0) for pos in self.open_positions])
+                can_trade, risk_msg = self.risk_calculator.check_risk_limits(
+                    self.open_positions, total_risk
+                )
+                
                 if can_trade:
                     self.execute_enhanced_trade(signal, current_price, historical_data, stats)
                 else:
                     print(f"⚠️  Trade blocked: {risk_msg}")
+            elif at_max_positions and signal != "HOLD":
+                print(f"🔔 Signal: {signal} detected, but max positions reached. Skipping trade.")
             
             # Log this analysis
             self.log_trade_analysis(signal, reason, current_price, stats)
@@ -305,6 +337,7 @@ class XAUUSDTradingBot:
             print(f"❌ Error in analyze_and_trade: {e}")
             import traceback
             traceback.print_exc()
+
     
     def display_enhanced_analysis(self, price, signal, reason, stats):
         """Display enhanced market analysis with SMC indicators"""
