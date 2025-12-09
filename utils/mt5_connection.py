@@ -96,42 +96,94 @@ class MT5Connection:
             return None
     
     def place_order(self, signal, lot_size, stop_loss, take_profit):
-        """Place a REAL order in MT5 (Demo or Live)"""
+        """
+        Place a REAL order in MT5 with proper error handling and retry logic.
+        
+        Args:
+            signal (str): "BUY" or "SELL"
+            lot_size (float): Position size in lots
+            stop_loss (float): Stop loss price
+            take_profit (float): Take profit price
+            
+        Returns:
+            int: Position ticket number if successful, None if failed
+        """
+        import time
+        
         try:
             symbol = self.symbol
             
-            # Get current price
-            price = self.get_current_price()
-            if not price:
-                print("❌ Cannot get current price")
-                return False
+            # ===== VALIDATE SYMBOL =====
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                print(f"❌ Symbol {symbol} not found")
+                return None
+            
+            # Check if symbol is available for trading
+            if not symbol_info.visible:
+                print(f"⚠️ Symbol {symbol} not visible, attempting to select...")
+                if not mt5.symbol_select(symbol, True):
+                    print(f"❌ Failed to select {symbol}")
+                    return None
+            
+            # ===== GET FRESH TICK (CRITICAL!) =====
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                print("❌ Cannot get current tick")
+                return None
             
             # Determine order type and price
             if signal == "BUY":
                 order_type = mt5.ORDER_TYPE_BUY
-                price_value = price['ask']
+                price_value = tick.ask
             else:  # SELL
                 order_type = mt5.ORDER_TYPE_SELL
-                price_value = price['bid']
+                price_value = tick.bid
             
-            # Get symbol info for volume constraints
-            symbol_info = mt5.symbol_info(symbol)
-            if symbol_info is None:
-                print(f"❌ Symbol {symbol} not found")
-                return False
+            print(f"\n📋 Preparing {signal} order...")
+            print(f"   Current Bid: {tick.bid:.2f} | Ask: {tick.ask:.2f}")
+            print(f"   Entry Price: {price_value:.2f}")
+            print(f"   Initial SL: {stop_loss:.2f} | TP: {take_profit:.2f}")
             
-            # Check if symbol is available for trading
-            if not symbol_info.visible:
-                print(f"❌ Symbol {symbol} is not visible")
-                if not mt5.symbol_select(symbol, True):
-                    print(f"❌ Failed to select {symbol}")
-                    return False
+            # ===== VALIDATE SL/TP DISTANCE (CRITICAL!) =====
+            min_distance_points = symbol_info.trade_stops_level * symbol_info.point
+            min_distance_price = min_distance_points
             
-            # Round lot size to valid volume step
+            # Calculate actual distances
+            sl_distance = abs(price_value - stop_loss)
+            tp_distance = abs(take_profit - price_value)
+            
+            print(f"   Broker Min Distance: {min_distance_price:.2f}")
+            print(f"   Your SL Distance: {sl_distance:.2f}")
+            print(f"   Your TP Distance: {tp_distance:.2f}")
+            
+            # Adjust SL if too close
+            if sl_distance < min_distance_price:
+                print(f"⚠️ Stop loss too close! Adjusting...")
+                buffer = symbol_info.point * 10  # Add 10-point buffer
+                if signal == "BUY":
+                    stop_loss = price_value - min_distance_price - buffer
+                else:
+                    stop_loss = price_value + min_distance_price + buffer
+                print(f"   Adjusted SL: {stop_loss:.2f}")
+            
+            # Adjust TP if too close
+            if tp_distance < min_distance_price:
+                print(f"⚠️ Take profit too close! Adjusting...")
+                buffer = symbol_info.point * 10
+                if signal == "BUY":
+                    take_profit = price_value + min_distance_price + buffer
+                else:
+                    take_profit = price_value - min_distance_price - buffer
+                print(f"   Adjusted TP: {take_profit:.2f}")
+            
+            # ===== NORMALIZE LOT SIZE =====
             lot_size = round(lot_size / symbol_info.volume_step) * symbol_info.volume_step
             lot_size = max(symbol_info.volume_min, min(lot_size, symbol_info.volume_max))
             
-            # Prepare order request
+            print(f"   Final Volume: {lot_size} lots")
+            
+            # ===== PREPARE ORDER REQUEST =====
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
@@ -147,40 +199,70 @@ class MT5Connection:
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
             
-            print(f"\n📋 Sending {signal} order to MT5...")
-            print(f"   Symbol: {symbol}")
-            print(f"   Volume: {lot_size}")
-            print(f"   Price: {price_value:.2f}")
-            print(f"   SL: {stop_loss:.2f}")
-            print(f"   TP: {take_profit:.2f}")
-            
-            # Send order
-            result = mt5.order_send(request)
-            
-            if result is None:
-                print(f"❌ Order send returned None")
-                return False
-            
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
-                print(f"❌ Order failed!")
-                print(f"   Error code: {result.retcode}")
+            # ===== RETRY LOGIC (CRITICAL!) =====
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
+                print(f"\n🔄 Sending order (Attempt {attempt}/{max_retries})...")
+                
+                # Get fresh tick on retry
+                if attempt > 1:
+                    time.sleep(0.5)  # Small delay between retries
+                    tick = mt5.symbol_info_tick(symbol)
+                    if tick is None:
+                        print("❌ Cannot get fresh tick for retry")
+                        break
+                    
+                    # Update price with fresh tick
+                    price_value = tick.ask if signal == "BUY" else tick.bid
+                    request["price"] = price_value
+                    print(f"   Updated price: {price_value:.2f}")
+                
+                # Send order
+                result = mt5.order_send(request)
+                
+                if result is None:
+                    print(f"❌ Order send returned None (attempt {attempt})")
+                    continue
+                
+                # ===== CHECK RESULT =====
+                
+                # ✅ SUCCESS
+                if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"\n✅ ✅ ✅ REAL ORDER PLACED IN MT5! ✅ ✅ ✅")
+                    print(f"   Position Ticket: {result.order}")
+                    print(f"   Deal ID: {result.deal}")
+                    print(f"   Volume: {result.volume} lots")
+                    print(f"   Price: {result.price:.2f}")
+                    print(f"   Type: {signal}")
+                    print(f"   Stop Loss: {stop_loss:.2f}")
+                    print(f"   Take Profit: {take_profit:.2f}")
+                    return result.order  # ✅ Return ticket number
+                
+                # ⚠️ HANDLE REQUOTES (retry-able errors)
+                if result.retcode in (
+                    mt5.TRADE_RETCODE_PRICE_OFF,      # Price changed
+                    mt5.TRADE_RETCODE_REQUOTE,        # Requote
+                    10004,  # Requote error code
+                    10006,  # Request rejected (price changed)
+                ):
+                    print(f"⚠️ Price changed (code: {result.retcode}), retrying...")
+                    continue
+                
+                # ❌ FATAL ERROR (don't retry)
+                print(f"\n❌ ❌ ❌ ORDER FAILED! ❌ ❌ ❌")
+                print(f"   Error Code: {result.retcode}")
                 print(f"   Comment: {result.comment}")
-                return False
+                print(f"   Request: {request}")
+                break
             
-            print(f"\n✅ REAL ORDER PLACED IN MT5!")
-            print(f"   Order ID: {result.order}")
-            print(f"   Deal ID: {result.deal}")
-            print(f"   Volume: {result.volume}")
-            print(f"   Price: {result.price:.2f}")
-            print(f"   Type: {signal}")
-            
-            return True
+            return None
             
         except Exception as e:
-            print(f"❌ Order placement error: {e}")
+            print(f"❌ Order placement exception: {e}")
             import traceback
             traceback.print_exc()
-            return False
+            return None
+
     
     def place_demo_order(self, signal, lot_size, stop_loss, take_profit):
         """DEPRECATED: Use place_order() instead for real orders"""

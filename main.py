@@ -10,15 +10,12 @@ import threading
 import sys
 import os
 
-
 # Add API path for dashboard integration
 sys.path.append(os.path.join(os.path.dirname(__file__), 'api'))
-
 
 # Import dashboard functions at module level
 DASHBOARD_AVAILABLE = False
 update_bot_state = None
-
 
 try:
     from api.server import update_bot_state as _update_bot_state
@@ -27,7 +24,6 @@ try:
     print("✅ Dashboard integration loaded")
 except ImportError as e:
     print(f"⚠️ Dashboard not available: {e}")
-
 
 
 class XAUUSDTradingBot:
@@ -45,6 +41,64 @@ class XAUUSDTradingBot:
         # Dashboard state tracking
         self.last_signal = "HOLD"
         self.last_analysis = {}
+        
+        # Get max positions from config
+        self.max_positions = self.mt5.config.get("max_positions", 3)
+    
+    def sync_positions_with_mt5(self):
+        """
+        ✅ DAY 2 FIX: Sync internal position tracking with actual MT5 positions.
+        Removes any positions from self.open_positions that are no longer in MT5.
+        
+        This prevents desync issues where bot thinks positions are open when they're closed.
+        Called at the start of every trading cycle for accuracy.
+        """
+        try:
+            # Get actual positions from MT5
+            mt5_positions = self.mt5.get_open_positions()
+            
+            if mt5_positions is None:
+                print("⚠️ Could not fetch MT5 positions for sync")
+                return
+            
+            # Extract ticket numbers from MT5 positions
+            mt5_tickets = {pos['ticket'] for pos in mt5_positions}
+            
+            # Count before sync
+            before_count = len(self.open_positions)
+            
+            # Keep only positions that still exist in MT5
+            # Filter by ticket number
+            synced_positions = []
+            for pos in self.open_positions:
+                ticket = pos.get('ticket')
+                if ticket and ticket in mt5_tickets:
+                    synced_positions.append(pos)
+                else:
+                    # Position closed - log it
+                    signal = pos.get('signal', 'UNKNOWN')
+                    entry_price = pos.get('entry_price', 0)
+                    print(f"   🔄 Removed closed position: {signal} @ ${entry_price:.2f} (Ticket: {ticket})")
+            
+            # Update tracking list
+            self.open_positions = synced_positions
+            
+            # Count after sync
+            after_count = len(self.open_positions)
+            
+            # Log sync results if positions were removed
+            if before_count != after_count:
+                removed = before_count - after_count
+                print(f"\n🔄 Position Sync Complete:")
+                print(f"   Bot was tracking: {before_count} positions")
+                print(f"   MT5 has open: {len(mt5_tickets)} positions")
+                print(f"   Removed: {removed} closed position(s)")
+                print(f"   Now tracking: {after_count} positions")
+            
+        except Exception as e:
+            print(f"⚠️ Error syncing positions: {e}")
+            import traceback
+            traceback.print_exc()
     
     def load_historical_trades(self, max_trades=50):
         """Load recent trades from trade_log.json for dashboard"""
@@ -143,6 +197,16 @@ class XAUUSDTradingBot:
         historical_trades = self.load_historical_trades()
         print(f"📜 Loaded {len(historical_trades)} historical trades from trade_log.json")
         
+        # ✅ DAY 2 FIX: Check for stale position tracking on startup
+        print("\n🔄 Checking position tracking on startup...")
+        print(f"   Bot was tracking: {len(self.open_positions)} positions")
+        
+        # Sync with MT5 to clean up any stale tracking
+        self.sync_positions_with_mt5()
+        
+        print(f"   After sync: {len(self.open_positions)} positions")
+        print("✅ Position tracking initialized")
+        
         # Initial dashboard update
         self.update_dashboard_state()
         
@@ -169,63 +233,78 @@ class XAUUSDTradingBot:
     
     def analyze_and_trade(self):
         """Main analysis and trading logic with enhanced SMC"""
-        print(f"\n📊 Analyzing market at {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
-        
-        # Fetch market data
-        market_data = self.fetch_market_data()
-        if market_data is None:
-            return
-        
-        historical_data, current_price = market_data
-        
-        # Generate trading signal
-        signal, reason = self.strategy.generate_signal(historical_data)
-        
-        # Get enhanced strategy statistics
-        stats = self.strategy.get_strategy_stats(historical_data)
-        
-        # Store for dashboard
-        self.last_signal = signal
-        self.last_analysis = {
-            'smc_indicators': {
-                'fvg_bullish': stats.get('fvg_bullish', False),
-                'fvg_bearish': stats.get('fvg_bearish', False),
-                'bos': str(stats.get('bos', 'None')) if stats.get('bos') else 'None',
-                'session': stats.get('session', 'CLOSED')
-            },
-            'technical_levels': {
-                'ma20': stats.get('ma20', 0),
-                'ma50': stats.get('ma50', 0),
-                'ema200': stats.get('ema200', 0),
-                'support': stats.get('support', 0),
-                'resistance': stats.get('resistance', 0),
-                'atr': stats.get('atr', 0)
-            },
-            'market_structure': stats.get('market_structure', 'NEUTRAL'),
-            'zone': stats.get('zone', 'EQUILIBRIUM')
-        }
-        
-        # Display enhanced analysis
-        self.display_enhanced_analysis(current_price, signal, reason, stats)
-        
-        # Check risk limits before trading
-        total_risk = sum([pos.get('risk_percent', 0) for pos in self.open_positions])
-        can_trade, risk_msg = self.risk_calculator.check_risk_limits(
-            self.open_positions, total_risk
-        )
-        
-        # Execute trade if signal is not HOLD and risk limits allow
-        if signal != "HOLD":
-            if can_trade:
-                self.execute_enhanced_trade(signal, current_price, historical_data, stats)
-            else:
-                print(f"⚠️  Trade blocked: {risk_msg}")
-        
-        # Log this analysis
-        self.log_trade_analysis(signal, reason, current_price, stats)
-        
-        # Update dashboard after analysis
-        self.update_dashboard_state()
+        try:
+            # ✅ DAY 2 FIX: Sync positions with MT5 FIRST (before any checks)
+            self.sync_positions_with_mt5()
+            
+            # Check if we've reached max positions
+            if len(self.open_positions) >= self.max_positions:
+                print(f"⚠️ Max positions ({self.max_positions}) reached. Waiting...")
+                print(f"   Currently tracking: {len(self.open_positions)} positions")
+                return
+            
+            print(f"\n📊 Analyzing market at {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
+            
+            # Fetch market data
+            market_data = self.fetch_market_data()
+            if market_data is None:
+                return
+            
+            historical_data, current_price = market_data
+            
+            # Generate trading signal
+            signal, reason = self.strategy.generate_signal(historical_data)
+            
+            # Get enhanced strategy statistics
+            stats = self.strategy.get_strategy_stats(historical_data)
+            
+            # Store for dashboard
+            self.last_signal = signal
+            self.last_analysis = {
+                'smc_indicators': {
+                    'fvg_bullish': stats.get('fvg_bullish', False),
+                    'fvg_bearish': stats.get('fvg_bearish', False),
+                    'bos': str(stats.get('bos', 'None')) if stats.get('bos') else 'None',
+                    'session': stats.get('session', 'CLOSED')
+                },
+                'technical_levels': {
+                    'ma20': stats.get('ma20', 0),
+                    'ma50': stats.get('ma50', 0),
+                    'ema200': stats.get('ema200', 0),
+                    'support': stats.get('support', 0),
+                    'resistance': stats.get('resistance', 0),
+                    'atr': stats.get('atr', 0)
+                },
+                'market_structure': stats.get('market_structure', 'NEUTRAL'),
+                'zone': stats.get('zone', 'EQUILIBRIUM')
+            }
+            
+            # Display enhanced analysis
+            self.display_enhanced_analysis(current_price, signal, reason, stats)
+            
+            # Check risk limits before trading
+            total_risk = sum([pos.get('risk_percent', 0) for pos in self.open_positions])
+            can_trade, risk_msg = self.risk_calculator.check_risk_limits(
+                self.open_positions, total_risk
+            )
+            
+            # Execute trade if signal is not HOLD and risk limits allow
+            if signal != "HOLD":
+                if can_trade:
+                    self.execute_enhanced_trade(signal, current_price, historical_data, stats)
+                else:
+                    print(f"⚠️  Trade blocked: {risk_msg}")
+            
+            # Log this analysis
+            self.log_trade_analysis(signal, reason, current_price, stats)
+            
+            # Update dashboard after analysis
+            self.update_dashboard_state()
+            
+        except Exception as e:
+            print(f"❌ Error in analyze_and_trade: {e}")
+            import traceback
+            traceback.print_exc()
     
     def display_enhanced_analysis(self, price, signal, reason, stats):
         """Display enhanced market analysis with SMC indicators"""
@@ -284,12 +363,13 @@ class XAUUSDTradingBot:
         print(f"   ATR: ${atr:.2f}")
         print(f"   Zone: {zone} | Structure: {market_structure}")
         
-        # ⚠️ CHANGE THIS LINE - Place REAL order instead of demo
-        order_placed = self.mt5.place_order(signal, lot_size, stop_loss, take_profit)  # ✅ REAL ORDER
-        
-        if order_placed:
-            # Track position
+        # ✅ DAY 1 FIX: Place REAL order and capture ticket number
+        ticket = self.mt5.place_order(signal, lot_size, stop_loss, take_profit)
+
+        if ticket:
+            # ✅ Track position with ticket number
             position = {
+                'ticket': ticket,  # ← Store ticket for tracking
                 'signal': signal,
                 'entry_price': entry_price,
                 'stop_loss': stop_loss,
@@ -302,9 +382,12 @@ class XAUUSDTradingBot:
                 'market_structure': market_structure
             }
             self.open_positions.append(position)
+            
+            print(f"\n✅ Position added to tracking")
+            print(f"   Ticket: {ticket}")
+            print(f"   Open Positions: {len(self.open_positions)}")
         else:
-            print(f"\n❌ Order placement failed")
-
+            print(f"\n❌ Order placement failed - position not tracked")
     
     def log_trade_analysis(self, signal, reason, price, stats):
         """Log enhanced trade analysis for review"""
@@ -482,6 +565,10 @@ class XAUUSDTradingBot:
                 print(f"Iteration #{iteration}")
                 print(f"{'='*60}")
                 
+                # ✅ DAY 2 FIX: Show tracking status
+                print(f"📊 Position Tracking: {len(self.open_positions)}/{self.max_positions}")
+                print()
+                
                 self.analyze_and_trade()
                 
                 # Save log every 10 iterations
@@ -509,10 +596,8 @@ class XAUUSDTradingBot:
         print(f"Open positions: {len(self.open_positions)}")
 
 
-
 # Global bot instance for API access
 bot_instance = None
-
 
 
 def execute_manual_trade(trade_type: str, lot_size: float):
@@ -541,7 +626,7 @@ def execute_manual_trade(trade_type: str, lot_size: float):
             take_profit = entry_price - (100 * pip_value)
         
         # Place order
-        result = bot_instance.mt5.place_demo_order(
+        result = bot_instance.mt5.place_order(
             trade_type.upper(),
             lot_size,
             stop_loss,
@@ -554,7 +639,6 @@ def execute_manual_trade(trade_type: str, lot_size: float):
     except Exception as e:
         print(f"❌ Manual trade error: {e}")
         return False
-
 
 
 def start_api_server():
@@ -583,7 +667,6 @@ def start_api_server():
         print(f"❌ API Server error: {e}")
 
 
-
 def main():
     """Main function to run the trading bot with dashboard"""
     global bot_instance
@@ -605,7 +688,6 @@ def main():
     # Create and run bot
     bot_instance = XAUUSDTradingBot()
     bot_instance.run(interval_seconds=60)  # Check every minute
-
 
 
 if __name__ == "__main__":
