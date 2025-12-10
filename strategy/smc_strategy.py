@@ -293,12 +293,18 @@ class SMCStrategy:
             bearish_reasons.append("MA alignment")
         
         # === DECISION LOGIC ===
+        # === DECISION LOGIC ===
         min_score = 4.0  # Require strong confirmation
-        
+
         if bullish_score >= min_score and bullish_score > bearish_score:
             signal = "BUY"
-            confidence = min(bullish_score / 8 * 100, 100)  # Convert to percentage
+            confidence = min(bullish_score / 8 * 100, 100)
             reason = f"Bullish SMC: {', '.join(bullish_reasons[:3])}"
+            
+            # ✅ ZONE FILTER: Only BUY in DISCOUNT zones
+            if current.get('zone') not in ['DISCOUNT', 'DEEP_DISCOUNT']:
+                signal = "HOLD"
+                reason = f"[FILTERED] {reason} - Not in discount zone (current: {current.get('zone')})"
             
             if not in_session:
                 signal = "HOLD"
@@ -309,16 +315,22 @@ class SMCStrategy:
             confidence = min(bearish_score / 8 * 100, 100)
             reason = f"Bearish SMC: {', '.join(bearish_reasons[:3])}"
             
+            # ✅ ZONE FILTER: Only SELL in PREMIUM zones
+            if current.get('zone') != 'PREMIUM':
+                signal = "HOLD"
+                reason = f"[FILTERED] {reason} - Not in premium zone (current: {current.get('zone')})"
+            
             if not in_session:
                 signal = "HOLD"
                 reason += f" [Outside trading session - {session_name}]"
-        
-        # Add session info to reason
-        if signal != "HOLD" and in_session:
-            reason += f" [{session_name} session]"
-        
-        self.last_signal = signal
-        return signal, reason
+
+                
+                # Add session info to reason
+                if signal != "HOLD" and in_session:
+                    reason += f" [{session_name} session]"
+                
+                self.last_signal = signal
+                return signal, reason
     
     def get_strategy_stats(self, data):
         """Return enhanced strategy statistics"""

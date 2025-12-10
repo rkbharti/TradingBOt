@@ -64,20 +64,48 @@ class MT5Connection:
         return mt5.account_info()
     
     def get_historical_data(self, bars=300):
-        """Fetch historical price data"""
-        try:
-            rates = mt5.copy_rates_from_pos(self.symbol, self.timeframe, 0, bars)
-            
-            if rates is None or len(rates) == 0:
-                print(f"❌ No data received for {self.symbol}")
-                return None
-            
-            print(f"📊 Fetched {len(rates)} bars of {self.symbol} M5 data")
-            return rates
-            
-        except Exception as e:
-            print(f"❌ Error fetching data: {e}")
-            return None
+        """Fetch historical price data with retry logic"""
+        import time
+        
+        max_retries = 3
+        retry_delay = 2  # seconds
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Verify MT5 connection first
+                if not mt5.terminal_info():
+                    print(f"⚠️ MT5 terminal not connected (Attempt {attempt}/{max_retries})")
+                    if not mt5.initialize():
+                        print("   Failed to reconnect, retrying...")
+                        time.sleep(retry_delay)
+                        continue
+                
+                # Fetch data
+                rates = mt5.copy_rates_from_pos(self.symbol, self.timeframe, 0, bars)
+                
+                # Check if data received
+                if rates is None or len(rates) == 0:
+                    if attempt < max_retries:
+                        print(f"⚠️ No data received (Attempt {attempt}/{max_retries}), retrying in {retry_delay}s...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        print(f"❌ No data received for {self.symbol} after {max_retries} attempts")
+                        return None
+                
+                # Success!
+                print(f"📊 Fetched {len(rates)} bars of {self.symbol} M5 data")
+                return rates
+                
+            except Exception as e:
+                if attempt < max_retries:
+                    print(f"⚠️ Error fetching data (Attempt {attempt}/{max_retries}): {e}")
+                    print(f"   Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    print(f"❌ Error fetching data after {max_retries} attempts: {e}")
+                    return None
+
     
     def get_current_price(self):
         """Get current bid/ask prices"""
