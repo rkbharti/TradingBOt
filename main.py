@@ -10,6 +10,23 @@ import threading
 import sys
 import os
 
+# ============================================================================
+# ✨ NEW: Import Guardeer 10-Video SMC Enhanced Modules
+# ============================================================================
+try:
+    from strategy.smc_enhanced.liquidity import LiquidityDetector
+    from strategy.smc_enhanced.poi import POIIdentifier
+    from strategy.smc_enhanced.bias import BiasDetector
+    from strategy.smc_enhanced.zones import ZoneCalculator
+    from strategy.smc_enhanced.narrative import NarrativeAnalyzer
+    
+    SMC_ENHANCED_AVAILABLE = True
+    print("✅ Guardeer 10-Video SMC Enhanced Modules Loaded Successfully!")
+except ImportError as e:
+    SMC_ENHANCED_AVAILABLE = False
+    print(f"⚠️ Warning: SMC Enhanced modules not available: {e}")
+    print("   Bot will run with standard SMC strategy only")
+
 # Add API path for dashboard integration
 sys.path.append(os.path.join(os.path.dirname(__file__), 'api'))
 
@@ -27,9 +44,9 @@ except ImportError as e:
 
 
 class XAUUSDTradingBot:
-    """Enhanced trading bot with advanced SMC strategy for XAUUSD"""
+    """Enhanced trading bot with Guardeer's complete 10-video SMC strategy for XAUUSD"""
     
-    def __init__(self, config_path="config.json"):
+    def __init__(self, config_path="config.json", use_enhanced_smc=True):
         self.config_path = config_path
         self.mt5 = MT5Connection(config_path)
         self.strategy = SMCStrategy()
@@ -44,49 +61,47 @@ class XAUUSDTradingBot:
         
         # Get max positions from config
         self.max_positions = self.mt5.config.get("max_positions", 3)
+        
+        # ============================================================================
+        # ✨ NEW: Initialize Guardeer SMC Enhanced Modules
+        # ============================================================================
+        self.use_enhanced_smc = use_enhanced_smc and SMC_ENHANCED_AVAILABLE
+        self.liquidity_detector = None
+        self.poi_identifier = None
+        self.bias_detector = None
+        self.narrative_analyzer = None
+        self.enhanced_analysis_data = {}
+        
+        if self.use_enhanced_smc:
+            print("🎯 Using Guardeer 10-Video Enhanced SMC Strategy")
+        else:
+            print("📊 Using Standard SMC Strategy")
     
     def sync_positions_with_mt5(self):
-        """
-        ✅ DAY 2 FIX: Sync internal position tracking with actual MT5 positions.
-        Removes any positions from self.open_positions that are no longer in MT5.
-        
-        This prevents desync issues where bot thinks positions are open when they're closed.
-        Called at the start of every trading cycle for accuracy.
-        """
+        """Sync internal position tracking with actual MT5 positions"""
         try:
-            # Get actual positions from MT5
             mt5_positions = self.mt5.get_open_positions()
             
             if mt5_positions is None:
                 print("⚠️ Could not fetch MT5 positions for sync")
                 return
             
-            # Extract ticket numbers from MT5 positions
             mt5_tickets = {pos['ticket'] for pos in mt5_positions}
-            
-            # Count before sync
             before_count = len(self.open_positions)
             
-            # Keep only positions that still exist in MT5
-            # Filter by ticket number
             synced_positions = []
             for pos in self.open_positions:
                 ticket = pos.get('ticket')
                 if ticket and ticket in mt5_tickets:
                     synced_positions.append(pos)
                 else:
-                    # Position closed - log it
                     signal = pos.get('signal', 'UNKNOWN')
                     entry_price = pos.get('entry_price', 0)
                     print(f"   🔄 Removed closed position: {signal} @ ${entry_price:.2f} (Ticket: {ticket})")
             
-            # Update tracking list
             self.open_positions = synced_positions
-            
-            # Count after sync
             after_count = len(self.open_positions)
             
-            # Log sync results if positions were removed
             if before_count != after_count:
                 removed = before_count - after_count
                 print(f"\n🔄 Position Sync Complete:")
@@ -97,8 +112,6 @@ class XAUUSDTradingBot:
             
         except Exception as e:
             print(f"⚠️ Error syncing positions: {e}")
-            import traceback
-            traceback.print_exc()
     
     def load_historical_trades(self, max_trades=50):
         """Load recent trades from trade_log.json for dashboard"""
@@ -107,7 +120,6 @@ class XAUUSDTradingBot:
                 with open("trade_log.json", 'r') as f:
                     log_data = json.load(f)
                 
-                # Get only BUY/SELL signals (not HOLD)
                 trades = []
                 for entry in log_data[-max_trades:]:
                     if entry.get('signal') in ['BUY', 'SELL']:
@@ -135,7 +147,6 @@ class XAUUSDTradingBot:
         total_pnl = 0.0
         
         try:
-            # Get current price
             current_price = self.mt5.get_current_price()
             if not current_price:
                 return 0.0
@@ -143,19 +154,14 @@ class XAUUSDTradingBot:
             current_bid = current_price['bid']
             current_ask = current_price['ask']
             
-            # Calculate P&L for each open position
             for pos in self.open_positions:
                 signal = pos['signal']
                 entry = pos['entry_price']
                 lot_size = pos['lot_size']
                 
                 if signal == "SELL":
-                    # SELL: Profit when price goes DOWN
-                    # P&L = (Entry - Current) * 100 * Lot Size
                     pnl = (entry - current_ask) * 100 * lot_size
-                else:  # BUY
-                    # BUY: Profit when price goes UP
-                    # P&L = (Current - Entry) * 100 * Lot Size
+                else:
                     pnl = (current_bid - entry) * 100 * lot_size
                 
                 total_pnl += pnl
@@ -168,20 +174,19 @@ class XAUUSDTradingBot:
         
     def initialize(self):
         """Initialize the trading bot"""
+        print("\n" + "="*70)
         print("🚀 Initializing Enhanced XAUUSD Trading Bot...")
-        print("=" * 60)
+        print("="*70)
         
-        # Connect to MT5
         if not self.mt5.initialize_mt5():
             print("❌ Failed to initialize MT5 connection")
             return False
         
-        # Initialize risk calculator with account balance
         account_info = self.mt5.get_account_info()
         if account_info:
             balance = account_info.balance
         else:
-            balance = 10000  # Default demo balance
+            balance = 10000
         
         self.risk_calculator = StopLossCalculator(
             account_balance=balance,
@@ -191,34 +196,30 @@ class XAUUSDTradingBot:
         print(f"💰 Account Balance: ${balance:,.2f}")
         print(f"🎯 Risk per Trade: {self.mt5.config.get('risk_per_trade', 1.0)}%")
         print(f"🌍 Time Zone: IST (UTC+5:30)")
-        print("=" * 60)
+        print(f"🎬 SMC Strategy: {'Guardeer 10-Video Enhanced' if self.use_enhanced_smc else 'Standard'}")
+        print("="*70)
         
-        # Load historical trades for dashboard
         historical_trades = self.load_historical_trades()
         print(f"📜 Loaded {len(historical_trades)} historical trades from trade_log.json")
         
-        # ✅ IMPROVED: Load existing MT5 positions on startup
         print("\n🔄 Checking position tracking on startup...")
         print(f"   Bot was tracking: {len(self.open_positions)} positions")
         
-        # First, try to load existing MT5 positions
         mt5_positions = self.mt5.get_open_positions()
         if mt5_positions and len(mt5_positions) > 0:
             print(f"   Found {len(mt5_positions)} open positions in MT5")
             
-            # Import existing MT5 positions into bot tracking
             for pos in mt5_positions:
-                # Create position entry for bot tracking
                 position = {
                     'ticket': pos['ticket'],
-                    'signal': pos['type'],  # 'BUY' or 'SELL'
+                    'signal': pos['type'],
                     'entry_price': pos['price_open'],
                     'stop_loss': pos['sl'],
                     'take_profit': pos['tp'],
                     'lot_size': pos['volume'],
-                    'entry_time': datetime.now(),  # Approximate
-                    'risk_percent': 0,  # Unknown
-                    'atr': 0,  # Unknown
+                    'entry_time': datetime.now(),
+                    'risk_percent': 0,
+                    'atr': 0,
                     'zone': 'UNKNOWN',
                     'market_structure': 'UNKNOWN'
                 }
@@ -229,30 +230,23 @@ class XAUUSDTradingBot:
         else:
             print(f"   No open positions in MT5")
         
-        # Then sync to ensure consistency
         self.sync_positions_with_mt5()
         
         print(f"   Now tracking: {len(self.open_positions)} positions")
         print("✅ Position tracking initialized")
         
-        # Initial dashboard update
         self.update_dashboard_state()
         
         return True
-
     
     def fetch_market_data(self):
         """Fetch current market data"""
-        # Get historical data for analysis (increased for better indicators)
-        historical_data = self.mt5.get_historical_data(
-            bars=300  # More data for enhanced indicators
-        )
+        historical_data = self.mt5.get_historical_data(bars=300)
         
         if historical_data is None:
             print("❌ Could not fetch market data")
             return None
         
-        # Get current price
         current_price = self.mt5.get_current_price()
         if current_price is None:
             print("❌ Could not fetch current price")
@@ -260,13 +254,199 @@ class XAUUSDTradingBot:
         
         return historical_data, current_price
     
-    def analyze_and_trade(self):
-        """Main analysis and trading logic with enhanced SMC"""
+    # ============================================================================
+    # ✨ NEW: Guardeer 10-Video Enhanced Analysis Method
+    # ============================================================================
+    def analyze_enhanced(self):
+        """Complete analysis using ALL 10 Guardeer video concepts"""
         try:
-            # ✅ DAY 2 FIX: Sync positions with MT5 FIRST (before any checks)
             self.sync_positions_with_mt5()
             
-            # ✅ IMPROVED: Always analyze market, but block trades if at max
+            print(f"\n📊 Running Enhanced SMC Analysis (Guardeer 10-Videos)...")
+            
+            market_data = self.fetch_market_data()
+            if market_data is None:
+                return
+            
+            historical_data, current_price = market_data
+            
+            # =========================================================================
+            # VIDEO 5: LIQUIDITY ANALYSIS
+            # =========================================================================
+            if self.liquidity_detector is None:
+                self.liquidity_detector = LiquidityDetector(historical_data)
+                self.poi_identifier = POIIdentifier(historical_data)
+                self.bias_detector = BiasDetector(historical_data)
+                self.narrative_analyzer = NarrativeAnalyzer(
+                    self.liquidity_detector,
+                    self.poi_identifier,
+                    self.bias_detector
+                )
+                print("   ✅ Enhanced SMC modules initialized")
+            else:
+                self.liquidity_detector.df = historical_data
+                self.poi_identifier.df = historical_data
+                self.bias_detector.df = historical_data
+            
+            print("\n📍 VIDEO 5 - LIQUIDITY DETECTION:")
+            pdh, pdl = self.liquidity_detector.get_previous_day_high_low()
+            swings = self.liquidity_detector.get_swing_high_low(lookback=20)
+            liquidity_zones = self.liquidity_detector.get_liquidity_zones()
+            liquidity_grabbed = self.liquidity_detector.check_liquidity_grab(current_price['bid'])
+            
+            print(f"   PDH: ${pdh:.2f} | PDL: ${pdl:.2f}" if pdh and pdl else "   PDH/PDL: Not available")
+            print(f"   Swing Highs: {len(swings.get('highs', []))} | Swing Lows: {len(swings.get('lows', []))}")
+            print(f"   Liquidity Grabbed: {liquidity_grabbed.get('pdh_grabbed') or liquidity_grabbed.get('pdl_grabbed')}")
+            
+            # =========================================================================
+            # VIDEO 6: POI IDENTIFICATION
+            # =========================================================================
+            print("\n🎯 VIDEO 6 - POI IDENTIFICATION:")
+            order_blocks = self.poi_identifier.find_order_blocks(lookback=50)
+            fvgs = self.poi_identifier.find_fvg()
+            idm_probability = self.poi_identifier.identify_idm_sweep(timeframe_minutes=15)
+            closest_poi = self.poi_identifier.get_closest_poi(current_price['bid'], direction='UP')
+            
+            print(f"   Bullish OBs: {len(order_blocks.get('bullish', []))} | Bearish OBs: {len(order_blocks.get('bearish', []))}")
+            print(f"   Bullish FVGs: {len(fvgs.get('bullish', []))} | Bearish FVGs: {len(fvgs.get('bearish', []))}")
+            print(f"   IDM Probability: {idm_probability.get('current_probability', 0)*100:.0f}%")
+            if closest_poi:
+                print(f"   Closest POI: ${closest_poi[0]:.2f} ({closest_poi[1]})")
+            
+            # =========================================================================
+            # VIDEO 9: BIAS DETECTION
+            # =========================================================================
+            print("\n🧭 VIDEO 9 - BIAS DETECTION:")
+            daily_bias = self.bias_detector.analyze_daily_pattern(historical_data.iloc[-1])
+            intraday_bias = self.bias_detector.get_intraday_bias(lookback=20)
+            price_action_bias = self.bias_detector.get_price_action_bias()
+            combined_bias = self.bias_detector.get_combined_bias(daily_bias, intraday_bias, price_action_bias)
+            
+            print(f"   Daily Bias: {daily_bias}")
+            print(f"   Intraday Bias: {intraday_bias}")
+            print(f"   Price Action: {price_action_bias}")
+            print(f"   Combined Bias: {combined_bias}")
+            
+            # =========================================================================
+            # VIDEO 10: ZONE ANALYSIS
+            # =========================================================================
+            print("\n📦 VIDEO 10a - ZONE ANALYSIS:")
+            latest_swing_high = swings['highs'][-1]['price'] if swings['highs'] else current_price['bid']
+            latest_swing_low = swings['lows'][-1]['price'] if swings['lows'] else current_price['bid']
+            
+            zones = ZoneCalculator.calculate_zones(latest_swing_high, latest_swing_low)
+            current_zone = ZoneCalculator.classify_price_zone(current_price['bid'], zones)
+            zone_summary = ZoneCalculator.get_zone_summary(current_price['bid'], zones)
+            
+            print(f"   Current Zone: {current_zone}")
+            if zone_summary:
+                print(f"   Zone Strength: {zone_summary['zone_strength']:.0f}%")
+                print(f"   Can BUY: {zone_summary['can_buy']} | Can SELL: {zone_summary['can_sell']}")
+                print(f"   Next Target: {zone_summary['next_target']['target'] if zone_summary['next_target'] else 'N/A'}")
+            
+            # =========================================================================
+            # VIDEO 10b: NARRATIVE ANALYSIS (3Bs)
+            # =========================================================================
+            print("\n📖 VIDEO 10b - NARRATIVE (3Bs FRAMEWORK):")
+            market_state = {
+                'liquidity_grabbed': liquidity_grabbed['pdh_grabbed'] or liquidity_grabbed['pdl_grabbed'],
+                'liquidity_type': 'PDH' if liquidity_grabbed['pdh_grabbed'] else 'PDL' if liquidity_grabbed['pdl_grabbed'] else 'NONE',
+                'fvg_tapped': len(fvgs['bullish']) > 0 or len(fvgs['bearish']) > 0,
+                'fvg_type': 'BULLISH' if len(fvgs['bullish']) > 0 else 'BEARISH' if len(fvgs['bearish']) > 0 else 'NONE',
+                'ob_hit': len(order_blocks['bullish']) > 0 or len(order_blocks['bearish']) > 0,
+                'ob_type': 'BULLISH' if len(order_blocks['bullish']) > 0 else 'BEARISH' if len(order_blocks['bearish']) > 0 else 'NONE',
+                'current_direction': daily_bias,
+                'current_bias': combined_bias,
+                'next_poi_target': closest_poi[0] if closest_poi else current_price['bid'],
+                'target_type': closest_poi[1] if closest_poi else 'NONE',
+                'target_distance': abs(closest_poi[0] - current_price['bid']) if closest_poi else 0,
+                'target_confidence': 'HIGH' if closest_poi else 'LOW',
+                'zone': current_zone,
+                'zone_strength': zone_summary['zone_strength'] if zone_summary else 0,
+                'distance_from_equilibrium': abs(zone_summary['distance_from_equilibrium']) if zone_summary else 0,
+                'timeframe': '15min',
+                'price_action': 'NEUTRAL'
+            }
+            
+            narrative = self.narrative_analyzer.analyze_market_story(market_state)
+            
+            print(f"\n   B1 (Recent Action): {narrative.get('b1', {}).get('narrative', 'N/A')}")
+            print(f"   B2 (Current Framework): {narrative.get('b2', {}).get('narrative', 'N/A')}")
+            print(f"   B3 (Dealing Range): {narrative.get('b3', {}).get('narrative', 'N/A')}")
+            print(f"\n   Trade Signal: {narrative.get('trade_signal', 'HOLD')}")
+            print(f"   Confidence: {narrative.get('confidence', 0):.0f}%")
+            print(f"   Bias: {narrative.get('bias', 'NEUTRAL')}")
+            
+            # =========================================================================
+            # DECISION MAKING
+            # =========================================================================
+            final_signal = narrative.get('trade_signal', 'HOLD')
+            
+            # =========================================================================
+            # ZONE FILTER (CRITICAL)
+            # =========================================================================
+            print("\n🔍 ZONE FILTER VALIDATION:")
+            zone_allows_trade = False
+            
+            if final_signal == 'BUY' and current_zone == 'DISCOUNT':
+                print(f"   ✅ {final_signal} signal allowed in {current_zone} zone")
+                zone_allows_trade = True
+            elif final_signal == 'SELL' and current_zone == 'PREMIUM':
+                print(f"   ✅ {final_signal} signal allowed in {current_zone} zone")
+                zone_allows_trade = True
+            elif final_signal != 'HOLD':
+                print(f"   ❌ {final_signal} signal BLOCKED: Current zone is {current_zone}")
+                zone_allows_trade = False
+                final_signal = 'HOLD'
+            
+            # Store for display
+            self.enhanced_analysis_data = {
+                'pdh': pdh,
+                'pdl': pdl,
+                'swings': swings,
+                'order_blocks': order_blocks,
+                'fvgs': fvgs,
+                'daily_bias': daily_bias,
+                'current_zone': current_zone,
+                'narrative': narrative,
+                'zones': zones
+            }
+            
+            self.last_signal = final_signal
+            self.last_analysis = {
+                'enhanced_smc': self.enhanced_analysis_data,
+                'zone': current_zone,
+                'bias': combined_bias
+            }
+            
+            # =========================================================================
+            # EXECUTE TRADE
+            # =========================================================================
+            at_max_positions = len(self.open_positions) >= self.max_positions
+            
+            if not at_max_positions and final_signal != 'HOLD' and zone_allows_trade:
+                print(f"\n✅ Executing {final_signal} trade...")
+                self.execute_enhanced_trade(final_signal, current_price, historical_data, zones)
+            elif at_max_positions and final_signal != 'HOLD':
+                print(f"\n⚠️ Signal {final_signal} detected but max positions ({self.max_positions}) reached")
+            
+            # Log analysis
+            self.log_trade_analysis(final_signal, "Enhanced SMC Analysis", current_price, market_state)
+            self.update_dashboard_state()
+            
+        except Exception as e:
+            print(f"\n❌ Error in enhanced analysis: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # ============================================================================
+    # KEEP EXISTING: Standard analyze_and_trade() method for fallback
+    # ============================================================================
+    def analyze_and_trade(self):
+        """Standard SMC analysis (used when enhanced mode disabled)"""
+        try:
+            self.sync_positions_with_mt5()
+            
             at_max_positions = len(self.open_positions) >= self.max_positions
             
             if at_max_positions:
@@ -275,20 +455,15 @@ class XAUUSDTradingBot:
             
             print(f"\n📊 Analyzing market at {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
             
-            # Fetch market data
             market_data = self.fetch_market_data()
             if market_data is None:
                 return
             
             historical_data, current_price = market_data
             
-            # Generate trading signal
             signal, reason = self.strategy.generate_signal(historical_data)
-            
-            # Get enhanced strategy statistics
             stats = self.strategy.get_strategy_stats(historical_data)
             
-            # Store for dashboard
             self.last_signal = signal
             self.last_analysis = {
                 'smc_indicators': {
@@ -309,38 +484,31 @@ class XAUUSDTradingBot:
                 'zone': stats.get('zone', 'EQUILIBRIUM')
             }
             
-            # Display enhanced analysis
-            self.display_enhanced_analysis(current_price, signal, reason, stats)
+            self.display_analysis(current_price, signal, reason, stats)
             
-            # ✅ Only execute trades if NOT at max positions
             if not at_max_positions and signal != "HOLD":
-                # Check risk limits before trading
                 total_risk = sum([pos.get('risk_percent', 0) for pos in self.open_positions])
                 can_trade, risk_msg = self.risk_calculator.check_risk_limits(
                     self.open_positions, total_risk
                 )
                 
                 if can_trade:
-                    self.execute_enhanced_trade(signal, current_price, historical_data, stats)
+                    self.execute_trade(signal, current_price, historical_data, stats)
                 else:
-                    print(f"⚠️  Trade blocked: {risk_msg}")
+                    print(f"⚠️ Trade blocked: {risk_msg}")
             elif at_max_positions and signal != "HOLD":
                 print(f"🔔 Signal: {signal} detected, but max positions reached. Skipping trade.")
             
-            # Log this analysis
             self.log_trade_analysis(signal, reason, current_price, stats)
-            
-            # Update dashboard after analysis
             self.update_dashboard_state()
             
         except Exception as e:
             print(f"❌ Error in analyze_and_trade: {e}")
             import traceback
             traceback.print_exc()
-
     
-    def display_enhanced_analysis(self, price, signal, reason, stats):
-        """Display enhanced market analysis with SMC indicators"""
+    def display_analysis(self, price, signal, reason, stats):
+        """Display standard market analysis"""
         print(f"🎯 XAUUSD Price: ${price['bid']:.2f} (Spread: ${price['spread']:.2f})")
         print(f"\n📈 Market Structure: {stats.get('market_structure', 'UNKNOWN')}")
         print(f"🎯 Zone: {stats.get('zone', 'UNKNOWN')}")
@@ -359,46 +527,22 @@ class XAUUSDTradingBot:
         
         print(f"\n🔔 Signal: {signal}")
         print(f"   Reason: {reason}")
-        print("-" * 60)
+        print("-" * 70)
     
-    def execute_enhanced_trade(self, signal, price, historical_data, stats):
-        """Execute trade with enhanced SMC-based parameters"""
-        
-        # ✅ CRITICAL FIX: Re-validate zone filter before MT5 execution
-        zone = stats.get('zone', 'EQUILIBRIUM')
-        
-        print(f"\n🔍 Pre-Execution Zone Validation:")
-        print(f"   Signal: {signal}")
-        print(f"   Current Zone: {zone}")
-        
-        if signal == "BUY" and zone not in ['DISCOUNT', 'DEEP_DISCOUNT']:
-            print(f"❌ BUY trade BLOCKED: Not in discount zone")
-            print(f"   Required: DISCOUNT or DEEP_DISCOUNT | Current: {zone}")
-            return False
-        
-        if signal == "SELL" and zone != 'PREMIUM':
-            print(f"❌ SELL trade BLOCKED: Not in premium zone")
-            print(f"   Required: PREMIUM | Current: {zone}")
-            return False
-        
-        print(f"✅ Zone validation passed - executing {signal} trade")
-        
-        # Original code continues...
+    def execute_trade(self, signal, price, historical_data, stats):
+        """Execute trade with standard parameters"""
         entry_price = price['ask'] if signal == "BUY" else price['bid']
         atr = stats.get('atr', entry_price * 0.01)
         market_structure = stats.get('market_structure', 'NEUTRAL')
         
-        # Calculate stop loss and take profit with ATR
         stop_loss, take_profit = self.risk_calculator.calculate_stop_loss_take_profit(
-            signal, entry_price, atr, zone, market_structure
+            signal, entry_price, atr, stats.get('zone', 'EQUILIBRIUM'), market_structure
         )
         
-        # Calculate position size
         lot_size = self.risk_calculator.calculate_position_size(
             entry_price, stop_loss
         )
         
-        # Get comprehensive risk metrics
         risk_metrics = self.risk_calculator.get_risk_metrics(
             entry_price, stop_loss, lot_size, take_profit
         )
@@ -411,9 +555,7 @@ class XAUUSDTradingBot:
         print(f"   Lot Size: {lot_size}")
         print(f"   Risk: ${risk_metrics['risk_amount']:.2f} ({risk_metrics['risk_percent']:.2f}%)")
         print(f"   R:R Ratio: 1:{risk_metrics['reward_ratio']:.1f}")
-        print(f"   Zone: {zone} | Structure: {market_structure}")
         
-        # Place order
         ticket = self.mt5.place_order(signal, lot_size, stop_loss, take_profit)
 
         if ticket:
@@ -427,7 +569,7 @@ class XAUUSDTradingBot:
                 'entry_time': datetime.now(),
                 'risk_percent': risk_metrics['risk_percent'],
                 'atr': atr,
-                'zone': zone,
+                'zone': stats.get('zone', 'EQUILIBRIUM'),
                 'market_structure': market_structure
             }
             self.open_positions.append(position)
@@ -439,25 +581,77 @@ class XAUUSDTradingBot:
         else:
             print(f"\n❌ Order placement failed")
             return False
+    
+    # ============================================================================
+    # ✨ NEW: Enhanced Trade Execution with Zone Validation
+    # ============================================================================
+    def execute_enhanced_trade(self, signal, price, historical_data, zones):
+        """Execute trade with enhanced SMC-based parameters"""
+        try:
+            print(f"\n🎯 Enhanced Trade Execution:")
+            
+            entry_price = price['ask'] if signal == "BUY" else price['bid']
+            atr = historical_data['atr'].iloc[-1] if 'atr' in historical_data.columns else 1.0
+            
+            # Use zone-based stops
+            if zones:
+                if signal == "BUY":
+                    stop_loss = zones['discount_start']
+                    take_profit = zones['swing_high']
+                else:
+                    stop_loss = zones['premium_end']
+                    take_profit = zones['swing_low']
+            else:
+                stop_loss = entry_price - atr * 2 if signal == "BUY" else entry_price + atr * 2
+                take_profit = entry_price + atr * 4 if signal == "BUY" else entry_price - atr * 4
+            
+            lot_size = self.risk_calculator.calculate_position_size(entry_price, stop_loss)
+            risk_metrics = self.risk_calculator.get_risk_metrics(entry_price, stop_loss, lot_size, take_profit)
+            
+            print(f"   Entry: ${entry_price:.2f}")
+            print(f"   Stop Loss: ${stop_loss:.2f} ({risk_metrics['stop_loss_pips']:.2f} pips)")
+            print(f"   Take Profit: ${take_profit:.2f} ({risk_metrics['take_profit_pips']:.2f} pips)")
+            print(f"   Lot Size: {lot_size}")
+            print(f"   Risk: ${risk_metrics['risk_amount']:.2f}")
+            
+            ticket = self.mt5.place_order(signal, lot_size, stop_loss, take_profit)
 
+            if ticket:
+                position = {
+                    'ticket': ticket,
+                    'signal': signal,
+                    'entry_price': entry_price,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'lot_size': lot_size,
+                    'entry_time': datetime.now(),
+                    'risk_percent': risk_metrics['risk_percent'],
+                    'atr': atr,
+                    'zone': self.enhanced_analysis_data.get('current_zone', 'UNKNOWN'),
+                    'market_structure': 'ENHANCED_SMC'
+                }
+                self.open_positions.append(position)
+                print(f"\n✅ Enhanced trade executed | Ticket: {ticket}")
+                return True
+            else:
+                print(f"❌ Order placement failed")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error executing enhanced trade: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
     def log_trade_analysis(self, signal, reason, price, stats):
-        """Log enhanced trade analysis for review"""
+        """Log trade analysis"""
         log_entry = {
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S IST'),
             'signal': signal,
             'reason': reason,
             'price': price['bid'],
             'spread': price['spread'],
-            'ma20': stats.get('ma20', 0),
-            'ema200': stats.get('ema200', 0),
-            'atr': stats.get('atr', 0),
-            'market_structure': stats.get('market_structure', 'UNKNOWN'),
-            'zone': stats.get('zone', 'UNKNOWN'),
-            'session': stats.get('session', 'UNKNOWN'),
-            'in_trading_hours': stats.get('in_trading_hours', False),
-            'fvg_bullish': stats.get('fvg_bullish', False),
-            'fvg_bearish': stats.get('fvg_bearish', False)
+            'zone': stats.get('zone', 'UNKNOWN') if isinstance(stats, dict) else 'UNKNOWN',
         }
         self.trade_log.append(log_entry)
     
@@ -467,13 +661,10 @@ class XAUUSDTradingBot:
             return
         
         try:
-            # Get current data
             account_info = self.mt5.get_account_info()
             current_price = self.mt5.get_current_price()
             
-            # Helper function to convert numpy types to Python types
             def convert_value(val):
-                """Convert numpy/pandas types to native Python types"""
                 import numpy as np
                 if isinstance(val, (np.bool_, bool)) or str(type(val).__name__) == 'bool_':
                     return bool(val)
@@ -485,16 +676,12 @@ class XAUUSDTradingBot:
                     return None
                 return val
             
-            # Get SMC indicators with type conversion
             smc = self.last_analysis.get('smc_indicators', {})
             tech = self.last_analysis.get('technical_levels', {})
             
-            # Format open positions for dashboard WITH P&L
             trades_list = []
             
-            # Part 1: Add OPEN positions (actual trades)
             for idx, pos in enumerate(self.open_positions):
-                # Calculate individual P&L
                 pnl = 0.0
                 if current_price:
                     entry = pos['entry_price']
@@ -502,7 +689,7 @@ class XAUUSDTradingBot:
                     
                     if pos['signal'] == "SELL":
                         pnl = (entry - current_price['ask']) * 100 * lot_size
-                    else:  # BUY
+                    else:
                         pnl = (current_price['bid'] - entry) * 100 * lot_size
                 
                 trades_list.append({
@@ -516,42 +703,10 @@ class XAUUSDTradingBot:
                     "status": "OPEN",
                     "pnl": round(pnl, 2),
                     "risk_percent": pos.get('risk_percent', 0),
-                    "atr": pos.get('atr', 0),
                     "zone": pos.get('zone', 'UNKNOWN'),
                     "market_structure": pos.get('market_structure', 'UNKNOWN')
                 })
             
-            # Part 2: Add recent SIGNALS (not executed, just logged)
-            # Only add signals that are NOT already in open_positions
-            open_times = [pos['entry_time'].strftime("%Y-%m-%d %H:%M:%S IST") for pos in self.open_positions]
-            
-            signal_count = 0
-            for entry in reversed(self.trade_log):  # Most recent first
-                if signal_count >= 5:  # Limit to 5 signals
-                    break
-                    
-                if entry.get('signal') in ['BUY', 'SELL']:
-                    timestamp = entry['timestamp']
-                    
-                    # Skip if this signal became an open position
-                    if timestamp in open_times:
-                        continue
-                    
-                    trades_list.append({
-                        "id": len(trades_list) + 1,
-                        "type": entry['signal'],
-                        "lot_size": 0.0,  # SIGNAL trades don't have lot_size
-                        "entry": entry['price'],
-                        "time": timestamp,
-                        "status": "SIGNAL",
-                        "pnl": 0.0,
-                        "session": entry.get('session', 'UNKNOWN'),
-                        "zone": entry.get('zone', 'UNKNOWN'),
-                        "spread": entry.get('spread', 0)
-                    })
-                    signal_count += 1
-            
-            # Calculate current P&L
             current_pnl = self.calculate_current_pnl()
             initial_balance = float(account_info.balance) if account_info else 100000.0
             current_balance = initial_balance + current_pnl
@@ -584,7 +739,7 @@ class XAUUSDTradingBot:
             }
             
             update_bot_state(state)
-            print(f"📊 Dashboard updated - Balance: ${current_balance:,.2f} | P&L: ${current_pnl:,.2f} | Trades: {len(trades_list)}")
+            print(f"📊 Dashboard updated - Balance: ${current_balance:,.2f} | P&L: ${current_pnl:,.2f}")
             
         except Exception as e:
             print(f"⚠️ Dashboard update error: {e}")
@@ -594,40 +749,43 @@ class XAUUSDTradingBot:
         try:
             with open(filename, 'w') as f:
                 json.dump(self.trade_log, f, indent=2, default=str)
-            print(f"\n💾 Trade log saved to {filename}")
+            print(f"💾 Trade log saved to {filename}")
         except Exception as e:
-            print(f"\n❌ Error saving trade log: {e}")
+            print(f"❌ Error saving trade log: {e}")
     
     def run(self, interval_seconds=60):
-        """Run the enhanced trading bot main loop"""
+        """Run the trading bot main loop"""
         if not self.initialize():
             return
         
         self.running = True
-        print(f"\n🤖 Enhanced SMC Trading Bot Started")
-        print(f"⏱️  Monitoring XAUUSD every {interval_seconds} seconds")
+        strategy_name = "Guardeer 10-Video Enhanced SMC" if self.use_enhanced_smc else "Standard SMC"
+        
+        print(f"\n{'='*70}")
+        print(f"🤖 XAUUSD Trading Bot Started")
+        print(f"📊 Strategy: {strategy_name}")
+        print(f"⏱️  Interval: Every {interval_seconds} seconds")
         print(f"🛡️  Features: FVG, BOS, Liquidity Sweeps, ATR Stops, Session Filters")
+        print(f"{'='*70}")
         print("\nPress Ctrl+C to stop...\n")
         
         try:
             iteration = 0
             while self.running:
                 iteration += 1
-                print(f"\n{'='*60}")
-                print(f"Iteration #{iteration}")
-                print(f"{'='*60}")
+                print(f"\n{'='*70}")
+                print(f"Iteration #{iteration} | Positions: {len(self.open_positions)}/{self.max_positions}")
+                print(f"{'='*70}")
                 
-                # ✅ DAY 2 FIX: Show tracking status
-                print(f"📊 Position Tracking: {len(self.open_positions)}/{self.max_positions}")
-                print()
+                # Use enhanced analysis if available
+                if self.use_enhanced_smc:
+                    self.analyze_enhanced()
+                else:
+                    self.analyze_and_trade()
                 
-                self.analyze_and_trade()
-                
-                # Save log every 10 iterations
                 if iteration % 10 == 0:
                     self.save_trade_log()
                 
-                # Wait for next iteration
                 for _ in range(interval_seconds):
                     if not self.running:
                         break
@@ -648,9 +806,7 @@ class XAUUSDTradingBot:
         print(f"Open positions: {len(self.open_positions)}")
 
 
-# Global bot instance for API access
 bot_instance = None
-
 
 def execute_manual_trade(trade_type: str, lot_size: float):
     """Execute manual trade from dashboard"""
@@ -660,15 +816,12 @@ def execute_manual_trade(trade_type: str, lot_size: float):
         return False
     
     try:
-        # Get current price
         current_price = bot_instance.mt5.get_current_price()
         if not current_price:
             return False
         
-        # Simple execution for manual trades
         entry_price = current_price['ask'] if trade_type.upper() == "BUY" else current_price['bid']
         
-        # Use basic stop loss (50 pips) for manual trades
         pip_value = 0.01
         if trade_type.upper() == "BUY":
             stop_loss = entry_price - (50 * pip_value)
@@ -677,7 +830,6 @@ def execute_manual_trade(trade_type: str, lot_size: float):
             stop_loss = entry_price + (50 * pip_value)
             take_profit = entry_price - (100 * pip_value)
         
-        # Place order
         result = bot_instance.mt5.place_order(
             trade_type.upper(),
             lot_size,
@@ -692,7 +844,6 @@ def execute_manual_trade(trade_type: str, lot_size: float):
         print(f"❌ Manual trade error: {e}")
         return False
 
-
 def start_api_server():
     """Start the dashboard API server"""
     try:
@@ -703,44 +854,42 @@ def start_api_server():
         hostname = socket.gethostname()
         local_ip = socket.gethostbyname(hostname)
         
-        print("\n" + "="*60)
+        print("\n" + "="*70)
         print("📱 DASHBOARD SERVER STARTING...")
-        print("="*60)
+        print("="*70)
         print(f"🖥️  Laptop Access:  http://localhost:8000/dashboard")
         print(f"📱 Phone Access:    http://{local_ip}:8000/dashboard")
         print(f"📊 API Docs:        http://localhost:8000/docs")
-        print("="*60)
+        print("="*70)
         print("✨ Copy the Phone Access URL to use on your mobile")
         print("🌐 Make sure phone is on the same WiFi network")
-        print("="*60 + "\n")
+        print("="*70 + "\n")
         
         uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
     except Exception as e:
         print(f"❌ API Server error: {e}")
 
-
 def main():
     """Main function to run the trading bot with dashboard"""
     global bot_instance
     
-    print("\n" + "="*60)
-    print(" " * 10 + "XAUUSD SMC TRADING BOT v2.0")
-    print(" " * 15 + "Enhanced Algorithm")
-    print("="*60 + "\n")
+    print("\n" + "="*70)
+    print(" " * 12 + "🎯 XAUUSD SMC TRADING BOT v3.0")
+    print(" " * 8 + "✨ Guardeer 10-Video Enhanced SMC")
+    print("="*70 + "\n")
+    
+    # ✨ NEW: Use Enhanced SMC by default (disable with use_enhanced_smc=False)
+    use_enhanced = True  # Change to False to use standard SMC
     
     print("⏳ Starting dashboard server...")
     
-    # Start API server in background thread
     api_thread = threading.Thread(target=start_api_server, daemon=True)
     api_thread.start()
     
-    # Give API server time to start
     time.sleep(3)
     
-    # Create and run bot
-    bot_instance = XAUUSDTradingBot()
-    bot_instance.run(interval_seconds=60)  # Check every minute
-
+    bot_instance = XAUUSDTradingBot(use_enhanced_smc=use_enhanced)
+    bot_instance.run(interval_seconds=60)
 
 if __name__ == "__main__":
     main()
