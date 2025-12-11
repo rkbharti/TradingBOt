@@ -294,11 +294,12 @@ class SMCStrategy:
         
         # === DECISION LOGIC ===
         # === DECISION LOGIC ===
+                # === DECISION LOGIC ===
         min_score = 4.0  # Require strong confirmation
-
+        
         if bullish_score >= min_score and bullish_score > bearish_score:
             signal = "BUY"
-            confidence = min(bullish_score / 8 * 100, 100)
+            confidence = min(bullish_score / 8 * 100, 100)  # Convert to percentage
             reason = f"Bullish SMC: {', '.join(bullish_reasons[:3])}"
             
             # ✅ ZONE FILTER: Only BUY in DISCOUNT zones
@@ -323,14 +324,14 @@ class SMCStrategy:
             if not in_session:
                 signal = "HOLD"
                 reason += f" [Outside trading session - {session_name}]"
+        
+        # Add session info to reason
+        if signal != "HOLD" and in_session:
+            reason += f" [{session_name} session]"
+        
+        self.last_signal = signal
+        return signal, reason
 
-                
-                # Add session info to reason
-                if signal != "HOLD" and in_session:
-                    reason += f" [{session_name} session]"
-                
-                self.last_signal = signal
-                return signal, reason
     
     def get_strategy_stats(self, data):
         """Return enhanced strategy statistics"""
