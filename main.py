@@ -363,9 +363,29 @@ class XAUUSDTradingBot:
     
     def execute_enhanced_trade(self, signal, price, historical_data, stats):
         """Execute trade with enhanced SMC-based parameters"""
+        
+        # ✅ CRITICAL FIX: Re-validate zone filter before MT5 execution
+        zone = stats.get('zone', 'EQUILIBRIUM')
+        
+        print(f"\n🔍 Pre-Execution Zone Validation:")
+        print(f"   Signal: {signal}")
+        print(f"   Current Zone: {zone}")
+        
+        if signal == "BUY" and zone not in ['DISCOUNT', 'DEEP_DISCOUNT']:
+            print(f"❌ BUY trade BLOCKED: Not in discount zone")
+            print(f"   Required: DISCOUNT or DEEP_DISCOUNT | Current: {zone}")
+            return False
+        
+        if signal == "SELL" and zone != 'PREMIUM':
+            print(f"❌ SELL trade BLOCKED: Not in premium zone")
+            print(f"   Required: PREMIUM | Current: {zone}")
+            return False
+        
+        print(f"✅ Zone validation passed - executing {signal} trade")
+        
+        # Original code continues...
         entry_price = price['ask'] if signal == "BUY" else price['bid']
         atr = stats.get('atr', entry_price * 0.01)
-        zone = stats.get('zone', 'EQUILIBRIUM')
         market_structure = stats.get('market_structure', 'NEUTRAL')
         
         # Calculate stop loss and take profit with ATR
@@ -389,20 +409,16 @@ class XAUUSDTradingBot:
         print(f"   Stop Loss: ${stop_loss:.2f} ({risk_metrics['stop_loss_pips']:.2f} pips)")
         print(f"   Take Profit: ${take_profit:.2f} ({risk_metrics['take_profit_pips']:.2f} pips)")
         print(f"   Lot Size: {lot_size}")
-        print(f"   Position Value: ${risk_metrics['position_value']:,.2f}")
         print(f"   Risk: ${risk_metrics['risk_amount']:.2f} ({risk_metrics['risk_percent']:.2f}%)")
-        print(f"   Potential Reward: ${risk_metrics['reward_amount']:.2f}")
         print(f"   R:R Ratio: 1:{risk_metrics['reward_ratio']:.1f}")
-        print(f"   ATR: ${atr:.2f}")
         print(f"   Zone: {zone} | Structure: {market_structure}")
         
-        # ✅ DAY 1 FIX: Place REAL order and capture ticket number
+        # Place order
         ticket = self.mt5.place_order(signal, lot_size, stop_loss, take_profit)
 
         if ticket:
-            # ✅ Track position with ticket number
             position = {
-                'ticket': ticket,  # ← Store ticket for tracking
+                'ticket': ticket,
                 'signal': signal,
                 'entry_price': entry_price,
                 'stop_loss': stop_loss,
@@ -416,11 +432,14 @@ class XAUUSDTradingBot:
             }
             self.open_positions.append(position)
             
-            print(f"\n✅ Position added to tracking")
+            print(f"\n✅ Position opened successfully")
             print(f"   Ticket: {ticket}")
             print(f"   Open Positions: {len(self.open_positions)}")
+            return True
         else:
-            print(f"\n❌ Order placement failed - position not tracked")
+            print(f"\n❌ Order placement failed")
+            return False
+
     
     def log_trade_analysis(self, signal, reason, price, stats):
         """Log enhanced trade analysis for review"""
