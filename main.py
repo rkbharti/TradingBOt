@@ -247,6 +247,15 @@ class XAUUSDTradingBot:
             print("❌ Could not fetch market data")
             return None
         
+        # ✅ FIX: Convert numpy array to pandas DataFrame if needed
+        if not isinstance(historical_data, pd.DataFrame):
+            print("   Converting market data to DataFrame...")
+            if hasattr(historical_data, 'columns'):
+                historical_data = pd.DataFrame(historical_data)
+            else:
+                # If it's a structured numpy array
+                historical_data = pd.DataFrame(historical_data)
+        
         current_price = self.mt5.get_current_price()
         if current_price is None:
             print("❌ Could not fetch current price")
@@ -270,6 +279,8 @@ class XAUUSDTradingBot:
             
             historical_data, current_price = market_data
             
+            print(f"📊 Fetched {len(historical_data)} bars of XAUUSD M5 data")
+            
             # =========================================================================
             # VIDEO 5: LIQUIDITY ANALYSIS
             # =========================================================================
@@ -289,93 +300,152 @@ class XAUUSDTradingBot:
                 self.bias_detector.df = historical_data
             
             print("\n📍 VIDEO 5 - LIQUIDITY DETECTION:")
-            pdh, pdl = self.liquidity_detector.get_previous_day_high_low()
-            swings = self.liquidity_detector.get_swing_high_low(lookback=20)
-            liquidity_zones = self.liquidity_detector.get_liquidity_zones()
-            liquidity_grabbed = self.liquidity_detector.check_liquidity_grab(current_price['bid'])
+            try:
+                pdh, pdl = self.liquidity_detector.get_previous_day_high_low()
+                print(f"   PDH: ${pdh:.2f} | PDL: ${pdl:.2f}" if pdh and pdl else "   PDH/PDL: Not available")
+            except Exception as e:
+                print(f"⚠️ Error getting PDH/PDL: {e}")
+                pdh, pdl = None, None
             
-            print(f"   PDH: ${pdh:.2f} | PDL: ${pdl:.2f}" if pdh and pdl else "   PDH/PDL: Not available")
-            print(f"   Swing Highs: {len(swings.get('highs', []))} | Swing Lows: {len(swings.get('lows', []))}")
-            print(f"   Liquidity Grabbed: {liquidity_grabbed.get('pdh_grabbed') or liquidity_grabbed.get('pdl_grabbed')}")
+            try:
+                swings = self.liquidity_detector.get_swing_high_low(lookback=20)
+                print(f"   Swing Highs: {len(swings.get('highs', []))} | Swing Lows: {len(swings.get('lows', []))}") 
+            except Exception as e:
+                print(f"⚠️ Error identifying swings: {e}")
+                swings = {'highs': [], 'lows': []}
+            
+            try:
+                liquidity_zones = self.liquidity_detector.get_liquidity_zones()
+                liquidity_grabbed = self.liquidity_detector.check_liquidity_grab(current_price['bid'])
+                print(f"   Liquidity Grabbed: {liquidity_grabbed.get('pdh_grabbed') or liquidity_grabbed.get('pdl_grabbed')}")
+            except Exception as e:
+                print(f"⚠️ Error checking liquidity: {e}")
+                liquidity_grabbed = {'pdh_grabbed': False, 'pdl_grabbed': False}
             
             # =========================================================================
             # VIDEO 6: POI IDENTIFICATION
             # =========================================================================
             print("\n🎯 VIDEO 6 - POI IDENTIFICATION:")
-            order_blocks = self.poi_identifier.find_order_blocks(lookback=50)
-            fvgs = self.poi_identifier.find_fvg()
-            idm_probability = self.poi_identifier.identify_idm_sweep(timeframe_minutes=15)
-            closest_poi = self.poi_identifier.get_closest_poi(current_price['bid'], direction='UP')
+            try:
+                order_blocks = self.poi_identifier.find_order_blocks(lookback=50)
+                print(f"   Bullish OBs: {len(order_blocks.get('bullish', []))} | Bearish OBs: {len(order_blocks.get('bearish', []))}")
+            except Exception as e:
+                print(f"⚠️ Error finding order blocks: {e}")
+                order_blocks = {'bullish': [], 'bearish': []}
             
-            print(f"   Bullish OBs: {len(order_blocks.get('bullish', []))} | Bearish OBs: {len(order_blocks.get('bearish', []))}")
-            print(f"   Bullish FVGs: {len(fvgs.get('bullish', []))} | Bearish FVGs: {len(fvgs.get('bearish', []))}")
-            print(f"   IDM Probability: {idm_probability.get('current_probability', 0)*100:.0f}%")
-            if closest_poi:
-                print(f"   Closest POI: ${closest_poi[0]:.2f} ({closest_poi[1]})")
+            try:
+                fvgs = self.poi_identifier.find_fvg()
+                print(f"   Bullish FVGs: {len(fvgs.get('bullish', []))} | Bearish FVGs: {len(fvgs.get('bearish', []))}")
+            except Exception as e:
+                print(f"⚠️ Error finding FVGs: {e}")
+                fvgs = {'bullish': [], 'bearish': []}
+            
+            try:
+                idm_probability = self.poi_identifier.identify_idm_sweep(timeframe_minutes=15)
+                print(f"   IDM Probability: {idm_probability.get('current_probability', 0)*100:.0f}%")
+            except Exception as e:
+                print(f"⚠️ Error calculating IDM: {e}")
+                idm_probability = {'current_probability': 0.65}
+            
+            try:
+                closest_poi = self.poi_identifier.get_closest_poi(current_price['bid'], direction='UP')
+                if closest_poi:
+                    print(f"   Closest POI: ${closest_poi[0]:.2f} ({closest_poi[1]})")
+            except Exception as e:
+                print(f"⚠️ Error finding closest POI: {e}")
+                closest_poi = None
             
             # =========================================================================
             # VIDEO 9: BIAS DETECTION
             # =========================================================================
             print("\n🧭 VIDEO 9 - BIAS DETECTION:")
-            daily_bias = self.bias_detector.analyze_daily_pattern(historical_data.iloc[-1])
-            intraday_bias = self.bias_detector.get_intraday_bias(lookback=20)
-            price_action_bias = self.bias_detector.get_price_action_bias()
-            combined_bias = self.bias_detector.get_combined_bias(daily_bias, intraday_bias, price_action_bias)
+            try:
+                daily_bias = self.bias_detector.analyze_daily_pattern(historical_data.iloc[-1])
+                print(f"   Daily Bias: {daily_bias}")
+            except Exception as e:
+                print(f"⚠️ Error analyzing daily pattern: {e}")
+                daily_bias = "NEUTRAL"
             
-            print(f"   Daily Bias: {daily_bias}")
-            print(f"   Intraday Bias: {intraday_bias}")
-            print(f"   Price Action: {price_action_bias}")
-            print(f"   Combined Bias: {combined_bias}")
+            try:
+                intraday_bias = self.bias_detector.get_intraday_bias(lookback=20)
+                print(f"   Intraday Bias: {intraday_bias}")
+            except Exception as e:
+                print(f"⚠️ Error getting intraday bias: {e}")
+                intraday_bias = "NEUTRAL"
+            
+            try:
+                price_action_bias = self.bias_detector.get_price_action_bias()
+                print(f"   Price Action: {price_action_bias}")
+            except Exception as e:
+                print(f"⚠️ Error getting price action bias: {e}")
+                price_action_bias = "NEUTRAL"
+            
+            try:
+                combined_bias = self.bias_detector.get_combined_bias(daily_bias, intraday_bias, price_action_bias)
+                print(f"   Combined Bias: {combined_bias}")
+            except Exception as e:
+                print(f"⚠️ Error combining bias: {e}")
+                combined_bias = "NEUTRAL"
             
             # =========================================================================
             # VIDEO 10: ZONE ANALYSIS
             # =========================================================================
             print("\n📦 VIDEO 10a - ZONE ANALYSIS:")
-            latest_swing_high = swings['highs'][-1]['price'] if swings['highs'] else current_price['bid']
-            latest_swing_low = swings['lows'][-1]['price'] if swings['lows'] else current_price['bid']
-            
-            zones = ZoneCalculator.calculate_zones(latest_swing_high, latest_swing_low)
-            current_zone = ZoneCalculator.classify_price_zone(current_price['bid'], zones)
-            zone_summary = ZoneCalculator.get_zone_summary(current_price['bid'], zones)
-            
-            print(f"   Current Zone: {current_zone}")
-            if zone_summary:
-                print(f"   Zone Strength: {zone_summary['zone_strength']:.0f}%")
-                print(f"   Can BUY: {zone_summary['can_buy']} | Can SELL: {zone_summary['can_sell']}")
-                print(f"   Next Target: {zone_summary['next_target']['target'] if zone_summary['next_target'] else 'N/A'}")
+            try:
+                latest_swing_high = swings['highs'][-1]['price'] if swings['highs'] else current_price['bid']
+                latest_swing_low = swings['lows'][-1]['price'] if swings['lows'] else current_price['bid']
+                
+                zones = ZoneCalculator.calculate_zones(latest_swing_high, latest_swing_low)
+                current_zone = ZoneCalculator.classify_price_zone(current_price['bid'], zones)
+                zone_summary = ZoneCalculator.get_zone_summary(current_price['bid'], zones)
+                
+                print(f"   Current Zone: {current_zone}")
+                if zone_summary:
+                    print(f"   Zone Strength: {zone_summary['zone_strength']:.0f}%")
+                    print(f"   Can BUY: {zone_summary['can_buy']} | Can SELL: {zone_summary['can_sell']}")
+                    print(f"   Next Target: {zone_summary['next_target']['target'] if zone_summary['next_target'] else 'N/A'}")
+            except Exception as e:
+                print(f"⚠️ Error analyzing zones: {e}")
+                zones = {}
+                current_zone = "EQUILIBRIUM"
+                zone_summary = None
             
             # =========================================================================
             # VIDEO 10b: NARRATIVE ANALYSIS (3Bs)
             # =========================================================================
             print("\n📖 VIDEO 10b - NARRATIVE (3Bs FRAMEWORK):")
-            market_state = {
-                'liquidity_grabbed': liquidity_grabbed['pdh_grabbed'] or liquidity_grabbed['pdl_grabbed'],
-                'liquidity_type': 'PDH' if liquidity_grabbed['pdh_grabbed'] else 'PDL' if liquidity_grabbed['pdl_grabbed'] else 'NONE',
-                'fvg_tapped': len(fvgs['bullish']) > 0 or len(fvgs['bearish']) > 0,
-                'fvg_type': 'BULLISH' if len(fvgs['bullish']) > 0 else 'BEARISH' if len(fvgs['bearish']) > 0 else 'NONE',
-                'ob_hit': len(order_blocks['bullish']) > 0 or len(order_blocks['bearish']) > 0,
-                'ob_type': 'BULLISH' if len(order_blocks['bullish']) > 0 else 'BEARISH' if len(order_blocks['bearish']) > 0 else 'NONE',
-                'current_direction': daily_bias,
-                'current_bias': combined_bias,
-                'next_poi_target': closest_poi[0] if closest_poi else current_price['bid'],
-                'target_type': closest_poi[1] if closest_poi else 'NONE',
-                'target_distance': abs(closest_poi[0] - current_price['bid']) if closest_poi else 0,
-                'target_confidence': 'HIGH' if closest_poi else 'LOW',
-                'zone': current_zone,
-                'zone_strength': zone_summary['zone_strength'] if zone_summary else 0,
-                'distance_from_equilibrium': abs(zone_summary['distance_from_equilibrium']) if zone_summary else 0,
-                'timeframe': '15min',
-                'price_action': 'NEUTRAL'
-            }
-            
-            narrative = self.narrative_analyzer.analyze_market_story(market_state)
-            
-            print(f"\n   B1 (Recent Action): {narrative.get('b1', {}).get('narrative', 'N/A')}")
-            print(f"   B2 (Current Framework): {narrative.get('b2', {}).get('narrative', 'N/A')}")
-            print(f"   B3 (Dealing Range): {narrative.get('b3', {}).get('narrative', 'N/A')}")
-            print(f"\n   Trade Signal: {narrative.get('trade_signal', 'HOLD')}")
-            print(f"   Confidence: {narrative.get('confidence', 0):.0f}%")
-            print(f"   Bias: {narrative.get('bias', 'NEUTRAL')}")
+            try:
+                market_state = {
+                    'liquidity_grabbed': liquidity_grabbed['pdh_grabbed'] or liquidity_grabbed['pdl_grabbed'],
+                    'liquidity_type': 'PDH' if liquidity_grabbed['pdh_grabbed'] else 'PDL' if liquidity_grabbed['pdl_grabbed'] else 'NONE',
+                    'fvg_tapped': len(fvgs['bullish']) > 0 or len(fvgs['bearish']) > 0,
+                    'fvg_type': 'BULLISH' if len(fvgs['bullish']) > 0 else 'BEARISH' if len(fvgs['bearish']) > 0 else 'NONE',
+                    'ob_hit': len(order_blocks['bullish']) > 0 or len(order_blocks['bearish']) > 0,
+                    'ob_type': 'BULLISH' if len(order_blocks['bullish']) > 0 else 'BEARISH' if len(order_blocks['bearish']) > 0 else 'NONE',
+                    'current_direction': daily_bias,
+                    'current_bias': combined_bias,
+                    'next_poi_target': closest_poi[0] if closest_poi else current_price['bid'],
+                    'target_type': closest_poi[1] if closest_poi else 'NONE',
+                    'target_distance': abs(closest_poi[0] - current_price['bid']) if closest_poi else 0,
+                    'target_confidence': 'HIGH' if closest_poi else 'LOW',
+                    'zone': current_zone,
+                    'zone_strength': zone_summary['zone_strength'] if zone_summary else 0,
+                    'distance_from_equilibrium': abs(zone_summary['distance_from_equilibrium']) if zone_summary else 0,
+                    'timeframe': '15min',
+                    'price_action': 'NEUTRAL'
+                }
+                
+                narrative = self.narrative_analyzer.analyze_market_story(market_state)
+                
+                print(f"\n   B1 (Recent Action): {narrative.get('b1', {}).get('narrative', 'N/A')}")
+                print(f"   B2 (Current Framework): {narrative.get('b2', {}).get('narrative', 'N/A')}")
+                print(f"   B3 (Dealing Range): {narrative.get('b3', {}).get('narrative', 'N/A')}")
+                print(f"\n   Trade Signal: {narrative.get('trade_signal', 'HOLD')}")
+                print(f"   Confidence: {narrative.get('confidence', 0):.0f}%")
+                print(f"   Bias: {narrative.get('bias', 'NEUTRAL')}")
+            except Exception as e:
+                print(f"⚠️ Error in narrative analysis: {e}")
+                narrative = {'trade_signal': 'HOLD', 'confidence': 0, 'bias': 'NEUTRAL'}
             
             # =========================================================================
             # DECISION MAKING
