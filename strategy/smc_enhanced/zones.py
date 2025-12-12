@@ -282,39 +282,54 @@ class ZoneCalculator:
     
     @staticmethod
     def get_zone_summary(current_price, zones):
-        """
-        Get complete zone summary.
-        
-        Returns: dict with all zone information
-        """
-        if zones is None:
-            return None
-        
+        """Get comprehensive zone analysis with safe formatting"""
         try:
-            current_zone = ZoneCalculator.classify_price_zone(current_price, zones)
-            zone_strength = ZoneCalculator.get_zone_strength(current_price, zones)
-            next_target = ZoneCalculator.get_next_zone_target(
-                current_price,
-                zones,
-                direction='UP' if current_zone == 'DISCOUNT' else 'DOWN'
-            )
+            if not zones or not isinstance(zones, dict):
+                return None
             
-            summary = {
-                'current_price': current_price,
+            # Safely get zone values with defaults
+            eq = zones.get('equilibrium', current_price)
+            premium_start = zones.get('premium_start', eq)
+            discount_end = zones.get('discount_end', eq)
+            swing_high = zones.get('swing_high', premium_start)
+            swing_low = zones.get('swing_low', discount_end)
+            
+            # Calculate distance from equilibrium
+            distance_from_eq = current_price - eq
+            eq_range = swing_high - swing_low
+            
+            if eq_range == 0:
+                zone_strength = 0
+            else:
+                zone_strength = abs(distance_from_eq / eq_range) * 100
+            
+            # Determine current zone
+            if current_price > premium_start:
+                current_zone = "PREMIUM"
+                can_buy = False
+                can_sell = True
+                next_target = discount_end
+            elif current_price < discount_end:
+                current_zone = "DISCOUNT"
+                can_buy = True
+                can_sell = False
+                next_target = premium_start
+            else:
+                current_zone = "EQUILIBRIUM"
+                can_buy = False
+                can_sell = False
+                next_target = eq
+            
+            return {
                 'current_zone': current_zone,
-                'zone_strength': zone_strength,
-                'can_buy': current_zone == 'DISCOUNT',
-                'can_sell': current_zone == 'PREMIUM',
-                'distance_from_equilibrium': ZoneCalculator.get_distance_from_zone(
-                    current_price, zones, 'equilibrium'
-                ),
-                'next_target': next_target,
-                'distance_to_swing_high': zones['swing_high'] - current_price,
-                'distance_to_swing_low': current_price - zones['swing_low']
+                'zone_strength': min(zone_strength, 100),  # Cap at 100%
+                'distance_from_equilibrium': distance_from_eq,
+                'can_buy': can_buy,
+                'can_sell': can_sell,
+                'next_target': float(next_target),  # ✅ Ensure it's a float
+                'equilibrium': float(eq)
             }
             
-            return summary
-            
         except Exception as e:
-            print(f"⚠️ Error getting zone summary: {e}")
+            print(f"   ⚠️  Zone summary error: {e}")
             return None

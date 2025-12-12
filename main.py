@@ -1,7 +1,7 @@
 import time
 import json
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 from utils.mt5_connection import MT5Connection
 from strategy.smc_strategy import SMCStrategy
@@ -142,10 +142,255 @@ class XAUUSDTradingBot:
         self.narrative_analyzer = None
         self.enhanced_analysis_data = {}
 
+        # ===== FIX #3: COOLDOWN TRACKER FOR BUY/SELL SIGNALS =====
+        self.last_buy_time = None
+        self.last_sell_time = None
+        self.COOLDOWN_SECONDS = 300  # 5 minutes between same-direction trades
+
+        # ===== FIX #4: TRAILING STOPS TRACKER =====
+        self.partial_profit_taken = {}  # Track which positions already took partial profit
+        self.trailing_stop_levels = {}  # Track trailing stop levels
+
         if self.use_enhanced_smc:
             print("✅ Using Guardeer 10-Video Enhanced SMC Strategy")
         else:
             print("⚠️  Using Standard SMC Strategy")
+
+    # ===== FIX #3: COOLDOWN FILTER FUNCTION =====
+    def check_trade_cooldown(self, signal_type):
+        """
+        Prevent multiple trades in same direction too quickly
+        Cooldown: 5 minutes between BUY trades or SELL trades
+        This prevents "catching falling knife" scenarios
+        """
+        now = datetime.now()
+        
+        if signal_type == 'BUY':
+            if self.last_buy_time:
+                time_since_last = (now - self.last_buy_time).total_seconds()
+                if time_since_last < self.COOLDOWN_SECONDS:
+                    remaining = self.COOLDOWN_SECONDS - time_since_last
+                    print(f"   ⏳ BUY cooldown active ({remaining:.0f}s remaining) - SIGNAL BLOCKED")
+                    return False
+            self.last_buy_time = now
+            print(f"   ✅ BUY cooldown cleared - Signal allowed")
+            return True
+        
+        elif signal_type == 'SELL':
+            if self.last_sell_time:
+                time_since_last = (now - self.last_sell_time).total_seconds()
+                if time_since_last < self.COOLDOWN_SECONDS:
+                    remaining = self.COOLDOWN_SECONDS - time_since_last
+                    print(f"   ⏳ SELL cooldown active ({remaining:.0f}s remaining) - SIGNAL BLOCKED")
+                    return False
+            self.last_sell_time = now
+            print(f"   ✅ SELL cooldown cleared - Signal allowed")
+            return True
+        
+        return True
+
+    # ===== FIX #1: ZONE-BASED EXIT LOGIC =====
+    def check_zone_based_exits(self, current_zone, current_price):
+        """
+        Close BUY trades in PREMIUM zone (take profits!)
+        Close SELL trades in DISCOUNT zone (take profits!)
+        This is the most critical fix - prevents holding winners too long
+        """
+        closed_trades = []
+        
+        try:
+            for pos in list(self.open_positions):
+                ticket = pos.get('ticket')
+                pos_type = pos.get('signal', 'BUY')
+                entry_price = pos.get('entry_price', 0)
+                profit = 0.0
+                
+                # Calculate current profit
+                if pos_type == 'BUY':
+                    profit = (current_price - entry_price) * pos.get('lot_size', 0) * 100
+                else:  # SELL
+                    profit = (entry_price - current_price) * pos.get('lot_size', 0) * 100
+                
+                # ===== ZONE-BASED EXIT RULES =====
+                should_close = False
+                reason = ""
+                
+                # Close BUY trades in PREMIUM zone
+                if pos_type == 'BUY' and current_zone == 'PREMIUM':
+                    should_close = True
+                    reason = f"BUY in PREMIUM zone (take profits!)"
+                
+                # Close SELL trades in DISCOUNT zone
+                elif pos_type == 'SELL' and current_zone == 'DISCOUNT':
+                    should_close = True
+                    reason = f"SELL in DISCOUNT zone (take profits!)"
+                
+                if should_close:
+                    print(f"\n   🎯 EXIT SIGNAL: Closing {pos_type} #{ticket}")
+                    print(f"      Entry: ${entry_price:.2f} | Current: ${current_price:.2f}")
+                    print(f"      Profit: ${profit:.2f}")
+                    print(f"      Reason: {reason}")
+                    
+                    # Close position in MT5
+                    close_result = self.mt5.close_position(ticket)
+                    
+                    if close_result:
+                        print(f"      ✅ Position closed successfully")
+                        closed_trades.append({
+                            'ticket': ticket,
+                            'type': pos_type,
+                            'profit': profit
+                        })
+                        self.open_positions.remove(pos)
+                    else:
+                        print(f"      ❌ Close failed")
+            
+            # Log results
+            if closed_trades:
+                total_profit = sum(t['profit'] for t in closed_trades)
+                print(f"\n   📊 Zone-Based Exits Complete:")
+                print(f"      Closed: {len(closed_trades)} positions")
+                print(f"      Total Profit: ${total_profit:.2f}")
+            
+            return closed_trades
+            
+        except Exception as e:
+            print(f"   ❌ Zone exit check error: {e}")
+            return []
+
+    # ===== FIX #4: PARTIAL PROFIT TAKING + TRAILING STOPS =====
+    def check_partial_profit_targets(self, current_price):
+        """
+        Close 50% of position at 2R (2x Risk/Reward)
+        Move remaining 50% SL to breakeven
+        This locks in profits while keeping upside exposure
+        """
+        partial_closes = []
+        
+        try:
+            for pos in list(self.open_positions):
+                ticket = pos.get('ticket')
+                
+                # Skip if already took partial profit on this position
+                if ticket in self.partial_profit_taken:
+                    continue
+                
+                entry = pos.get('entry_price', 0)
+                current = current_price
+                risk_pips = abs(entry - pos.get('stop_loss', 0)) / 0.01  # Convert to pips
+                pos_type = pos.get('signal', 'BUY')
+                volume = pos.get('lot_size', 0)
+                
+                # Calculate profit in pips
+                if pos_type == 'BUY':
+                    profit_pips = (current - entry) / 0.01
+                    profit_threshold = risk_pips * 2  # 2R target
+                    
+                    if profit_pips >= profit_threshold and profit_pips > 0:
+                        print(f"\n   💰 PARTIAL PROFIT TRIGGER: Position #{ticket}")
+                        print(f"      Entry: ${entry:.2f} | Current: ${current:.2f}")
+                        print(f"      Profit: {profit_pips:.1f} pips (≥ 2R target: {profit_threshold:.1f})")
+                        print(f"      Action: Close 50% ({volume*0.5:.2f} LOT), Move SL to breakeven")
+                        
+                        # Close 50% of position
+                        close_volume = volume * 0.5
+                        close_result = self.mt5.close_position_partial(ticket, close_volume)
+                        
+                        if close_result:
+                            print(f"      ✅ Partial close executed")
+                            
+                            # Move SL to breakeven for remaining position
+                            self.mt5.modify_position(ticket, entry, pos.get('take_profit'))
+                            print(f"      ✅ SL moved to breakeven ${entry:.2f}")
+                            
+                            self.partial_profit_taken[ticket] = True
+                            partial_closes.append(ticket)
+                        else:
+                            print(f"      ❌ Partial close failed")
+                
+                elif pos_type == 'SELL':
+                    profit_pips = (entry - current) / 0.01
+                    profit_threshold = risk_pips * 2
+                    
+                    if profit_pips >= profit_threshold and profit_pips > 0:
+                        print(f"\n   💰 PARTIAL PROFIT TRIGGER: Position #{ticket}")
+                        print(f"      Entry: ${entry:.2f} | Current: ${current:.2f}")
+                        print(f"      Profit: {profit_pips:.1f} pips (≥ 2R target: {profit_threshold:.1f})")
+                        print(f"      Action: Close 50%, Move SL to breakeven")
+                        
+                        close_volume = volume * 0.5
+                        close_result = self.mt5.close_position_partial(ticket, close_volume)
+                        
+                        if close_result:
+                            print(f"      ✅ Partial close executed")
+                            self.mt5.modify_position(ticket, entry, pos.get('take_profit'))
+                            print(f"      ✅ SL moved to breakeven ${entry:.2f}")
+                            
+                            self.partial_profit_taken[ticket] = True
+                            partial_closes.append(ticket)
+                        else:
+                            print(f"      ❌ Partial close failed")
+            
+            return partial_closes
+            
+        except Exception as e:
+            print(f"   ❌ Partial profit check error: {e}")
+            return []
+
+    # ===== FIX #5: TRAILING STOP IMPLEMENTATION =====
+    def update_trailing_stops(self, current_price, min_profit_pips=20):
+        """
+        Update trailing stops on profitable positions
+        Moves SL up by 50% of distance above entry for BUY
+        Prevents locking in losses while protecting gains
+        """
+        updated_count = 0
+        
+        try:
+            for pos in self.open_positions:
+                ticket = pos.get('ticket')
+                entry = pos.get('entry_price', 0)
+                current_sl = pos.get('stop_loss', 0)
+                pos_type = pos.get('signal', 'BUY')
+                
+                if pos_type == 'BUY':
+                    current_profit_pips = (current_price - entry) / 0.01
+                    
+                    # Only trail if profitable beyond min threshold
+                    if current_profit_pips >= min_profit_pips:
+                        # New SL: entry + 50% of current profit
+                        new_sl = entry + ((current_price - entry) * 0.5)
+                        
+                        # Only move SL upward (never downward)
+                        if new_sl > current_sl:
+                            old_sl = current_sl
+                            self.mt5.modify_position(ticket, new_sl, pos.get('take_profit'))
+                            print(f"   📈 Trailing Stop Updated: #{ticket}")
+                            print(f"      Old SL: ${old_sl:.2f} → New SL: ${new_sl:.2f}")
+                            print(f"      Profit: {current_profit_pips:.1f} pips")
+                            updated_count += 1
+                
+                else:  # SELL
+                    current_profit_pips = (entry - current_price) / 0.01
+                    
+                    if current_profit_pips >= min_profit_pips:
+                        # New SL: entry - 50% of current profit
+                        new_sl = entry - ((entry - current_price) * 0.5)
+                        
+                        # Only move SL downward (never upward)
+                        if new_sl < current_sl:
+                            old_sl = current_sl
+                            self.mt5.modify_position(ticket, new_sl, pos.get('take_profit'))
+                            print(f"   📉 Trailing Stop Updated: #{ticket}")
+                            print(f"      Old SL: ${old_sl:.2f} → New SL: ${new_sl:.2f}")
+                            print(f"      Profit: {current_profit_pips:.1f} pips")
+                            updated_count += 1
+            
+            return updated_count
+            
+        except Exception as e:
+            print(f"   ❌ Trailing stop error: {e}")
+            return 0
 
     def sync_positions_with_mt5(self):
         """Sync internal position tracking with actual MT5 positions"""
@@ -357,7 +602,7 @@ class XAUUSDTradingBot:
 
             try:
                 swings = self.liquidity_detector.get_swing_high_low(lookback=20)
-                print(f"   📍 Swing Highs: {len(swings.get('highs', []))} | Swing Lows: {len(swings.get('lows', []))}") 
+                print(f"   📍 Swing Highs: {len(swings.get('highs', []))} | Swing Lows: {len(swings.get('lows', []))}")
             except Exception as e:
                 print(f"   ❌ Error identifying swings: {e}")
                 swings = {'highs': [], 'lows': []}
@@ -374,14 +619,14 @@ class XAUUSDTradingBot:
             print("🎯 VIDEO 6 - POI IDENTIFICATION")
             try:
                 order_blocks = self.poi_identifier.find_order_blocks(lookback=50)
-                print(f"   📍 Bullish OBs: {len(order_blocks.get('bullish', []))} | Bearish OBs: {len(order_blocks.get('bearish', []))}") 
+                print(f"   📍 Bullish OBs: {len(order_blocks.get('bullish', []))} | Bearish OBs: {len(order_blocks.get('bearish', []))}")
             except Exception as e:
                 print(f"   ❌ Error finding order blocks: {e}")
                 order_blocks = {'bullish': [], 'bearish': []}
 
             try:
                 fvgs = self.poi_identifier.find_fvg()
-                print(f"   📍 Bullish FVGs: {len(fvgs.get('bullish', []))} | Bearish FVGs: {len(fvgs.get('bearish', []))}") 
+                print(f"   📍 Bullish FVGs: {len(fvgs.get('bullish', []))} | Bearish FVGs: {len(fvgs.get('bearish', []))}")
             except Exception as e:
                 print(f"   ❌ Error finding FVGs: {e}")
                 fvgs = {'bullish': [], 'bearish': []}
@@ -490,7 +735,6 @@ class XAUUSDTradingBot:
 
             final_signal = narrative.get('trade_signal', 'HOLD')
 
-            
             # ===== ZONE FILTER VALIDATION (TEMPORARY OVERRIDE FOR TESTING) =====
             print("🔍 ZONE FILTER VALIDATION")
 
@@ -536,7 +780,6 @@ class XAUUSDTradingBot:
                     zone_allows_trade = False
                     final_signal = 'HOLD'
 
-
             self.enhanced_analysis_data = {
                 'pdh': pdh,
                 'pdl': pdl,
@@ -549,18 +792,84 @@ class XAUUSDTradingBot:
                 'zones': zones
             }
 
-            self.last_signal = final_signal
+            # Calculate technical indicators for dashboard
+            try:
+                df = historical_data.copy()
+                
+                # Calculate EMAs/MAs
+                if len(df) >= 200:
+                    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+                    ema200 = float(df['ema200'].iloc[-1])
+                else:
+                    ema200 = 0.0
+                
+                if len(df) >= 50:
+                    df['ma20'] = df['close'].rolling(window=20).mean()
+                    df['ma50'] = df['close'].rolling(window=50).mean()
+                    ma20 = float(df['ma20'].iloc[-1])
+                    ma50 = float(df['ma50'].iloc[-1])
+                else:
+                    ma20 = 0.0
+                    ma50 = 0.0
+                
+                # Calculate Support/Resistance (recent 50 bars)
+                recent_bars = min(50, len(df))
+                support = float(df['low'].tail(recent_bars).min())
+                resistance = float(df['high'].tail(recent_bars).max())
+                
+                # Calculate ATR (14 periods)
+                if len(df) >= 14:
+                    df['high_low'] = df['high'] - df['low']
+                    df['high_close'] = abs(df['high'] - df['close'].shift(1))
+                    df['low_close'] = abs(df['low'] - df['close'].shift(1))
+                    df['tr'] = df[['high_low', 'high_close', 'low_close']].max(axis=1)
+                    df['atr'] = df['tr'].rolling(window=14).mean()
+                    atr = float(df['atr'].iloc[-1])
+                else:
+                    atr = 0.0
+                
+            except Exception as e:
+                print(f"   ⚠️  Error calculating technical levels: {e}")
+                ema200 = ma20 = ma50 = support = resistance = atr = 0.0
+
             self.last_analysis = {
                 'smc_indicators': self.enhanced_analysis_data,
+                'technical_levels': {
+                    'ema200': ema200,
+                    'ma20': ma20,
+                    'ma50': ma50,
+                    'support': support,
+                    'resistance': resistance,
+                    'atr': atr,
+                },
                 'zone': current_zone,
                 'bias': combined_bias
             }
 
+            # ===== FIX #1: ZONE-BASED EXIT CHECKS BEFORE NEW ENTRIES =====
+            print("\n🔴 FIX #1: ZONE-BASED EXITS")
+            self.check_zone_based_exits(current_zone, current_price['bid'])
+
+            # ===== FIX #4: PARTIAL PROFIT TAKING =====
+            print("\n💰 FIX #4: PARTIAL PROFIT TAKING")
+            self.check_partial_profit_targets(current_price['bid'])
+
+            # ===== FIX #5: UPDATE TRAILING STOPS =====
+            print("\n📈 FIX #5: TRAILING STOPS")
+            trailing_count = self.update_trailing_stops(current_price['bid'])
+            if trailing_count == 0:
+                print("   ℹ️  No positions ready for trailing stops")
+
             # Execute trade if conditions met
             at_max_positions = len(self.open_positions) >= self.max_positions
             if not at_max_positions and final_signal != 'HOLD' and zone_allows_trade:
-                print(f"✅ Executing {final_signal} trade...")
-                self.execute_enhanced_trade(final_signal, current_price, historical_data, zones)
+                # ===== FIX #3: CHECK COOLDOWN BEFORE TRADING =====
+                print("\n🎯 FIX #3: COOLDOWN FILTER")
+                if self.check_trade_cooldown(final_signal):
+                    print(f"✅ Executing {final_signal} trade...")
+                    self.execute_enhanced_trade(final_signal, current_price, historical_data, zones)
+                else:
+                    print(f"   🚫 Trade blocked by cooldown")
             elif at_max_positions and final_signal != 'HOLD':
                 print(f"⚠️  Signal {final_signal} detected but max positions ({self.max_positions}) reached")
 
@@ -724,19 +1033,55 @@ class XAUUSDTradingBot:
             entry_price = price['ask'] if signal == 'BUY' else price['bid']
             atr = historical_data['atr'].iloc[-1] if 'atr' in historical_data.columns else 1.0
 
-            # Calculate SL and TP based on zones
-            if zones:
-                if signal == 'BUY':
-                    stoploss = zones.get('discount_start', entry_price - atr * 2)
-                    takeprofit = zones.get('swing_high', entry_price + atr * 4)
-                else:  # SELL
-                    stoploss = zones.get('premium_end', entry_price + atr * 2)
-                    takeprofit = zones.get('swing_low', entry_price - atr * 4)
-            else:
-                stoploss = entry_price - (atr / 2) if signal == 'BUY' else entry_price + (atr / 2)
-                takeprofit = entry_price + (atr * 4) if signal == 'BUY' else entry_price - (atr * 4)
+            # Calculate SL and TP based on zones with CORRECT direction
+            if signal == 'BUY':
+                # For BUY: SL below entry, TP above entry
+                if zones:
+                    stoploss = min(
+                        zones.get('discount_start', entry_price - atr * 2),
+                        entry_price - (atr * 2)  # Ensure it's below
+                    )
+                    takeprofit = max(
+                        zones.get('swing_high', entry_price + atr * 4),
+                        entry_price + (atr * 3)  # Ensure it's above
+                    )
+                else:
+                    stoploss = entry_price - (atr * 2)
+                    takeprofit = entry_price + (atr * 4)
+            else:  # SELL
+                # For SELL: SL above entry, TP below entry
+                if zones:
+                    stoploss = max(
+                        zones.get('premium_end', entry_price + atr * 2),
+                        entry_price + (atr * 2)  # Ensure it's above
+                    )
+                    takeprofit = min(
+                        zones.get('swing_low', entry_price - atr * 4),
+                        entry_price - (atr * 3)  # Ensure it's below
+                    )
+                else:
+                    stoploss = entry_price + (atr * 2)
+                    takeprofit = entry_price - (atr * 4)
 
-            # ===== FIX #4: USE SAFE LOT SIZE CALCULATION FOR ENHANCED TRADES =====
+            # CRITICAL: Validate stop levels
+            if signal == 'BUY':
+                if stoploss >= entry_price:
+                    print(f"   ⚠️  BUY SL was above entry! Correcting...")
+                    stoploss = entry_price - (atr * 2)
+                if takeprofit <= entry_price:
+                    print(f"   ⚠️  BUY TP was below entry! Correcting...")
+                    takeprofit = entry_price + (atr * 3)
+            else:  # SELL
+                if stoploss <= entry_price:
+                    print(f"   ⚠️  SELL SL was below entry! Correcting...")
+                    stoploss = entry_price + (atr * 2)
+                if takeprofit >= entry_price:
+                    print(f"   ⚠️  SELL TP was above entry! Correcting...")
+                    takeprofit = entry_price - (atr * 3)
+
+            print(f"   🔧 Final Levels: Entry=${entry_price:.2f}, SL=${stoploss:.2f}, TP=${takeprofit:.2f}")
+
+            # ===== FIX #3: USE SAFE LOT SIZE CALCULATION FOR ENHANCED TRADES =====
             lot_size, adjusted_stoploss = calculate_lot_size_with_safety(
                 account_balance=self.mt5.get_account_info().balance if self.mt5.get_account_info() else 50000,
                 risk_percent=self.risk_per_trade,
@@ -750,14 +1095,25 @@ class XAUUSDTradingBot:
 
             risk_metrics = self.risk_calculator.get_risk_metrics(entry_price, stoploss, lot_size, takeprofit)
 
+            # Calculate pip distances manually
+            pip_value = 0.01  # For XAUUSD
+            sl_pips = abs(entry_price - stoploss) / pip_value
+            tp_pips = abs(takeprofit - entry_price) / pip_value
+            risk_amount = abs(entry_price - stoploss) * lot_size * 100
+            reward_amount = abs(takeprofit - entry_price) * lot_size * 100
+            rr_ratio = reward_amount / risk_amount if risk_amount > 0 else 0
+
             print(f"\n{'='*70}")
             print(f"✨ Enhanced Trade Execution")
             print(f"{'='*70}")
+            print(f"   Direction: {signal}")
             print(f"   Entry: ${entry_price:.2f}")
-            print(f"   Stop Loss: ${stoploss:.2f} ({risk_metrics['stoploss_pips']:.2f} pips)")
-            print(f"   Take Profit: ${takeprofit:.2f} ({risk_metrics['takeprofit_pips']:.2f} pips)")
+            print(f"   Stop Loss: ${stoploss:.2f} ({sl_pips:.1f} pips)")
+            print(f"   Take Profit: ${takeprofit:.2f} ({tp_pips:.1f} pips)")
             print(f"   Lot Size: {lot_size} lots")
-            print(f"   Risk: ${risk_metrics['risk_amount']:.2f}")
+            print(f"   Risk: ${risk_amount:.2f}")
+            print(f"   Reward: ${reward_amount:.2f}")
+            print(f"   R:R Ratio: 1:{rr_ratio:.2f}")
             print(f"{'='*70}\n")
 
             ticket = self.mt5.place_order(signal, lot_size, stoploss, takeprofit)

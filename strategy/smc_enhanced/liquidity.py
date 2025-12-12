@@ -30,56 +30,78 @@ class LiquidityDetector:
         self.swings = {'highs': [], 'lows': []}
         
     def get_previous_day_high_low(self):
-        """
-        Get Previous Day High and Low for liquidity zones.
-        Works with intraday data - looks at the last completed daily candle.
-        
-        This is the EXTERNAL liquidity pool that institutions target.
-        """
+        """Get previous day high/low with proper DataFrame time handling"""
         try:
+            import pytz
+            from datetime import datetime, timedelta
+            
+            # Check if 'time' column exists
             if 'time' not in self.df.columns:
+                print(f"   ⚠️  'time' column not found in DataFrame. Columns: {list(self.df.columns)}")
                 return None, None
             
-            # Convert time to datetime if needed
+            # ✅ CRITICAL: Convert time column to datetime if it's not already
             if not pd.api.types.is_datetime64_any_dtype(self.df['time']):
-                try:
-                    df_time = pd.to_datetime(self.df['time'])
-                except:
-                    return None, None
+                print(f"   🔧 Converting time column from {self.df['time'].dtype} to datetime...")
+                # Handle both Unix timestamps (int) and datetime strings
+                if pd.api.types.is_numeric_dtype(self.df['time']):
+                    # Unix timestamp (seconds)
+                    self.df['time'] = pd.to_datetime(self.df['time'], unit='s')
+                else:
+                    # String datetime
+                    self.df['time'] = pd.to_datetime(self.df['time'])
+            
+            # Set IST timezone
+            ist = pytz.timezone('Asia/Kolkata')
+            now_ist = datetime.now(ist)
+            
+            # Make DataFrame timezone-aware if not already
+            if self.df['time'].dt.tz is None:
+                self.df['time'] = self.df['time'].dt.tz_localize('UTC').dt.tz_convert(ist)
             else:
-                df_time = self.df['time']
+                self.df['time'] = self.df['time'].dt.tz_convert(ist)
             
-            # Create a copy with datetime index
-            df_copy = self.df.copy()
-            df_copy['datetime'] = df_time
-            df_copy.set_index('datetime', inplace=True)
+            # Get today's date at midnight IST
+            today_start = now_ist.replace(hour=0, minute=0, second=0, microsecond=0)
             
-            # Resample to daily
-            try:
-                daily_df = df_copy.resample('D').agg({
-                    'open': 'first',
-                    'high': 'max',
-                    'low': 'min',
-                    'close': 'last',
-                    'volume': 'sum' if 'volume' in df_copy.columns else 'count'
-                }).reset_index()
-            except:
-                return None, None
+            # Get yesterday's date range
+            yesterday_end = today_start
+            yesterday_start = yesterday_end - timedelta(days=1)
             
-            if len(daily_df) < 2:
-                return None, None
+            print(f"   🔍 Looking for PDH/PDL between {yesterday_start.strftime('%Y-%m-%d %H:%M')} and {yesterday_end.strftime('%Y-%m-%d %H:%M')}")
             
-            # Get PREVIOUS day's high and low (not today)
-            prev_day = daily_df.iloc[-2]
+            # Filter DataFrame for yesterday's data
+            df_yesterday = self.df[
+                (self.df['time'] >= yesterday_start) & 
+                (self.df['time'] < yesterday_end)
+            ]
             
-            self.pdh = float(prev_day['high'])
-            self.pdl = float(prev_day['low'])
+            if len(df_yesterday) == 0:
+                # Try last 24 hours if no exact yesterday match
+                cutoff_time = now_ist - timedelta(hours=24)
+                df_yesterday = self.df[self.df['time'] >= cutoff_time]
+                
+                if len(df_yesterday) == 0:
+                    print(f"   ⚠️  No data available for PDH/PDL calculation")
+                    print(f"   📊 DataFrame time range: {self.df['time'].min()} to {self.df['time'].max()}")
+                    return None, None
+                
+                print(f"   ℹ️  Using last 24 hours data ({len(df_yesterday)} bars)")
+            else:
+                print(f"   ✅ Found {len(df_yesterday)} bars for {yesterday_start.date()}")
             
-            return self.pdh, self.pdl
+            pdh = float(df_yesterday['high'].max())
+            pdl = float(df_yesterday['low'].min())
+            
+            return pdh, pdl
             
         except Exception as e:
-            print(f"⚠️ Error getting PDH/PDL: {e}")
+            print(f"   ❌ Error calculating PDH/PDL: {e}")
+            import traceback
+            traceback.print_exc()
             return None, None
+
+
     
     def get_swing_high_low(self, lookback=20, min_candles_between=2):
         """

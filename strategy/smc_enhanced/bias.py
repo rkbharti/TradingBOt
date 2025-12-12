@@ -212,36 +212,50 @@ class BiasDetector:
             return 'NEUTRAL'
     
     def get_price_action_bias(self):
-        """
-        Get bias based on recent price action (last 3 candles).
-        
-        From Guardeer: Price action tells the story
-        """
+        """Analyze price action bias from recent candles"""
         try:
-            if len(self.df) < 3:
-                return 'NEUTRAL'
+            # ✅ Ensure we're working with DataFrame, not tuple
+            if not isinstance(self.df, pd.DataFrame):
+                print("   ⚠️  df is not a DataFrame")
+                return "NEUTRAL"
             
-            last_three = self.df.tail(3)
+            if len(self.df) < 5:
+                return "NEUTRAL"
             
-            # Get highs and lows
-            highs = [float(c['high']) for c in last_three.iterrows()]
-            lows = [float(c['low']) for c in last_three.iterrows()]
+            # Get last candle as Series (not tuple)
+            latest = self.df.iloc[-1]
             
-            # Check if making higher highs and higher lows (uptrend)
-            if (highs[1] > highs[0] and highs[2] > highs[1] and
-                lows[1] > lows[0] and lows[2] > lows[1]):
-                return 'BULLISH'
+            # Convert to dict if it's a Series
+            if isinstance(latest, pd.Series):
+                latest = latest.to_dict()
             
-            # Check if making lower highs and lower lows (downtrend)
-            elif (highs[1] < highs[0] and highs[2] < highs[1] and
-                  lows[1] < lows[0] and lows[2] < lows[1]):
-                return 'BEARISH'
+            # Now safely access as dict
+            close = latest.get('close', 0)
+            open_price = latest.get('open', 0)
+            high = latest.get('high', 0)
+            low = latest.get('low', 0)
             
-            return 'NEUTRAL'
-        
+            body_size = abs(close - open_price)
+            total_range = high - low
+            
+            if total_range == 0:
+                return "NEUTRAL"
+            
+            # Strong bullish candle
+            if close > open_price and body_size / total_range > 0.7:
+                return "BULLISH"
+            
+            # Strong bearish candle
+            elif close < open_price and body_size / total_range > 0.7:
+                return "BEARISH"
+            
+            else:
+                return "NEUTRAL"
+                
         except Exception as e:
-            print(f"⚠️ Error getting price action bias: {e}")
-            return 'NEUTRAL'
+            print(f"   ⚠️  Price action bias error: {e}")
+            return "NEUTRAL"
+
     
     def get_combined_bias(self, daily_bias=None, intraday_bias=None, price_action_bias=None):
         """
