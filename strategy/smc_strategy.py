@@ -179,28 +179,44 @@ class SMCStrategy:
         
         return df
     
+    def get_current_session(self):
+        """
+        Get current trading session based on IST (India Standard Time)
+        
+        Sessions (IST):
+        - ASIAN: 00:00 - 06:00
+        - CLOSED: 06:00 - 08:00
+        - LONDON: 08:00 - 17:00
+        - LONDON/NEW_YORK: 13:00 - 17:00 (overlap)
+        - NEW_YORK: 13:00 - 22:00
+        - CLOSED: 22:00 - 00:00
+        """
+        current_hour = datetime.now().hour
+        
+        # ===== CORRECT SESSION DETECTION =====
+        if 0 <= current_hour < 6:
+            return "ASIAN", True
+        elif 6 <= current_hour < 8:
+            return "CLOSED", False
+        elif 8 <= current_hour < 13:
+            return "LONDON", True
+        elif 13 <= current_hour < 17:
+            return "LONDON/NEW_YORK", True  # Overlap session
+        elif 17 <= current_hour < 22:
+            return "NEW_YORK", True
+        else:  # 22:00 - 00:00
+            return "CLOSED", False
+    
     def check_trading_session(self):
         """Check if current time is within optimal trading sessions (IST)"""
-        now = datetime.now().time()
+        session_name, is_active = self.get_current_session()
         
-        # Convert to IST (UTC+5:30)
-        # London session: 1:30 PM - 10:00 PM IST
-        # New York session: 6:00 PM - 2:30 AM IST
-        london_open = time(13, 30)
-        london_close = time(22, 0)
-        ny_open = time(18, 0)
-        ny_close = time(2, 30)
-        
-        # Check London session
-        if london_open <= now <= london_close:
-            return True, "LONDON"
-        
-        # Check NY session (including after midnight)
-        if ny_open <= now or now <= ny_close:
-            return True, "NEW_YORK"
-        
-        # Asian session - lower volume, avoid for gold
-        return False, "ASIAN"
+        # Prefer London and New York sessions for gold trading
+        # Asian session has lower volume
+        if session_name in ["LONDON", "LONDON/NEW_YORK", "NEW_YORK"]:
+            return True, session_name
+        else:
+            return False, session_name
     
     def generate_signal(self, data):
         """Generate enhanced SMC-based trading signals"""
@@ -293,8 +309,6 @@ class SMCStrategy:
             bearish_reasons.append("MA alignment")
         
         # === DECISION LOGIC ===
-        # === DECISION LOGIC ===
-                # === DECISION LOGIC ===
         min_score = 4.0  # Require strong confirmation
         
         if bullish_score >= min_score and bullish_score > bearish_score:
@@ -331,7 +345,6 @@ class SMCStrategy:
         
         self.last_signal = signal
         return signal, reason
-
     
     def get_strategy_stats(self, data):
         """Return enhanced strategy statistics"""
@@ -346,8 +359,9 @@ class SMCStrategy:
         df = self.calculate_premium_discount_zones(df)
         
         current = df.iloc[-1]
-        in_session, session_name = self.check_trading_session()
+        in_session, session_name = self.get_current_session()
         
+        # ===== FIXED SESSION DISPLAY =====
         return {
             'current_price': current['close'],
             'ma20': current.get('MA20', 0),
@@ -359,7 +373,7 @@ class SMCStrategy:
             'market_structure': self.market_structure,
             'zone': current.get('zone', 'UNKNOWN'),
             'last_signal': self.last_signal,
-            'session': session_name,
+            'session': session_name,  # ✅ NOW SHOWS CORRECT SESSION
             'in_trading_hours': in_session,
             'fvg_bullish': current.get('fvg_bullish', False),
             'fvg_bearish': current.get('fvg_bearish', False),

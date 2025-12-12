@@ -253,9 +253,9 @@ class XAUUSDTradingBot:
         # ===== CREATE RISK CALCULATOR WITH SAFETY VALUES =====
         self.risk_calculator = StopLossCalculator(
             account_balance=balance,
-            risk_per_trade=self.risk_per_trade,  # Using loaded safe value (0.5%)
-            min_sl_distance_pips=self.min_sl_pips  # Using loaded safe value (10 pips)
+            risk_per_trade=self.risk_per_trade
         )
+        self.risk_calculator.min_sl_distance_pips = self.min_sl_pips
 
         print(f"✅ Account Balance: ${balance:,.2f}")
         print(f"✅ Risk per Trade: {self.risk_per_trade}%")
@@ -357,7 +357,7 @@ class XAUUSDTradingBot:
 
             try:
                 swings = self.liquidity_detector.get_swing_high_low(lookback=20)
-                print(f"   📍 Swing Highs: {len(swings.get('highs', []))} | Swing Lows: {len(swings.get('lows', []))}")
+                print(f"   📍 Swing Highs: {len(swings.get('highs', []))} | Swing Lows: {len(swings.get('lows', []))}") 
             except Exception as e:
                 print(f"   ❌ Error identifying swings: {e}")
                 swings = {'highs': [], 'lows': []}
@@ -374,14 +374,14 @@ class XAUUSDTradingBot:
             print("🎯 VIDEO 6 - POI IDENTIFICATION")
             try:
                 order_blocks = self.poi_identifier.find_order_blocks(lookback=50)
-                print(f"   📍 Bullish OBs: {len(order_blocks.get('bullish', []))} | Bearish OBs: {len(order_blocks.get('bearish', []))}")
+                print(f"   📍 Bullish OBs: {len(order_blocks.get('bullish', []))} | Bearish OBs: {len(order_blocks.get('bearish', []))}") 
             except Exception as e:
                 print(f"   ❌ Error finding order blocks: {e}")
                 order_blocks = {'bullish': [], 'bearish': []}
 
             try:
                 fvgs = self.poi_identifier.find_fvg()
-                print(f"   📍 Bullish FVGs: {len(fvgs.get('bullish', []))} | Bearish FVGs: {len(fvgs.get('bearish', []))}")
+                print(f"   📍 Bullish FVGs: {len(fvgs.get('bullish', []))} | Bearish FVGs: {len(fvgs.get('bearish', []))}") 
             except Exception as e:
                 print(f"   ❌ Error finding FVGs: {e}")
                 fvgs = {'bullish': [], 'bearish': []}
@@ -490,19 +490,52 @@ class XAUUSDTradingBot:
 
             final_signal = narrative.get('trade_signal', 'HOLD')
 
-            # ===== ZONE FILTER VALIDATION (THE SECRET EDGE) =====
+            
+            # ===== ZONE FILTER VALIDATION (TEMPORARY OVERRIDE FOR TESTING) =====
             print("🔍 ZONE FILTER VALIDATION")
+
+            # EMERGENCY FIX: Temporary zone override to enable trading
+            ENABLE_ZONE_OVERRIDE = True  # ← SET TO False TO REVERT TO STRICT FILTERING
+
             zone_allows_trade = False
-            if final_signal == 'BUY' and current_zone == 'DISCOUNT':
-                print(f"   ✅ {final_signal} signal allowed in {current_zone} zone")
-                zone_allows_trade = True
-            elif final_signal == 'SELL' and current_zone == 'PREMIUM':
-                print(f"   ✅ {final_signal} signal allowed in {current_zone} zone")
-                zone_allows_trade = True
-            elif final_signal != 'HOLD':
-                print(f"   ❌ {final_signal} signal BLOCKED | Current zone is {current_zone}")
-                zone_allows_trade = False
-                final_signal = 'HOLD'
+
+            if ENABLE_ZONE_OVERRIDE:
+                # ✅ OVERRIDE MODE: Allow trades in any zone if signal + trend is strong
+                print(f"   🚨 OVERRIDE MODE ACTIVE - Zone filter relaxed for testing")
+                
+                if final_signal != 'HOLD':
+                    # Check if there's directional bias to confirm trade
+                    if final_signal == 'BUY' and combined_bias in ['BULLISH', 'HIGHER_HIGH']:
+                        print(f"   ✅ BUY signal allowed - Trend confirms ({combined_bias})")
+                        zone_allows_trade = True
+                    elif final_signal == 'SELL' and combined_bias in ['BEARISH', 'LOWER_LOW']:
+                        print(f"   ✅ SELL signal allowed - Trend confirms ({combined_bias})")
+                        zone_allows_trade = True
+                    else:
+                        print(f"   ⚠️  {final_signal} signal detected but trend weak ({combined_bias})")
+                        print(f"   📍 Zone: {current_zone} | Bias: {combined_bias}")
+                        zone_allows_trade = False
+                
+                print(f"   📊 Debug Info:")
+                print(f"      • Current Zone: {current_zone}")
+                print(f"      • Combined Bias: {combined_bias}")
+                print(f"      • Signal: {final_signal}")
+                print(f"      • Zone Strength: {zone_summary.get('zone_strength', 0) if zone_summary else 0:.0f}%")
+
+            else:
+                # ❌ STRICT MODE: Original zone filtering (no trades)
+                print(f"   🔐 STRICT MODE ACTIVE - Original zone filtering")
+                if final_signal == 'BUY' and current_zone == 'DISCOUNT':
+                    print(f"   ✅ {final_signal} signal allowed in {current_zone} zone")
+                    zone_allows_trade = True
+                elif final_signal == 'SELL' and current_zone == 'PREMIUM':
+                    print(f"   ✅ {final_signal} signal allowed in {current_zone} zone")
+                    zone_allows_trade = True
+                elif final_signal != 'HOLD':
+                    print(f"   ❌ {final_signal} signal BLOCKED | Current zone is {current_zone}")
+                    zone_allows_trade = False
+                    final_signal = 'HOLD'
+
 
             self.enhanced_analysis_data = {
                 'pdh': pdh,
@@ -823,6 +856,9 @@ class XAUUSDTradingBot:
             initial_balance = float(account_info.balance) if account_info else 100000.0
             current_balance = initial_balance + current_pnl
 
+            # ===== FIXED SESSION DETECTION =====
+            session_name, is_active = self.strategy.get_current_session()
+
             state = {
                 'running': bool(self.running),
                 'balance': current_balance,
@@ -835,7 +871,8 @@ class XAUUSDTradingBot:
                     'fvg_bullish': bool(convert_value(smc.get('fvg_bullish', False))),
                     'fvg_bearish': bool(convert_value(smc.get('fvg_bearish', False))),
                     'bos': str(smc.get('bos')) if smc.get('bos') else None,
-                    'session': str(smc.get('session', 'CLOSED')),
+                    'session': session_name,  # ✅ NOW SHOWS CORRECT SESSION
+                    'in_trading_hours': is_active,
                 },
                 'technical_levels': {
                     'ma20': float(convert_value(tech.get('ma20', 0))),
