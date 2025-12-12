@@ -520,18 +520,19 @@ class XAUUSDTradingBot:
             print(f"✅ Found {len(mt5_positions)} open positions in MT5")
             for pos in mt5_positions:
                 position = {
-                    'ticket': pos.ticket,
-                    'signal': pos.type,
-                    'entry_price': pos.price_open,
-                    'stop_loss': pos.sl,
-                    'take_profit': pos.tp,
-                    'lot_size': pos.volume,
+                    'ticket': pos['ticket'] if isinstance(pos, dict) else pos.ticket,
+                    'signal': pos['type'] if isinstance(pos, dict) else pos.type,
+                    'entry_price': pos['price_open'] if isinstance(pos, dict) else pos.price_open,
+                    'stop_loss': pos['sl'] if isinstance(pos, dict) else pos.sl,
+                    'take_profit': pos['tp'] if isinstance(pos, dict) else pos.tp,
+                    'lot_size': pos['volume'] if isinstance(pos, dict) else pos.volume,
                     'entry_time': datetime.now(),
                     'risk_percent': 0,
                     'atr': 0,
                     'zone': 'UNKNOWN',
                     'market_structure': 'UNKNOWN'
                 }
+
                 self.open_positions.append(position)
                 print(f"   ✅ Imported {pos.type} | Ticket: {pos.ticket} | {pos.volume} lots | P/L: ${pos.profit:.2f}")
 
@@ -734,6 +735,40 @@ class XAUUSDTradingBot:
                 narrative = {'trade_signal': 'HOLD', 'confidence': 0, 'bias': 'NEUTRAL'}
 
             final_signal = narrative.get('trade_signal', 'HOLD')
+            
+            
+            # ===== FIX #6: NARRATIVE OVERRIDE FOR MISSING SIGNALS =====
+            print("\n🔧 FIX #6: NARRATIVE OVERRIDE CHECK")
+
+            # Debug: Show what we're checking
+            if zone_summary:
+                print(f"   📊 Zone: {current_zone} | Strength: {zone_summary.get('zone_strength', 0):.0f}% | Signal: {final_signal}")
+            else:
+                print(f"   ⚠️  No zone_summary available!")
+
+            # Override logic with LOWER threshold (50% instead of 70%)
+            if final_signal == 'HOLD' and current_zone == 'DISCOUNT' and zone_summary:
+                zone_str = zone_summary.get('zone_strength', 0)
+                if zone_str > 50:
+                    print(f"   🎯 OVERRIDE: DISCOUNT ({zone_str:.0f}%) → Forcing BUY Signal")
+                    final_signal = 'BUY'
+                    print(f"   ✅ Signal changed to: {final_signal}")
+                else:
+                    print(f"   ⚠️  Zone strength too weak ({zone_str:.0f}% < 50%) - No override")
+                    
+            elif final_signal == 'HOLD' and current_zone == 'PREMIUM' and zone_summary:
+                zone_str = zone_summary.get('zone_strength', 0)
+                if zone_str > 50:
+                    print(f"   🎯 OVERRIDE: PREMIUM ({zone_str:.0f}%) → Forcing SELL Signal")
+                    final_signal = 'SELL'
+                    print(f"   ✅ Signal changed to: {final_signal}")
+                else:
+                    print(f"   ⚠️  Zone strength too weak ({zone_str:.0f}% < 50%) - No override")
+                    
+            else:
+                print(f"   ℹ️  No override needed. Current signal: {final_signal}")
+
+
 
             # ===== ZONE FILTER VALIDATION (TEMPORARY OVERRIDE FOR TESTING) =====
             print("🔍 ZONE FILTER VALIDATION")
@@ -744,21 +779,23 @@ class XAUUSDTradingBot:
             zone_allows_trade = False
 
             if ENABLE_ZONE_OVERRIDE:
-                # ✅ OVERRIDE MODE: Allow trades in any zone if signal + trend is strong
                 print(f"   🚨 OVERRIDE MODE ACTIVE - Zone filter relaxed for testing")
                 
                 if final_signal != 'HOLD':
                     # Check if there's directional bias to confirm trade
-                    if final_signal == 'BUY' and combined_bias in ['BULLISH', 'HIGHER_HIGH']:
-                        print(f"   ✅ BUY signal allowed - Trend confirms ({combined_bias})")
+                    # NEUTRAL is allowed because price can be in valid zone while ranging
+                    if final_signal == 'BUY' and combined_bias in ['BULLISH', 'HIGHER_HIGH', 'NEUTRAL']:
+                        print(f"   ✅ BUY signal allowed - Zone + Bias confirms ({combined_bias})")
                         zone_allows_trade = True
-                    elif final_signal == 'SELL' and combined_bias in ['BEARISH', 'LOWER_LOW']:
-                        print(f"   ✅ SELL signal allowed - Trend confirms ({combined_bias})")
+                    elif final_signal == 'SELL' and combined_bias in ['BEARISH', 'LOWER_LOW', 'NEUTRAL']:
+                        print(f"   ✅ SELL signal allowed - Zone + Bias confirms ({combined_bias})")
                         zone_allows_trade = True
                     else:
-                        print(f"   ⚠️  {final_signal} signal detected but trend weak ({combined_bias})")
+                        # Only block if bias is AGAINST the signal direction
+                        print(f"   ⚠️  {final_signal} signal BLOCKED - Bias conflicts ({combined_bias})")
                         print(f"   📍 Zone: {current_zone} | Bias: {combined_bias}")
                         zone_allows_trade = False
+
                 
                 print(f"   📊 Debug Info:")
                 print(f"      • Current Zone: {current_zone}")
@@ -1033,35 +1070,39 @@ class XAUUSDTradingBot:
             entry_price = price['ask'] if signal == 'BUY' else price['bid']
             atr = historical_data['atr'].iloc[-1] if 'atr' in historical_data.columns else 1.0
 
-            # Calculate SL and TP based on zones with CORRECT direction
+            # Calculate SL and TP based on zones with CORRECT direction + MINIMUM SAFETY
+            MIN_SL_PIPS = 20  # Minimum 20 pips stop loss
+            pip_value = 0.01  # For XAUUSD
+
             if signal == 'BUY':
                 # For BUY: SL below entry, TP above entry
                 if zones:
                     stoploss = min(
-                        zones.get('discount_start', entry_price - atr * 2),
-                        entry_price - (atr * 2)  # Ensure it's below
+                        zones.get('discount_start', entry_price - max(atr * 3, MIN_SL_PIPS * pip_value)),
+                        entry_price - max(atr * 3, MIN_SL_PIPS * pip_value)
                     )
                     takeprofit = max(
                         zones.get('swing_high', entry_price + atr * 4),
-                        entry_price + (atr * 3)  # Ensure it's above
+                        entry_price + (atr * 4)
                     )
                 else:
-                    stoploss = entry_price - (atr * 2)
+                    stoploss = entry_price - max(atr * 3, MIN_SL_PIPS * pip_value)
                     takeprofit = entry_price + (atr * 4)
             else:  # SELL
                 # For SELL: SL above entry, TP below entry
                 if zones:
                     stoploss = max(
-                        zones.get('premium_end', entry_price + atr * 2),
-                        entry_price + (atr * 2)  # Ensure it's above
+                        zones.get('premium_end', entry_price + max(atr * 3, MIN_SL_PIPS * pip_value)),
+                        entry_price + max(atr * 3, MIN_SL_PIPS * pip_value)
                     )
                     takeprofit = min(
                         zones.get('swing_low', entry_price - atr * 4),
-                        entry_price - (atr * 3)  # Ensure it's below
+                        entry_price - (atr * 4)
                     )
                 else:
-                    stoploss = entry_price + (atr * 2)
+                    stoploss = entry_price + max(atr * 3, MIN_SL_PIPS * pip_value)
                     takeprofit = entry_price - (atr * 4)
+
 
             # CRITICAL: Validate stop levels
             if signal == 'BUY':
