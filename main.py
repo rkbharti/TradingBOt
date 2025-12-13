@@ -10,6 +10,27 @@ import threading
 import sys
 import os
 
+# ========================================
+# ZONE VS BIAS CONFIGURATION
+# ========================================
+
+# Strong zone threshold for counter-trend trades
+STRONG_ZONE_THRESHOLD = 70  # 70%+ zones can override bias
+WEAK_ZONE_THRESHOLD = 30    # Below 30% = too weak to trade
+
+# Allow strong zones to override conflicting bias
+ENABLE_STRONG_ZONE_OVERRIDE = True
+
+# Override mode for testing (bypass strict filters)
+ENABLE_ZONE_OVERRIDE = True  # Set to False after testing
+
+print(f"⚙️  Zone Configuration:")
+print(f"   Strong Zone Threshold: {STRONG_ZONE_THRESHOLD}%")
+print(f"   Weak Zone Threshold: {WEAK_ZONE_THRESHOLD}%")
+print(f"   Strong Zone Override: {ENABLE_STRONG_ZONE_OVERRIDE}")
+print(f"   Testing Override Mode: {ENABLE_ZONE_OVERRIDE}")
+
+
 # ===== CRITICAL: FIXED CONFIGURATION LOADING =====
 def load_config_with_safety(config_path="config.json"):
     """Load config with safety defaults for risk management"""
@@ -259,83 +280,73 @@ class XAUUSDTradingBot:
             return []
 
     # ===== FIX #4: PARTIAL PROFIT TAKING + TRAILING STOPS =====
-    def check_partial_profit_targets(self, current_price):
+    def check_partial_profit_targets(self, current_price: float):
         """
-        Close 50% of position at 2R (2x Risk/Reward)
-        Move remaining 50% SL to breakeven
-        This locks in profits while keeping upside exposure
+        Check if any positions have reached partial profit targets (2R)
+        and take 50% profit while moving SL to breakeven
         """
-        partial_closes = []
-        
         try:
-            for pos in list(self.open_positions):
-                ticket = pos.get('ticket')
-                
-                # Skip if already took partial profit on this position
-                if ticket in self.partial_profit_taken:
+            for pos in self.open_positions:
+                # Skip if already partially closed
+                if pos.get('partial_closed', False):
                     continue
                 
-                entry = pos.get('entry_price', 0)
-                current = current_price
-                risk_pips = abs(entry - pos.get('stop_loss', 0)) / 0.01  # Convert to pips
-                pos_type = pos.get('signal', 'BUY')
-                volume = pos.get('lot_size', 0)
+                entry = pos['entry_price']
+                sl = pos['sl']
+                tp = pos['tp']
+                original_volume = pos['volume']
                 
-                # Calculate profit in pips
-                if pos_type == 'BUY':
-                    profit_pips = (current - entry) / 0.01
-                    profit_threshold = risk_pips * 2  # 2R target
-                    
-                    if profit_pips >= profit_threshold and profit_pips > 0:
-                        print(f"\n   💰 PARTIAL PROFIT TRIGGER: Position #{ticket}")
-                        print(f"      Entry: ${entry:.2f} | Current: ${current:.2f}")
-                        print(f"      Profit: {profit_pips:.1f} pips (≥ 2R target: {profit_threshold:.1f})")
-                        print(f"      Action: Close 50% ({volume*0.5:.2f} LOT), Move SL to breakeven")
-                        
-                        # Close 50% of position
-                        close_volume = volume * 0.5
-                        close_result = self.mt5.close_position_partial(ticket, close_volume)
-                        
-                        if close_result:
-                            print(f"      ✅ Partial close executed")
-                            
-                            # Move SL to breakeven for remaining position
-                            self.mt5.modify_position(ticket, entry, pos.get('take_profit'))
-                            print(f"      ✅ SL moved to breakeven ${entry:.2f}")
-                            
-                            self.partial_profit_taken[ticket] = True
-                            partial_closes.append(ticket)
-                        else:
-                            print(f"      ❌ Partial close failed")
+                # Calculate risk (R)
+                if pos['type'] == 'BUY':
+                    risk = entry - sl
+                    profit_pips = (current_price - entry) * 100
+                    target_pips = risk * 2 * 100  # 2R target
+                else:  # SELL
+                    risk = sl - entry
+                    profit_pips = (entry - current_price) * 100
+                    target_pips = risk * 2 * 100  # 2R target
                 
-                elif pos_type == 'SELL':
-                    profit_pips = (entry - current) / 0.01
-                    profit_threshold = risk_pips * 2
+                # Check if 2R reached
+                if profit_pips >= target_pips:
+                    print(f"\n   💰 PARTIAL PROFIT TRIGGER: Position #{pos['ticket']}")
+                    print(f"      Entry: ${entry:.2f} | Current: ${current_price:.2f}")
+                    print(f"      Profit: {profit_pips:.0f} pips (≥ 2R target: {target_pips:.0f})")
+                    print(f"      Action: Close 50%, Move SL to breakeven")
                     
-                    if profit_pips >= profit_threshold and profit_pips > 0:
-                        print(f"\n   💰 PARTIAL PROFIT TRIGGER: Position #{ticket}")
-                        print(f"      Entry: ${entry:.2f} | Current: ${current:.2f}")
-                        print(f"      Profit: {profit_pips:.1f} pips (≥ 2R target: {profit_threshold:.1f})")
-                        print(f"      Action: Close 50%, Move SL to breakeven")
+                    # Close 50% of position
+                    volume_to_close = round(original_volume / 2, 2)
+                    
+                    result = self.mt5.close_position_partial(
+                        ticket=pos['ticket'],
+                        volume_to_close=volume_to_close,
+                        comment="Partial Profit @ 2R"
+                    )
+                    
+                    if result['success']:
+                        print(f"      ✅ Closed {volume_to_close} lots successfully")
                         
-                        close_volume = volume * 0.5
-                        close_result = self.mt5.close_position_partial(ticket, close_volume)
+                        # Move SL to breakeven
+                        modify_result = self.mt5.modify_position(
+                            ticket=pos['ticket'],
+                            new_sl=entry,
+                            comment="SL to Breakeven"
+                        )
                         
-                        if close_result:
-                            print(f"      ✅ Partial close executed")
-                            self.mt5.modify_position(ticket, entry, pos.get('take_profit'))
-                            print(f"      ✅ SL moved to breakeven ${entry:.2f}")
+                        if modify_result['success']:
+                            print(f"      ✅ Stop Loss moved to breakeven: ${entry:.2f}")
                             
-                            self.partial_profit_taken[ticket] = True
-                            partial_closes.append(ticket)
+                            # Update position tracking
+                            pos['partial_closed'] = True
+                            pos['volume'] = result['remaining_volume']
+                            pos['sl'] = entry
                         else:
-                            print(f"      ❌ Partial close failed")
-            
-            return partial_closes
-            
+                            print(f"      ❌ Failed to move SL: {modify_result['message']}")
+                    else:
+                        print(f"      ❌ Partial close failed: {result['message']}")
+                        
         except Exception as e:
-            print(f"   ❌ Partial profit check error: {e}")
-            return []
+            print(f"   ❌ Partial profit check error: {str(e)}")
+
 
     # ===== FIX #5: TRAILING STOP IMPLEMENTATION =====
     def update_trailing_stops(self, current_price, min_profit_pips=20):
@@ -778,44 +789,125 @@ class XAUUSDTradingBot:
 
             zone_allows_trade = False
 
+                        # ========================================
+            # ZONE FILTER VALIDATION
+            # ========================================
+            print("\n🔍 ZONE FILTER VALIDATION")
+            
+            # EMERGENCY FIX: Temporary zone override to enable trading
+            ENABLE_ZONE_OVERRIDE = True  # ← SET TO False TO REVERT TO STRICT FILTERING
+            
+            zone_allows_trade = False
+            
             if ENABLE_ZONE_OVERRIDE:
-                print(f"   🚨 OVERRIDE MODE ACTIVE - Zone filter relaxed for testing")
+                print("   🚨 OVERRIDE MODE ACTIVE - Zone filter relaxed for testing")
                 
-                if final_signal != 'HOLD':
-                    # Check if there's directional bias to confirm trade
-                    # NEUTRAL is allowed because price can be in valid zone while ranging
-                    if final_signal == 'BUY' and combined_bias in ['BULLISH', 'HIGHER_HIGH', 'NEUTRAL']:
-                        print(f"   ✅ BUY signal allowed - Zone + Bias confirms ({combined_bias})")
+                # ========================================
+                # STRONG ZONE CONFIGURATION
+                # ========================================
+                STRONG_ZONE_THRESHOLD = 70  # 70%+ zones can override bias
+                WEAK_ZONE_THRESHOLD = 30    # Below 30% = too weak
+                ENABLE_STRONG_ZONE_OVERRIDE = True  # Allow counter-trend in strong zones
+                
+                # Calculate zone strength flags
+                zone_str = zone_summary.get('zone_strength', 0) if zone_summary else 0
+                is_strong_zone = zone_str >= STRONG_ZONE_THRESHOLD
+                is_weak_zone = zone_str <= WEAK_ZONE_THRESHOLD
+                
+                # ========================================
+                # BUY SIGNAL LOGIC
+                # ========================================
+                if final_signal == 'BUY':
+                    
+                    # Case 1: Bias supports BUY
+                    if combined_bias in ['BULLISH', 'HIGHER_HIGH', 'NEUTRAL']:
+                        print(f"   ✅ BUY signal allowed - Bias confirms ({combined_bias})")
                         zone_allows_trade = True
-                    elif final_signal == 'SELL' and combined_bias in ['BEARISH', 'LOWER_LOW', 'NEUTRAL']:
-                        print(f"   ✅ SELL signal allowed - Zone + Bias confirms ({combined_bias})")
+                    
+                    # Case 2: Strong DISCOUNT zone overrides bearish bias
+                    elif ENABLE_STRONG_ZONE_OVERRIDE and is_strong_zone and current_zone == 'DISCOUNT':
+                        print(f"   🎯 BUY signal allowed - STRONG DISCOUNT zone ({zone_str:.0f}%) overrides {combined_bias} bias")
+                        print(f"   💡 Counter-trend reversal setup detected")
+                        print(f"   📊 Institutional buying zone - High probability")
                         zone_allows_trade = True
-                    else:
-                        # Only block if bias is AGAINST the signal direction
-                        print(f"   ⚠️  {final_signal} signal BLOCKED - Bias conflicts ({combined_bias})")
-                        print(f"   📍 Zone: {current_zone} | Bias: {combined_bias}")
+                    
+                    # Case 3: Weak zone cannot override bias
+                    elif is_weak_zone:
+                        print(f"   ⚠️  BUY signal BLOCKED - Zone too weak ({zone_str:.0f}% < {WEAK_ZONE_THRESHOLD}%)")
+                        print(f"   💡 Wait for stronger zone setup")
                         zone_allows_trade = False
-
+                    
+                    # Case 4: Medium zone with conflicting bias
+                    else:
+                        print(f"   ⚠️  BUY signal BLOCKED - Zone not strong enough ({zone_str:.0f}% < {STRONG_ZONE_THRESHOLD}%) to override {combined_bias} bias")
+                        print(f"   💡 Need zone >{STRONG_ZONE_THRESHOLD}% OR bias alignment")
+                        zone_allows_trade = False
                 
-                print(f"   📊 Debug Info:")
+                # ========================================
+                # SELL SIGNAL LOGIC
+                # ========================================
+                elif final_signal == 'SELL':
+                    
+                    # Case 1: Bias supports SELL
+                    if combined_bias in ['BEARISH', 'LOWER_LOW', 'NEUTRAL']:
+                        print(f"   ✅ SELL signal allowed - Bias confirms ({combined_bias})")
+                        zone_allows_trade = True
+                    
+                    # Case 2: Strong PREMIUM zone overrides bullish bias
+                    elif ENABLE_STRONG_ZONE_OVERRIDE and is_strong_zone and current_zone == 'PREMIUM':
+                        print(f"   🎯 SELL signal allowed - STRONG PREMIUM zone ({zone_str:.0f}%) overrides {combined_bias} bias")
+                        print(f"   💡 Counter-trend reversal setup detected")
+                        print(f"   📊 Institutional selling zone - High probability")
+                        zone_allows_trade = True
+                    
+                    # Case 3: Weak zone cannot override bias
+                    elif is_weak_zone:
+                        print(f"   ⚠️  SELL signal BLOCKED - Zone too weak ({zone_str:.0f}% < {WEAK_ZONE_THRESHOLD}%)")
+                        print(f"   💡 Wait for stronger zone setup")
+                        zone_allows_trade = False
+                    
+                    # Case 4: Medium zone with conflicting bias
+                    else:
+                        print(f"   ⚠️  SELL signal BLOCKED - Zone not strong enough ({zone_str:.0f}% < {STRONG_ZONE_THRESHOLD}%) to override {combined_bias} bias")
+                        print(f"   💡 Need zone >{STRONG_ZONE_THRESHOLD}% OR bias alignment")
+                        zone_allows_trade = False
+                
+                # ========================================
+                # HOLD SIGNAL (No trade)
+                # ========================================
+                else:
+                    print(f"   ℹ️  Signal is HOLD - No trade decision needed")
+                    zone_allows_trade = False
+                
+                # ========================================
+                # DEBUG INFORMATION
+                # ========================================
+                print(f"\n   📊 Filter Analysis:")
                 print(f"      • Current Zone: {current_zone}")
+                print(f"      • Zone Strength: {zone_str:.0f}%")
+                print(f"      • Strong Zone?: {'YES' if is_strong_zone else 'NO'} (threshold: {STRONG_ZONE_THRESHOLD}%)")
+                print(f"      • Weak Zone?: {'YES' if is_weak_zone else 'NO'} (threshold: {WEAK_ZONE_THRESHOLD}%)")
                 print(f"      • Combined Bias: {combined_bias}")
                 print(f"      • Signal: {final_signal}")
-                print(f"      • Zone Strength: {zone_summary.get('zone_strength', 0) if zone_summary else 0:.0f}%")
+                print(f"      • Override Enabled?: {ENABLE_STRONG_ZONE_OVERRIDE}")
+                print(f"      • Trade Allowed?: {zone_allows_trade}")
 
             else:
-                # ❌ STRICT MODE: Original zone filtering (no trades)
-                print(f"   🔐 STRICT MODE ACTIVE - Original zone filtering")
-                if final_signal == 'BUY' and current_zone == 'DISCOUNT':
-                    print(f"   ✅ {final_signal} signal allowed in {current_zone} zone")
+                # ========================================
+                # STRICT MODE (No overrides)
+                # ========================================
+                print("   🔒 STRICT MODE - No zone overrides allowed")
+                
+                if final_signal == 'BUY' and combined_bias in ['BULLISH', 'NEUTRAL']:
                     zone_allows_trade = True
-                elif final_signal == 'SELL' and current_zone == 'PREMIUM':
-                    print(f"   ✅ {final_signal} signal allowed in {current_zone} zone")
+                    print(f"   ✅ BUY allowed - Bias aligned")
+                elif final_signal == 'SELL' and combined_bias in ['BEARISH', 'NEUTRAL']:
                     zone_allows_trade = True
-                elif final_signal != 'HOLD':
-                    print(f"   ❌ {final_signal} signal BLOCKED | Current zone is {current_zone}")
+                    print(f"   ✅ SELL allowed - Bias aligned")
+                else:
                     zone_allows_trade = False
-                    final_signal = 'HOLD'
+                    print(f"   ❌ {final_signal} blocked - Bias conflicts in strict mode")
+
 
             self.enhanced_analysis_data = {
                 'pdh': pdh,

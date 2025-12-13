@@ -181,31 +181,51 @@ class SMCStrategy:
     
     def get_current_session(self):
         """
-        Get current trading session based on IST (India Standard Time)
-        
-        Sessions (IST):
-        - ASIAN: 00:00 - 06:00
-        - CLOSED: 06:00 - 08:00
-        - LONDON: 08:00 - 17:00
-        - LONDON/NEW_YORK: 13:00 - 17:00 (overlap)
-        - NEW_YORK: 13:00 - 22:00
-        - CLOSED: 22:00 - 00:00
+        Check if current time is within trading sessions
+        Returns: (session_name, is_active)
         """
-        current_hour = datetime.now().hour
+        from datetime import datetime, time
         
-        # ===== CORRECT SESSION DETECTION =====
-        if 0 <= current_hour < 6:
-            return "ASIAN", True
-        elif 6 <= current_hour < 8:
-            return "CLOSED", False
-        elif 8 <= current_hour < 13:
-            return "LONDON", True
-        elif 13 <= current_hour < 17:
-            return "LONDON/NEW_YORK", True  # Overlap session
-        elif 17 <= current_hour < 22:
-            return "NEW_YORK", True
-        else:  # 22:00 - 00:00
-            return "CLOSED", False
+        now = datetime.now()
+        current_time = now.time()
+        weekday = now.weekday()  # Monday=0, Sunday=6
+        
+        # ========================================
+        # WEEKEND CHECK (Critical!)
+        # ========================================
+        if weekday == 5:  # Saturday
+            return "WEEKEND (Saturday)", False
+        elif weekday == 6:  # Sunday before 6 AM IST
+            if current_time < time(6, 0):
+                return "WEEKEND (Sunday)", False
+        
+        # ========================================
+        # SESSION TIMES (IST = UTC+5:30)
+        # ========================================
+        sessions = {
+            'TOKYO': (time(6, 0), time(12, 30)),
+            'LONDON': (time(13, 30), time(22, 0)),
+            'NEW_YORK': (time(19, 0), time(2, 0)),
+            'LONDON/NEW_YORK': (time(19, 0), time(22, 0))  # Overlap
+        }
+        
+        # ========================================
+        # CHECK ACTIVE SESSION
+        # ========================================
+        for session_name, (start, end) in sessions.items():
+            # Handle overnight sessions (NY session crosses midnight)
+            if start > end:  # Overnight session
+                if current_time >= start or current_time <= end:
+                    return session_name, True
+            else:  # Normal session
+                if start <= current_time <= end:
+                    return session_name, True
+        
+        # ========================================
+        # NO SESSION ACTIVE
+        # ========================================
+        return "CLOSED", False
+
     
     def check_trading_session(self):
         """Check if current time is within optimal trading sessions (IST)"""

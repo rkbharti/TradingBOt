@@ -290,6 +290,145 @@ class MT5Connection:
             import traceback
             traceback.print_exc()
             return None
+    def close_position_partial(self, ticket: int, volume_to_close: float, comment: str = "Partial Close") -> dict:
+        """
+        Close partial position (e.g., 50% profit taking)
+        
+        Args:
+            ticket: Position ticket number
+            volume_to_close: Volume to close (e.g., 0.05 for half of 0.10)
+            comment: Close comment
+        
+        Returns:
+            dict with 'success', 'message', 'deal_id'
+        """
+        try:
+            # Get position details
+            position = mt5.positions_get(ticket=ticket)
+            if not position:
+                return {
+                    'success': False,
+                    'message': f'Position {ticket} not found'
+                }
+            
+            position = position[0]
+            
+            # Validate volume
+            if volume_to_close > position.volume:
+                return {
+                    'success': False,
+                    'message': f'Cannot close {volume_to_close} lots (position has {position.volume})'
+                }
+            
+            # Determine close type (opposite of position)
+            if position.type == mt5.ORDER_TYPE_BUY:
+                order_type = mt5.ORDER_TYPE_SELL
+                price = mt5.symbol_info_tick(position.symbol).bid
+            else:
+                order_type = mt5.ORDER_TYPE_BUY
+                price = mt5.symbol_info_tick(position.symbol).ask
+            
+            # Create close request
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": position.symbol,
+                "volume": volume_to_close,
+                "type": order_type,
+                "position": ticket,
+                "price": price,
+                "deviation": 20,
+                "magic": 234000,
+                "comment": comment,
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_IOC,
+            }
+            
+            # Send order
+            result = mt5.order_send(request)
+            
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                return {
+                    'success': False,
+                    'message': f'Partial close failed: {result.comment}',
+                    'retcode': result.retcode
+                }
+            
+            return {
+                'success': True,
+                'message': f'Partial close successful: {volume_to_close} lots',
+                'deal_id': result.deal,
+                'remaining_volume': position.volume - volume_to_close
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Error closing partial: {str(e)}'
+            }
+            
+    def modify_position(self, ticket: int, new_sl: float = None, new_tp: float = None, comment: str = "Modified") -> dict:
+        """
+        Modify position's stop loss and/or take profit
+        
+        Args:
+            ticket: Position ticket number
+            new_sl: New stop loss price (None = don't change)
+            new_tp: New take profit price (None = don't change)
+            comment: Modification comment
+        
+        Returns:
+            dict with 'success', 'message'
+        """
+        try:
+            # Get position details
+            position = mt5.positions_get(ticket=ticket)
+            if not position:
+                return {
+                    'success': False,
+                    'message': f'Position {ticket} not found'
+                }
+            
+            position = position[0]
+            
+            # Use current values if not specified
+            sl = new_sl if new_sl is not None else position.sl
+            tp = new_tp if new_tp is not None else position.tp
+            
+            # Create modification request
+            request = {
+                "action": mt5.TRADE_ACTION_SLTP,
+                "symbol": position.symbol,
+                "position": ticket,
+                "sl": sl,
+                "tp": tp,
+                "magic": 234000,
+                "comment": comment,
+            }
+            
+            # Send modification
+            result = mt5.order_send(request)
+            
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                return {
+                    'success': False,
+                    'message': f'Modification failed: {result.comment}',
+                    'retcode': result.retcode
+                }
+            
+            return {
+                'success': True,
+                'message': f'Position modified: SL={sl}, TP={tp}',
+                'new_sl': sl,
+                'new_tp': tp
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Error modifying position: {str(e)}'
+            }
+
+
 
     
     def place_demo_order(self, signal, lot_size, stop_loss, take_profit):
