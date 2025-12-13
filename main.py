@@ -400,7 +400,7 @@ class XAUUSDTradingBot:
                 print("   ⚠️  Could not fetch MT5 positions for sync")
                 return
 
-            mt5_tickets = [pos.ticket for pos in mt5_positions]
+            mt5_tickets = [pos['ticket'] for pos in mt5_positions]
             before_count = len(self.open_positions)
             synced_positions = []
 
@@ -520,12 +520,12 @@ class XAUUSDTradingBot:
             print(f"✅ Found {len(mt5_positions)} open positions in MT5")
             for pos in mt5_positions:
                 position = {
-                    'ticket': pos['ticket'] if isinstance(pos, dict) else pos.ticket,
-                    'signal': pos['type'] if isinstance(pos, dict) else pos.type,
+                    'ticket': pos['ticket'] if isinstance(pos, dict) else pos['ticket'],
+                    'signal': pos['type'] if isinstance(pos, dict) else pos['type'],
                     'entry_price': pos['price_open'] if isinstance(pos, dict) else pos.price_open,
                     'stop_loss': pos['sl'] if isinstance(pos, dict) else pos.sl,
                     'take_profit': pos['tp'] if isinstance(pos, dict) else pos.tp,
-                    'lot_size': pos['volume'] if isinstance(pos, dict) else pos.volume,
+                    'lot_size': pos['volume'] if isinstance(pos, dict) else pos['volume'],
                     'entry_time': datetime.now(),
                     'risk_percent': 0,
                     'atr': 0,
@@ -534,7 +534,7 @@ class XAUUSDTradingBot:
                 }
 
                 self.open_positions.append(position)
-                print(f"   ✅ Imported {pos.type} | Ticket: {pos.ticket} | {pos.volume} lots | P/L: ${pos.profit:.2f}")
+                print(f"   ✅ Imported {pos['type']} | Ticket: {pos['ticket']} | {pos['volume']} lots | P/L: ${pos['profit']:.2f}")
 
             print(f"📊 Imported {len(self.open_positions)} positions from MT5")
         else:
@@ -899,16 +899,30 @@ class XAUUSDTradingBot:
 
             # Execute trade if conditions met
             at_max_positions = len(self.open_positions) >= self.max_positions
-            if not at_max_positions and final_signal != 'HOLD' and zone_allows_trade:
-                # ===== FIX #3: CHECK COOLDOWN BEFORE TRADING =====
-                print("\n🎯 FIX #3: COOLDOWN FILTER")
-                if self.check_trade_cooldown(final_signal):
-                    print(f"✅ Executing {final_signal} trade...")
-                    self.execute_enhanced_trade(final_signal, current_price, historical_data, zones)
-                else:
-                    print(f"   🚫 Trade blocked by cooldown")
-            elif at_max_positions and final_signal != 'HOLD':
-                print(f"⚠️  Signal {final_signal} detected but max positions ({self.max_positions}) reached")
+            # ========================================
+            # 🔧 FIX #7: SESSION FILTER CHECK
+            # ========================================
+            print("\n⏰ FIX #7: SESSION FILTER")
+            session_name, is_active = self.strategy.get_current_session()
+
+            if is_active:
+                print(f"   ✅ Session: {session_name} is OPEN - Trading allowed")
+            else:
+                print(f"   ⏸️  Session: {session_name} is CLOSED - Trading blocked")
+                if final_signal != 'HOLD':
+                    print(f"   🚫 {final_signal} signal suppressed due to closed session")
+                    final_signal = 'HOLD'  # Override signal to prevent trading
+
+                if not at_max_positions and final_signal != 'HOLD' and zone_allows_trade:
+                    # ===== FIX #3: CHECK COOLDOWN BEFORE TRADING =====
+                    print("\n🎯 FIX #3: COOLDOWN FILTER")
+                    if self.check_trade_cooldown(final_signal):
+                        print(f"✅ Executing {final_signal} trade...")
+                        self.execute_enhanced_trade(final_signal, current_price, historical_data, zones)
+                    else:
+                        print(f"   🚫 Trade blocked by cooldown")
+                elif at_max_positions and final_signal != 'HOLD':
+                    print(f"⚠️  Signal {final_signal} detected but max positions ({self.max_positions}) reached")
 
             self.log_trade_analysis(final_signal, 'Enhanced SMC Analysis', current_price, market_state)
             self.update_dashboard_state()
