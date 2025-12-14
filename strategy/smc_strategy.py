@@ -193,11 +193,16 @@ class SMCStrategy:
         # ========================================
         # WEEKEND CHECK (Critical!)
         # ========================================
-        if weekday == 5:  # Saturday
+        if weekday == 5:  # Saturday - CLOSED ALL DAY
             return "WEEKEND (Saturday)", False
-        elif weekday == 6:  # Sunday before 6 AM IST
-            if current_time < time(6, 0):
-                return "WEEKEND (Sunday)", False
+        elif weekday == 6:  # Sunday - CLOSED ALL DAY
+            return "WEEKEND (Sunday)", False
+        elif weekday == 0 and current_time < time(3, 30):  # Monday before 3:30 AM IST
+            # Market opens Monday 3:30 AM IST (Sunday 5 PM EST)
+            return "PRE-MARKET (Monday)", False
+        elif weekday == 4 and current_time >= time(3, 30):  # Friday after 3:30 AM IST
+            # Market closes Friday 5 PM EST = Saturday 3:30 AM IST
+            return "POST-MARKET (Friday)", False
         
         # ========================================
         # SESSION TIMES (IST = UTC+5:30)
@@ -225,6 +230,7 @@ class SMCStrategy:
         # NO SESSION ACTIVE
         # ========================================
         return "CLOSED", False
+
 
     
     def check_trading_session(self):

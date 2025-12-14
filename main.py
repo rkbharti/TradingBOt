@@ -9,6 +9,52 @@ from strategy.stoploss_calc import StopLossCalculator
 import threading
 import sys
 import os
+import requests
+
+# ========================================
+# TELEGRAM NOTIFICATION SYSTEM
+# ========================================
+TELEGRAM_BOT_TOKEN = "8537260766:AAHUp5kb8WP2GDxDD4SE8Y0nIIvE1IyIp1g"
+TELEGRAM_CHAT_ID = "962450327"
+ENABLE_TELEGRAM = True  # Set to False to disable notifications
+
+def send_telegram(message, silent=False):
+    """
+    Send notification to Telegram
+    
+    Args:
+        message (str): Message to send (supports HTML formatting)
+        silent (bool): If True, sends without notification sound
+    
+    Returns:
+        dict: Response from Telegram API
+    """
+    if not ENABLE_TELEGRAM:
+        return None
+    
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_notification": silent
+        }
+        response = requests.post(url, data=data, timeout=5)
+        
+        if response.status_code == 200:
+            print("   ✅ Telegram notification sent")
+            return response.json()
+        else:
+            print(f"   ⚠️ Telegram error: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        print(f"   ❌ Telegram error: {e}")
+        return None
+
+print("✅ Telegram notification system loaded!")
+
 
 # ========================================
 # ZONE VS BIAS CONFIGURATION
@@ -493,6 +539,7 @@ class XAUUSDTradingBot:
             print(f"❌ P/L calculation error: {e}")
             return 0.0
 
+     
     def initialize(self):
         """Initialize the trading bot"""
         print("=" * 70)
@@ -502,9 +549,23 @@ class XAUUSDTradingBot:
         if not self.mt5.initialize_mt5():
             print("❌ Failed to initialize MT5 connection")
             return False
-
+        
+        # ← UNINDENT FROM HERE! (back to function level)
         account_info = self.mt5.get_account_info()
         balance = account_info.balance if account_info else 10000
+        
+        # ========================================
+        # 📱 TELEGRAM: BOT STARTED NOTIFICATION
+        # ========================================
+        send_telegram(
+            f"🤖 <b>Trading Bot Started!</b>\n\n"
+            f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}\n"
+            f"📊 Symbol: XAUUSD\n"
+            f"💰 Balance: ${balance:,.2f}\n"
+            f"💼 Strategy: {'Guardeer 10-Video Enhanced SMC' if self.use_enhanced_smc else 'Standard SMC'}\n"
+            f"📈 Max Positions: {self.max_positions}\n"
+            f"🛡️ Risk per Trade: {self.risk_per_trade}%"
+        )
 
         # ===== CREATE RISK CALCULATOR WITH SAFETY VALUES =====
         self.risk_calculator = StopLossCalculator(
@@ -519,6 +580,7 @@ class XAUUSDTradingBot:
         print(f"✅ Time Zone: IST (UTC+5:30)")
         print(f"✅ SMC Strategy: {'Guardeer 10-Video Enhanced' if self.use_enhanced_smc else 'Standard'}")
         print("=" * 70)
+
 
         # Load historical trades
         historical_trades = self.load_historical_trades()
@@ -823,6 +885,22 @@ class XAUUSDTradingBot:
                     if combined_bias in ['BULLISH', 'HIGHER_HIGH', 'NEUTRAL']:
                         print(f"   ✅ BUY signal allowed - Bias confirms ({combined_bias})")
                         zone_allows_trade = True
+                        
+                        # ========================================
+                        # 📱 TELEGRAM: BUY SIGNAL DETECTED
+                        # ========================================
+                        send_telegram(
+                            f"🟢 <b>BUY SIGNAL DETECTED!</b>\n\n"
+                            f"💰 Price: ${current_price['bid']:.2f}\n"
+                            f"📊 Zone: {current_zone}\n"
+                            f"💪 Zone Strength: {zone_str:.0f}%\n"
+                            f"🎯 Daily Bias: {daily_bias}\n"
+                            f"🎯 Intraday Bias: {intraday_bias}\n"
+                            f"🎯 Combined: {combined_bias}\n"
+                            f"📈 Confidence: {narrative.get('confidence', 0):.0f}%\n"
+                            f"⏰ {datetime.now().strftime('%H:%M:%S IST')}"
+                        )
+
                     
                     # Case 2: Strong DISCOUNT zone overrides bearish bias
                     elif ENABLE_STRONG_ZONE_OVERRIDE and is_strong_zone and current_zone == 'DISCOUNT':
@@ -852,6 +930,22 @@ class XAUUSDTradingBot:
                     if combined_bias in ['BEARISH', 'LOWER_LOW', 'NEUTRAL']:
                         print(f"   ✅ SELL signal allowed - Bias confirms ({combined_bias})")
                         zone_allows_trade = True
+                        
+                                                # ========================================
+                        # 📱 TELEGRAM: SELL SIGNAL DETECTED
+                        # ========================================
+                        send_telegram(
+                            f"🔴 <b>SELL SIGNAL DETECTED!</b>\n\n"
+                            f"💰 Price: ${current_price['bid']:.2f}\n"
+                            f"📊 Zone: {current_zone}\n"
+                            f"💪 Zone Strength: {zone_str:.0f}%\n"
+                            f"🎯 Daily Bias: {daily_bias}\n"
+                            f"🎯 Intraday Bias: {intraday_bias}\n"
+                            f"🎯 Combined: {combined_bias}\n"
+                            f"📈 Confidence: {narrative.get('confidence', 0):.0f}%\n"
+                            f"⏰ {datetime.now().strftime('%H:%M:%S IST')}"
+                        )
+
                     
                     # Case 2: Strong PREMIUM zone overrides bullish bias
                     elif ENABLE_STRONG_ZONE_OVERRIDE and is_strong_zone and current_zone == 'PREMIUM':
@@ -1023,6 +1117,17 @@ class XAUUSDTradingBot:
             print(f"❌ Error in enhanced analysis: {e}")
             import traceback
             traceback.print_exc()
+            
+            # ========================================
+            # 📱 TELEGRAM: ERROR ALERT
+            # ========================================
+            send_telegram(
+                f"⚠️ <b>BOT ERROR!</b>\n\n"
+                f"<code>{str(e)[:200]}</code>\n\n"
+                f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}\n\n"
+                f"🔧 Bot is still running and monitoring..."
+            )
+
 
     def analyze_and_trade(self):
         """Standard SMC analysis (used when enhanced mode disabled)"""
@@ -1452,6 +1557,20 @@ class XAUUSDTradingBot:
         """Shutdown the trading bot"""
         self.running = False
         self.save_trade_log()
+                # ========================================
+        # 📱 TELEGRAM: BOT STOPPED NOTIFICATION
+        # ========================================
+        try:
+            account_info = self.mt5.get_account_info()
+            send_telegram(
+                f"🛑 <b>Trading Bot Stopped</b>\n\n"
+                f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}\n"
+                f"📊 Total Iterations: {len(self.trade_log)}\n"
+                f"💰 Final Balance: ${account_info.balance:,.2f if account_info else 0}\n"
+                f"📈 Open Positions: {len(self.open_positions)}"
+            )
+        except:
+            pass
         self.mt5.shutdown()
         print("✅ Trading bot shutdown complete")
         print(f"📊 Total iterations: {len(self.trade_log)}")
