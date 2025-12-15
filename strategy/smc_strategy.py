@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, time
+import pytz
 
 
 class SMCStrategy:
@@ -179,57 +180,84 @@ class SMCStrategy:
         
         return df
     
+    
+
     def get_current_session(self):
         """
-        Check if current time is within trading sessions
-        Returns: (session_name, is_active)
+        Determine the current active forex trading session with proper timezone handling.
+        
+        Returns:
+            tuple: (session_name: str, is_active: bool)
+            
+        Sessions (CORRECTED IST times):
+        - SYDNEY:    5:30 AM - 12:30 PM IST
+        - TOKYO:     4:30 AM - 1:30 PM IST
+        - LONDON:    1:30 PM - 9:30 PM IST
+        - NEW_YORK:  6:30 PM - 1:30 AM IST (next day)
+        - WEEKEND:   Saturday & Sunday (all day)
         """
-        from datetime import datetime, time
         
-        now = datetime.now()
-        current_time = now.time()
-        weekday = now.weekday()  # Monday=0, Sunday=6
+        # Get current time in UTC
+        utc_now = datetime.now(pytz.UTC)
         
-        # ========================================
-        # WEEKEND CHECK (Critical!)
-        # ========================================
-        if weekday == 5:  # Saturday - CLOSED ALL DAY
+        # Convert to IST
+        ist_tz = pytz.timezone('Asia/Kolkata')
+        ist_now = utc_now.astimezone(ist_tz)
+        
+        # Get day of week (0=Monday, 6=Sunday)
+        weekday = ist_now.weekday()
+        current_time = ist_now.time()
+        
+        # ===== WEEKEND CHECK =====
+        if weekday == 5:  # Saturday
             return "WEEKEND (Saturday)", False
-        elif weekday == 6:  # Sunday - CLOSED ALL DAY
+        elif weekday == 6:  # Sunday
             return "WEEKEND (Sunday)", False
-        elif weekday == 0 and current_time < time(3, 30):  # Monday before 3:30 AM IST
-            # Market opens Monday 3:30 AM IST (Sunday 5 PM EST)
+        
+        # ===== MONDAY PRE-MARKET CHECK =====
+        if weekday == 0 and (current_time.hour < 4 or (current_time.hour == 4 and current_time.minute < 30)):
             return "PRE-MARKET (Monday)", False
-        elif weekday == 4 and current_time >= time(3, 30):  # Friday after 3:30 AM IST
-            # Market closes Friday 5 PM EST = Saturday 3:30 AM IST
-            return "POST-MARKET (Friday)", False
         
-        # ========================================
-        # SESSION TIMES (IST = UTC+5:30)
-        # ========================================
-        sessions = {
-            'TOKYO': (time(6, 0), time(12, 30)),
-            'LONDON': (time(13, 30), time(22, 0)),
-            'NEW_YORK': (time(19, 0), time(2, 0)),
-            'LONDON/NEW_YORK': (time(19, 0), time(22, 0))  # Overlap
-        }
+        # ===== WEEKDAY SESSION CHECKS =====
+        hour = current_time.hour
+        minute = current_time.minute
+        current_minutes = hour * 60 + minute
         
-        # ========================================
-        # CHECK ACTIVE SESSION
-        # ========================================
-        for session_name, (start, end) in sessions.items():
-            # Handle overnight sessions (NY session crosses midnight)
-            if start > end:  # Overnight session
-                if current_time >= start or current_time <= end:
-                    return session_name, True
-            else:  # Normal session
-                if start <= current_time <= end:
-                    return session_name, True
+        # Session times in minutes since midnight (CORRECTED IST)
+        sydney_open = 5 * 60 + 30      # 5:30 AM
+        sydney_close = 12 * 60 + 30    # 12:30 PM
+        tokyo_open = 4 * 60 + 30       # 4:30 AM
+        tokyo_close = 13 * 60 + 30     # 1:30 PM
+        london_open = 13 * 60 + 30     # 1:30 PM ← CORRECTED!
+        london_close = 21 * 60 + 30    # 9:30 PM ← CORRECTED!
+        ny_open = 18 * 60 + 30         # 6:30 PM ← CORRECTED!
+        ny_close = 1 * 60 + 30         # 1:30 AM next day ← CORRECTED!
         
-        # ========================================
-        # NO SESSION ACTIVE
-        # ========================================
+        # Check each session (priority: most recent session first)
+        
+        # NEW_YORK Session (6:30 PM - 1:30 AM next day)
+        # Spans midnight, so check in two parts
+        if current_minutes >= ny_open or current_minutes < ny_close:
+            return "NEW_YORK", True
+        
+        # LONDON Session (1:30 PM - 9:30 PM)
+        if london_open <= current_minutes < london_close:
+            return "LONDON", True
+        
+        # TOKYO Session (4:30 AM - 1:30 PM)
+        if tokyo_open <= current_minutes < tokyo_close:
+            return "TOKYO", True
+        
+        # SYDNEY Session (5:30 AM - 12:30 PM)
+        if sydney_open <= current_minutes < sydney_close:
+            return "SYDNEY", True
+        
+        # ===== NO ACTIVE SESSION (GAP BETWEEN SESSIONS) =====
         return "CLOSED", False
+
+
+
+    
 
 
     

@@ -7,6 +7,7 @@ from utils.mt5_connection import MT5Connection
 from strategy.smc_strategy import SMCStrategy
 from strategy.stoploss_calc import StopLossCalculator
 from strategy.multi_timeframe_fractal import MultiTimeframeFractal
+from strategy.market_structure import MarketStructureDetector
 import threading
 import sys
 import os
@@ -190,6 +191,8 @@ class XAUUSDTradingBot:
     def __init__(self, config_path="config.json", use_enhanced_smc=True):
         self.config_path = config_path
         self.mtf_analyzer = MultiTimeframeFractal(symbol="XAUUSD")
+        self.market_structure = None  # Will be initialized when data is available
+
 
         
         
@@ -654,6 +657,47 @@ class XAUUSDTradingBot:
         try:
             self.sync_positions_with_mt5()
             print("📊 Running Enhanced SMC Analysis (Guardeer 10-Videos)...")
+            # ===== STEP 1.5: MARKET STRUCTURE ANALYSIS (VIDEO 3) =====
+            print("\n📈 VIDEO 3 - MARKET STRUCTURE ANALYSIS")
+            print("="*70)
+
+            try:
+                from strategy.market_structure import MarketStructureDetector
+                market_structure = MarketStructureDetector(df)
+                structure_analysis = market_structure.analyze()
+                
+                print(f"   ✅ Trend: {structure_analysis.get('trend', 'NEUTRAL')}")
+                print(f"   🔄 Structure Shift: {structure_analysis.get('shift', 'NONE')}")
+                print(f"   📊 BOS Detected: {structure_analysis.get('bos_detected', False)}")
+                print(f"   📊 CHOCH Detected: {structure_analysis.get('choch_detected', False)}")
+                
+            except Exception as e:
+                print(f"   ❌ Error in market structure analysis: {e}")
+                print(f"   ⚠️  WORKAROUND: Using default neutral structure (Video 3 temporarily disabled)")
+                
+                structure_analysis = {
+                    'trend': 'NEUTRAL',
+                    'current_trend': 'NEUTRAL',
+                    'shift': 'NONE',
+                    'structure_shift': 'NONE',
+                    'bos_detected': False,
+                    'bos_bullish': False,
+                    'bos_bearish': False,
+                    'choch_detected': False,
+                    'choch_bullish': False,
+                    'choch_bearish': False,
+                    'aligned_with_signal': True,
+                    'bos_level': None,
+                    'last_structure': None,
+                    'trend_valid': True  # ← ADD THIS LINE
+                }
+
+
+
+
+            print("="*70)
+
+
 
             market_data = self.fetch_market_data()
             if market_data is None:
@@ -847,6 +891,48 @@ class XAUUSDTradingBot:
                     
             else:
                 print(f"   ℹ️  No override needed. Current signal: {final_signal}")
+                
+            # ===== MARKET STRUCTURE FILTER (VIDEO 3) =====
+            print("\n🔍 MARKET STRUCTURE VALIDATION")
+            print("="*70)
+
+            # Structure validation rules
+            STRUCTURE_FILTER_ENABLED = True
+            TREND_BREAKAGE_BLOCKS_ENTRY = True
+
+            if STRUCTURE_FILTER_ENABLED:
+                # Check if trend is valid
+                if not structure_analysis['trend_valid']:
+                    print(f"   ⚠️  Trend is NO LONGER VALID - BOS detected")
+                    print(f"   🚫 Signal blocked due to trend invalidation")
+                    final_signal = 'HOLD'
+                
+                # Check for trend alignment
+                elif final_signal == 'BUY' and structure_analysis['current_trend'] == 'DOWNTREND':
+                    print(f"   📊 BUY signal but trend is DOWNTREND")
+                    print(f"   ⚠️  Structure doesn't support BUY")
+                    if structure_analysis['structure_shift'] not in ['CHOCH_BULLISH', 'BOS_BULLISH']:
+                        print(f"   🚫 No CHOCH/BOS confirmation - Signal BLOCKED")
+                        final_signal = 'HOLD'
+                    else:
+                        print(f"   ✅ But {structure_analysis['structure_shift']} detected - Signal allowed")
+                
+                elif final_signal == 'SELL' and structure_analysis['current_trend'] == 'UPTREND':
+                    print(f"   📊 SELL signal but trend is UPTREND")
+                    print(f"   ⚠️  Structure doesn't support SELL")
+                    if structure_analysis['structure_shift'] not in ['CHOCH_BEARISH', 'BOS_BEARISH']:
+                        print(f"   🚫 No CHOCH/BOS confirmation - Signal BLOCKED")
+                        final_signal = 'HOLD'
+                    else:
+                        print(f"   ✅ But {structure_analysis['structure_shift']} detected - Signal allowed")
+                
+                else:
+                    print(f"   ✅ Signal aligned with market structure")
+                    print(f"   📊 Trend: {structure_analysis['current_trend']}")
+                    print(f"   🔄 Shift: {structure_analysis['structure_shift']}")
+
+            print("="*70)
+
 
             # ===== NEW: MULTI-TIMEFRAME CONFIDENCE FILTER =====
             print("\n🔍 MULTI-TIMEFRAME CONFLUENCE FILTER")
@@ -994,8 +1080,10 @@ class XAUUSDTradingBot:
                 'current_zone': current_zone,
                 'narrative': narrative,
                 'zones': zones,
-                'mtf_confluence': mtf_confluence  # Store MTF data
+                'mtf_confluence': mtf_confluence,
+                'market_structure': structure_analysis  # ADD THIS LINE
             }
+
 
             # Calculate technical indicators
             try:
