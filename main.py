@@ -6,10 +6,12 @@ import matplotlib.pyplot as plt
 from utils.mt5_connection import MT5Connection
 from strategy.smc_strategy import SMCStrategy
 from strategy.stoploss_calc import StopLossCalculator
+from strategy.multi_timeframe_fractal import MultiTimeframeFractal
 import threading
 import sys
 import os
 import requests
+
 
 # ========================================
 # TELEGRAM NOTIFICATION SYSTEM
@@ -40,7 +42,7 @@ def send_telegram(message, silent=False):
             "parse_mode": "HTML",
             "disable_notification": silent
         }
-        response = requests.post(url, data=data, timeout=5)
+        response = requests.post(url, data=data, timeout=30)
         
         if response.status_code == 200:
             print("   ✅ Telegram notification sent")
@@ -187,6 +189,9 @@ class XAUUSDTradingBot:
 
     def __init__(self, config_path="config.json", use_enhanced_smc=True):
         self.config_path = config_path
+        self.mtf_analyzer = MultiTimeframeFractal(symbol="XAUUSD")
+
+        
         
         # ===== LOAD CONFIG WITH SAFETY =====
         self.config, self.risk_per_trade, self.min_sl_pips, self.max_lot_size, self.max_positions = \
@@ -641,7 +646,11 @@ class XAUUSDTradingBot:
         return historical_data, current_price
 
     def analyze_enhanced(self):
-        """Complete analysis using ALL 10 Guardeer video concepts"""
+        """Complete analysis using ALL 10 Guardeer video concepts + Multi-TF"""
+        
+        # ===== STEP 1: RUN MULTI-TIMEFRAME FRACTAL ANALYSIS =====
+        mtf_confluence = self.mtf_analyzer.get_multi_tf_confluence()
+        
         try:
             self.sync_positions_with_mt5()
             print("📊 Running Enhanced SMC Analysis (Guardeer 10-Videos)...")
@@ -809,11 +818,9 @@ class XAUUSDTradingBot:
 
             final_signal = narrative.get('trade_signal', 'HOLD')
             
-            
             # ===== FIX #6: NARRATIVE OVERRIDE FOR MISSING SIGNALS =====
             print("\n🔧 FIX #6: NARRATIVE OVERRIDE CHECK")
 
-            # Debug: Show what we're checking
             if zone_summary:
                 print(f"   📊 Zone: {current_zone} | Strength: {zone_summary.get('zone_strength', 0):.0f}% | Signal: {final_signal}")
             else:
@@ -841,168 +848,142 @@ class XAUUSDTradingBot:
             else:
                 print(f"   ℹ️  No override needed. Current signal: {final_signal}")
 
+            # ===== NEW: MULTI-TIMEFRAME CONFIDENCE FILTER =====
+            print("\n🔍 MULTI-TIMEFRAME CONFLUENCE FILTER")
+            print("="*70)
+            
+            MTF_MIN_CONFIDENCE = 60
+            
+            if mtf_confluence['confidence'] < MTF_MIN_CONFIDENCE:
+                print(f"   📊 MTF Confidence: {mtf_confluence['confidence']}% (Required: {MTF_MIN_CONFIDENCE}%)")
+                print(f"   📊 MTF Bias: {mtf_confluence['overall_bias']}")
+                print(f"   📊 Current Signal: {final_signal}")
+                print(f"   ⚠️  MTF Confidence TOO LOW - Rejecting signal")
+                print(f"   🚫 {final_signal} signal → Changed to HOLD")
+                final_signal = 'HOLD'
+            
+            elif final_signal == 'BUY' and mtf_confluence['overall_bias'] == 'BEARISH':
+                print(f"   📊 MTF Bias: {mtf_confluence['overall_bias']} ({mtf_confluence['confidence']}%)")
+                print(f"   📊 Current Signal: BUY")
+                print(f"   ⚠️  BUY conflicts with BEARISH multi-TF bias")
+                print(f"   🚫 BUY signal → Changed to HOLD")
+                final_signal = 'HOLD'
+            
+            elif final_signal == 'SELL' and mtf_confluence['overall_bias'] == 'BULLISH':
+                print(f"   📊 MTF Bias: {mtf_confluence['overall_bias']} ({mtf_confluence['confidence']}%)")
+                print(f"   📊 Current Signal: SELL")
+                print(f"   ⚠️  SELL conflicts with BULLISH multi-TF bias")
+                print(f"   🚫 SELL signal → Changed to HOLD")
+                final_signal = 'HOLD'
+            
+            else:
+                print(f"   ✅ Signal {final_signal} CONFIRMED by multi-TF analysis")
+                print(f"   📊 MTF Bias: {mtf_confluence['overall_bias']} ({mtf_confluence['confidence']}%)")
+                print(f"   💡 {mtf_confluence['recommendation']}")
+                print(f"   🎯 Trade allowed to proceed")
+            
+            print("="*70)
 
-
-            # ===== ZONE FILTER VALIDATION (TEMPORARY OVERRIDE FOR TESTING) =====
-            print("🔍 ZONE FILTER VALIDATION")
-
-            # EMERGENCY FIX: Temporary zone override to enable trading
-            ENABLE_ZONE_OVERRIDE = True  # ← SET TO False TO REVERT TO STRICT FILTERING
-
-            zone_allows_trade = False
-
-                        # ========================================
-            # ZONE FILTER VALIDATION
-            # ========================================
+            # ===== ZONE FILTER VALIDATION =====
             print("\n🔍 ZONE FILTER VALIDATION")
             
-            # EMERGENCY FIX: Temporary zone override to enable trading
-            ENABLE_ZONE_OVERRIDE = True  # ← SET TO False TO REVERT TO STRICT FILTERING
-            
+            ENABLE_ZONE_OVERRIDE = True
             zone_allows_trade = False
             
             if ENABLE_ZONE_OVERRIDE:
                 print("   🚨 OVERRIDE MODE ACTIVE - Zone filter relaxed for testing")
                 
-                # ========================================
-                # STRONG ZONE CONFIGURATION
-                # ========================================
-                STRONG_ZONE_THRESHOLD = 70  # 70%+ zones can override bias
-                WEAK_ZONE_THRESHOLD = 30    # Below 30% = too weak
-                ENABLE_STRONG_ZONE_OVERRIDE = True  # Allow counter-trend in strong zones
+                STRONG_ZONE_THRESHOLD = 70
+                WEAK_ZONE_THRESHOLD = 30
+                ENABLE_STRONG_ZONE_OVERRIDE = True
                 
-                # Calculate zone strength flags
                 zone_str = zone_summary.get('zone_strength', 0) if zone_summary else 0
                 is_strong_zone = zone_str >= STRONG_ZONE_THRESHOLD
                 is_weak_zone = zone_str <= WEAK_ZONE_THRESHOLD
                 
-                # ========================================
-                # BUY SIGNAL LOGIC
-                # ========================================
                 if final_signal == 'BUY':
-                    
-                    # Case 1: Bias supports BUY
                     if combined_bias in ['BULLISH', 'HIGHER_HIGH', 'NEUTRAL']:
                         print(f"   ✅ BUY signal allowed - Bias confirms ({combined_bias})")
                         zone_allows_trade = True
                         
-                        # ========================================
-                        # 📱 TELEGRAM: BUY SIGNAL DETECTED
-                        # ========================================
                         send_telegram(
                             f"🟢 <b>BUY SIGNAL DETECTED!</b>\n\n"
                             f"💰 Price: ${current_price['bid']:.2f}\n"
                             f"📊 Zone: {current_zone}\n"
                             f"💪 Zone Strength: {zone_str:.0f}%\n"
+                            f"🎯 MTF Bias: {mtf_confluence['overall_bias']} ({mtf_confluence['confidence']}%)\n"
                             f"🎯 Daily Bias: {daily_bias}\n"
-                            f"🎯 Intraday Bias: {intraday_bias}\n"
                             f"🎯 Combined: {combined_bias}\n"
                             f"📈 Confidence: {narrative.get('confidence', 0):.0f}%\n"
                             f"⏰ {datetime.now().strftime('%H:%M:%S IST')}"
                         )
-
                     
-                    # Case 2: Strong DISCOUNT zone overrides bearish bias
                     elif ENABLE_STRONG_ZONE_OVERRIDE and is_strong_zone and current_zone == 'DISCOUNT':
                         print(f"   🎯 BUY signal allowed - STRONG DISCOUNT zone ({zone_str:.0f}%) overrides {combined_bias} bias")
                         print(f"   💡 Counter-trend reversal setup detected")
-                        print(f"   📊 Institutional buying zone - High probability")
                         zone_allows_trade = True
                     
-                    # Case 3: Weak zone cannot override bias
                     elif is_weak_zone:
                         print(f"   ⚠️  BUY signal BLOCKED - Zone too weak ({zone_str:.0f}% < {WEAK_ZONE_THRESHOLD}%)")
-                        print(f"   💡 Wait for stronger zone setup")
                         zone_allows_trade = False
                     
-                    # Case 4: Medium zone with conflicting bias
                     else:
-                        print(f"   ⚠️  BUY signal BLOCKED - Zone not strong enough ({zone_str:.0f}% < {STRONG_ZONE_THRESHOLD}%) to override {combined_bias} bias")
-                        print(f"   💡 Need zone >{STRONG_ZONE_THRESHOLD}% OR bias alignment")
+                        print(f"   ⚠️  BUY signal BLOCKED - Zone not strong enough ({zone_str:.0f}% < {STRONG_ZONE_THRESHOLD}%)")
                         zone_allows_trade = False
                 
-                # ========================================
-                # SELL SIGNAL LOGIC
-                # ========================================
                 elif final_signal == 'SELL':
-                    
-                    # Case 1: Bias supports SELL
                     if combined_bias in ['BEARISH', 'LOWER_LOW', 'NEUTRAL']:
                         print(f"   ✅ SELL signal allowed - Bias confirms ({combined_bias})")
                         zone_allows_trade = True
                         
-                                                # ========================================
-                        # 📱 TELEGRAM: SELL SIGNAL DETECTED
-                        # ========================================
                         send_telegram(
                             f"🔴 <b>SELL SIGNAL DETECTED!</b>\n\n"
                             f"💰 Price: ${current_price['bid']:.2f}\n"
                             f"📊 Zone: {current_zone}\n"
                             f"💪 Zone Strength: {zone_str:.0f}%\n"
+                            f"🎯 MTF Bias: {mtf_confluence['overall_bias']} ({mtf_confluence['confidence']}%)\n"
                             f"🎯 Daily Bias: {daily_bias}\n"
-                            f"🎯 Intraday Bias: {intraday_bias}\n"
                             f"🎯 Combined: {combined_bias}\n"
                             f"📈 Confidence: {narrative.get('confidence', 0):.0f}%\n"
                             f"⏰ {datetime.now().strftime('%H:%M:%S IST')}"
                         )
-
                     
-                    # Case 2: Strong PREMIUM zone overrides bullish bias
                     elif ENABLE_STRONG_ZONE_OVERRIDE and is_strong_zone and current_zone == 'PREMIUM':
                         print(f"   🎯 SELL signal allowed - STRONG PREMIUM zone ({zone_str:.0f}%) overrides {combined_bias} bias")
-                        print(f"   💡 Counter-trend reversal setup detected")
-                        print(f"   📊 Institutional selling zone - High probability")
                         zone_allows_trade = True
                     
-                    # Case 3: Weak zone cannot override bias
                     elif is_weak_zone:
                         print(f"   ⚠️  SELL signal BLOCKED - Zone too weak ({zone_str:.0f}% < {WEAK_ZONE_THRESHOLD}%)")
-                        print(f"   💡 Wait for stronger zone setup")
                         zone_allows_trade = False
                     
-                    # Case 4: Medium zone with conflicting bias
                     else:
-                        print(f"   ⚠️  SELL signal BLOCKED - Zone not strong enough ({zone_str:.0f}% < {STRONG_ZONE_THRESHOLD}%) to override {combined_bias} bias")
-                        print(f"   💡 Need zone >{STRONG_ZONE_THRESHOLD}% OR bias alignment")
+                        print(f"   ⚠️  SELL signal BLOCKED - Zone not strong enough ({zone_str:.0f}% < {STRONG_ZONE_THRESHOLD}%)")
                         zone_allows_trade = False
                 
-                # ========================================
-                # HOLD SIGNAL (No trade)
-                # ========================================
                 else:
                     print(f"   ℹ️  Signal is HOLD - No trade decision needed")
                     zone_allows_trade = False
                 
-                # ========================================
-                # DEBUG INFORMATION
-                # ========================================
                 print(f"\n   📊 Filter Analysis:")
                 print(f"      • Current Zone: {current_zone}")
                 print(f"      • Zone Strength: {zone_str:.0f}%")
-                print(f"      • Strong Zone?: {'YES' if is_strong_zone else 'NO'} (threshold: {STRONG_ZONE_THRESHOLD}%)")
-                print(f"      • Weak Zone?: {'YES' if is_weak_zone else 'NO'} (threshold: {WEAK_ZONE_THRESHOLD}%)")
+                print(f"      • MTF Confidence: {mtf_confluence['confidence']}%")
+                print(f"      • MTF Bias: {mtf_confluence['overall_bias']}")
                 print(f"      • Combined Bias: {combined_bias}")
                 print(f"      • Signal: {final_signal}")
-                print(f"      • Override Enabled?: {ENABLE_STRONG_ZONE_OVERRIDE}")
                 print(f"      • Trade Allowed?: {zone_allows_trade}")
 
             else:
-                # ========================================
-                # STRICT MODE (No overrides)
-                # ========================================
                 print("   🔒 STRICT MODE - No zone overrides allowed")
                 
                 if final_signal == 'BUY' and combined_bias in ['BULLISH', 'NEUTRAL']:
                     zone_allows_trade = True
-                    print(f"   ✅ BUY allowed - Bias aligned")
                 elif final_signal == 'SELL' and combined_bias in ['BEARISH', 'NEUTRAL']:
                     zone_allows_trade = True
-                    print(f"   ✅ SELL allowed - Bias aligned")
                 else:
                     zone_allows_trade = False
-                    print(f"   ❌ {final_signal} blocked - Bias conflicts in strict mode")
 
-
+            # Store analysis data
             self.enhanced_analysis_data = {
                 'pdh': pdh,
                 'pdl': pdl,
@@ -1012,14 +993,14 @@ class XAUUSDTradingBot:
                 'daily_bias': daily_bias,
                 'current_zone': current_zone,
                 'narrative': narrative,
-                'zones': zones
+                'zones': zones,
+                'mtf_confluence': mtf_confluence  # Store MTF data
             }
 
-            # Calculate technical indicators for dashboard
+            # Calculate technical indicators
             try:
                 df = historical_data.copy()
                 
-                # Calculate EMAs/MAs
                 if len(df) >= 200:
                     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
                     ema200 = float(df['ema200'].iloc[-1])
@@ -1035,12 +1016,10 @@ class XAUUSDTradingBot:
                     ma20 = 0.0
                     ma50 = 0.0
                 
-                # Calculate Support/Resistance (recent 50 bars)
                 recent_bars = min(50, len(df))
                 support = float(df['low'].tail(recent_bars).min())
                 resistance = float(df['high'].tail(recent_bars).max())
                 
-                # Calculate ATR (14 periods)
                 if len(df) >= 14:
                     df['high_low'] = df['high'] - df['low']
                     df['high_close'] = abs(df['high'] - df['close'].shift(1))
@@ -1069,7 +1048,7 @@ class XAUUSDTradingBot:
                 'bias': combined_bias
             }
 
-            # ===== FIX #1: ZONE-BASED EXIT CHECKS BEFORE NEW ENTRIES =====
+            # ===== FIX #1: ZONE-BASED EXITS =====
             print("\n🔴 FIX #1: ZONE-BASED EXITS")
             self.check_zone_based_exits(current_zone, current_price['bid'])
 
@@ -1085,9 +1064,8 @@ class XAUUSDTradingBot:
 
             # Execute trade if conditions met
             at_max_positions = len(self.open_positions) >= self.max_positions
-            # ========================================
-            # 🔧 FIX #7: SESSION FILTER CHECK
-            # ========================================
+            
+            # ===== FIX #7: SESSION FILTER CHECK =====
             print("\n⏰ FIX #7: SESSION FILTER")
             session_name, is_active = self.strategy.get_current_session()
 
@@ -1097,18 +1075,18 @@ class XAUUSDTradingBot:
                 print(f"   ⏸️  Session: {session_name} is CLOSED - Trading blocked")
                 if final_signal != 'HOLD':
                     print(f"   🚫 {final_signal} signal suppressed due to closed session")
-                    final_signal = 'HOLD'  # Override signal to prevent trading
+                    final_signal = 'HOLD'
 
-                if not at_max_positions and final_signal != 'HOLD' and zone_allows_trade:
-                    # ===== FIX #3: CHECK COOLDOWN BEFORE TRADING =====
-                    print("\n🎯 FIX #3: COOLDOWN FILTER")
-                    if self.check_trade_cooldown(final_signal):
-                        print(f"✅ Executing {final_signal} trade...")
-                        self.execute_enhanced_trade(final_signal, current_price, historical_data, zones)
-                    else:
-                        print(f"   🚫 Trade blocked by cooldown")
-                elif at_max_positions and final_signal != 'HOLD':
-                    print(f"⚠️  Signal {final_signal} detected but max positions ({self.max_positions}) reached")
+            if not at_max_positions and final_signal != 'HOLD' and zone_allows_trade:
+                # ===== FIX #3: CHECK COOLDOWN BEFORE TRADING =====
+                print("\n🎯 FIX #3: COOLDOWN FILTER")
+                if self.check_trade_cooldown(final_signal):
+                    print(f"✅ Executing {final_signal} trade...")
+                    self.execute_enhanced_trade(final_signal, current_price, historical_data, zones)
+                else:
+                    print(f"   🚫 Trade blocked by cooldown")
+            elif at_max_positions and final_signal != 'HOLD':
+                print(f"⚠️  Signal {final_signal} detected but max positions ({self.max_positions}) reached")
 
             self.log_trade_analysis(final_signal, 'Enhanced SMC Analysis', current_price, market_state)
             self.update_dashboard_state()
@@ -1118,15 +1096,13 @@ class XAUUSDTradingBot:
             import traceback
             traceback.print_exc()
             
-            # ========================================
-            # 📱 TELEGRAM: ERROR ALERT
-            # ========================================
             send_telegram(
                 f"⚠️ <b>BOT ERROR!</b>\n\n"
                 f"<code>{str(e)[:200]}</code>\n\n"
                 f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}\n\n"
                 f"🔧 Bot is still running and monitoring..."
             )
+
 
 
     def analyze_and_trade(self):
