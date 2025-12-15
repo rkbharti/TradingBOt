@@ -237,21 +237,35 @@ class MultiTimeframeFractal:
                 results[tf] = analysis
                 print(f"   {tf}: {analysis['bias']} | BOS: {'✅' if analysis['bos']['bullish_bos'] or analysis['bos']['bearish_bos'] else '❌'} | CHOC: {'✅' if analysis['choc']['bullish_choc'] or analysis['choc']['bearish_choc'] else '❌'}")
         
-        # Calculate confluence
+        # ===== FIX: ALIGNED TIMEFRAME COUNTING =====
+        # Now counts NEUTRAL as acceptable for trade direction
         biases = [r['bias'] for r in results.values() if r]
         bullish_count = biases.count('BULLISH')
         bearish_count = biases.count('BEARISH')
+        neutral_count = biases.count('NEUTRAL')
         total = len(biases)
-        
-        if bullish_count > bearish_count:
+
+        # NEUTRAL is acceptable - counts as support for either direction
+        aligned_bullish = bullish_count + (neutral_count // 2)
+        aligned_bearish = bearish_count + (neutral_count // 2)
+
+        if aligned_bullish > aligned_bearish:
             overall_bias = 'BULLISH'
-            confidence = int((bullish_count / total) * 100) if total > 0 else 0
-        elif bearish_count > bullish_count:
+            # Confidence: 100% if all aligned, lower if mixed
+            confidence = int(((bullish_count + neutral_count) / total) * 100) if total > 0 else 0
+        elif aligned_bearish > aligned_bullish:
             overall_bias = 'BEARISH'
-            confidence = int((bearish_count / total) * 100) if total > 0 else 0
+            confidence = int(((bearish_count + neutral_count) / total) * 100) if total > 0 else 0
         else:
             overall_bias = 'NEUTRAL'
             confidence = 50
+
+        # ===== DYNAMIC THRESHOLD BASED ON STRENGTH =====
+        # Default: 60% threshold, but flexible based on signal quality
+        MTF_BASE_THRESHOLD = 60
+        MTF_HIGH_CONFIDENCE_THRESHOLD = 75
+
+
         
         # Generate recommendation
         if confidence >= 80:
@@ -270,3 +284,31 @@ class MultiTimeframeFractal:
             'tf_signals': results,
             'recommendation': recommendation
         }
+        
+    def get_dynamic_threshold(self, confidence, zone_strength=0):
+        """
+        Calculate dynamic MTF threshold based on confidence and zone strength.
+        
+        Logic:
+        - Default: 60% MTF confidence required
+        - If zone_strength > 70%: Lower to 50% (strong zone doesn't need high MTF)
+        - If confidence >= 80%: Trade allowed even if slightly below 60%
+        
+        Returns:
+            tuple: (required_threshold, applies_override)
+        """
+        required_threshold = 60  # Default
+        applies_override = False
+        
+        # If zone is strong, MTF can be lower
+        if zone_strength > 70:
+            required_threshold = 50
+            applies_override = True
+        
+        # If MTF confidence very high, it overrides low zone
+        if confidence >= 80:
+            required_threshold = 40
+            applies_override = True
+        
+        return required_threshold, applies_override
+

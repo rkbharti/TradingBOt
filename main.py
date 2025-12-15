@@ -8,6 +8,7 @@ from strategy.smc_strategy import SMCStrategy
 from strategy.stoploss_calc import StopLossCalculator
 from strategy.multi_timeframe_fractal import MultiTimeframeFractal
 from strategy.market_structure import MarketStructureDetector
+from strategy.smc_enhanced.zones import ZoneCalculator
 import threading
 import sys
 import os
@@ -649,6 +650,7 @@ class XAUUSDTradingBot:
         return historical_data, current_price
 
     def analyze_enhanced(self):
+        global ZoneCalculator
         """Complete analysis using ALL 10 Guardeer video concepts + Multi-TF"""
         
         # ===== STEP 1: RUN MULTI-TIMEFRAME FRACTAL ANALYSIS =====
@@ -657,54 +659,74 @@ class XAUUSDTradingBot:
         try:
             self.sync_positions_with_mt5()
             print("📊 Running Enhanced SMC Analysis (Guardeer 10-Videos)...")
+            
             # ===== STEP 1.5: MARKET STRUCTURE ANALYSIS (VIDEO 3) =====
-            print("\n📈 VIDEO 3 - MARKET STRUCTURE ANALYSIS")
+            print("📈 VIDEO 3 - MARKET STRUCTURE ANALYSIS")
             print("="*70)
 
             try:
+                # ===== FIX #2: PROPER DATAFRAME PASSING =====
                 from strategy.market_structure import MarketStructureDetector
-                market_structure = MarketStructureDetector(df)
-                structure_analysis = market_structure.analyze()
                 
-                print(f"   ✅ Trend: {structure_analysis.get('trend', 'NEUTRAL')}")
-                print(f"   🔄 Structure Shift: {structure_analysis.get('shift', 'NONE')}")
-                print(f"   📊 BOS Detected: {structure_analysis.get('bos_detected', False)}")
+                # Get market data FIRST (before structure analysis)
+                market_data = self.fetch_market_data()
+                if market_data is None:
+                    print("   ⚠️  Could not fetch market data for structure analysis")
+                    raise Exception("No market data")
+                
+                historical_data, current_price = market_data
+                
+                # Now pass the DataFrame correctly - FIXED METHOD!
+                market_structure_detector = MarketStructureDetector(historical_data)
+                structure_analysis = market_structure_detector.get_market_structure_analysis()  # ✅ FIXED!
+                
+                print(f"   ✅ Trend: {structure_analysis.get('current_trend', 'NEUTRAL')}")
+                print(f"   🔄 Structure Shift: {structure_analysis.get('structure_shift', 'NONE')}")
+                print(f"   📊 BOS Level: {structure_analysis.get('bos_level', 'None')}")
                 print(f"   📊 CHOCH Detected: {structure_analysis.get('choch_detected', False)}")
+                print(f"   📊 Trend Valid: {structure_analysis.get('trend_valid', True)}")
                 
+            except ImportError as e:
+                print(f"   ❌ Module import error: {e}")
+                print(f"   ℹ️  Market structure module not found. Checking if file exists...")
+                
+                import os
+                if not os.path.exists('strategy/market_structure.py'):
+                    print(f"   ⚠️  market_structure.py not found. Creating basic version...")
+                    structure_analysis = {
+                        'current_trend': 'NEUTRAL',
+                        'trend_valid': True,
+                        'structure_shift': 'NONE'
+                    }
+                else:
+                    print(f"   ⚠️  Import failed despite file existing. Check syntax.")
+                    structure_analysis = {
+                        'current_trend': 'NEUTRAL',
+                        'trend_valid': True,
+                        'structure_shift': 'NONE'
+                    }
+                    
             except Exception as e:
-                print(f"   ❌ Error in market structure analysis: {e}")
-                print(f"   ⚠️  WORKAROUND: Using default neutral structure (Video 3 temporarily disabled)")
+                print(f"   ❌ Error in market structure analysis: {str(e)[:100]}")
+                print(f"   ℹ️  Using defaults (Video 3 will be skipped this iteration)")
                 
                 structure_analysis = {
-                    'trend': 'NEUTRAL',
                     'current_trend': 'NEUTRAL',
-                    'shift': 'NONE',
+                    'trend_valid': True,
                     'structure_shift': 'NONE',
-                    'bos_detected': False,
-                    'bos_bullish': False,
-                    'bos_bearish': False,
-                    'choch_detected': False,
-                    'choch_bullish': False,
-                    'choch_bearish': False,
-                    'aligned_with_signal': True,
                     'bos_level': None,
-                    'last_structure': None,
-                    'trend_valid': True  # ← ADD THIS LINE
+                    'choch_detected': False
                 }
 
 
 
 
+
+
             print("="*70)
 
 
 
-            market_data = self.fetch_market_data()
-            if market_data is None:
-                return
-
-            historical_data, current_price = market_data
-            print(f"   ℹ️  Fetched {len(historical_data)} bars of XAUUSD M5 data")
 
             # Initialize modules on first run
             if self.liquidity_detector is None:
@@ -937,41 +959,49 @@ class XAUUSDTradingBot:
             # ===== NEW: MULTI-TIMEFRAME CONFIDENCE FILTER =====
             print("\n🔍 MULTI-TIMEFRAME CONFLUENCE FILTER")
             print("="*70)
-            
-            MTF_MIN_CONFIDENCE = 60
-            
+
+            # ===== FIX #1: DYNAMIC THRESHOLD LOGIC =====
+            MTF_BASE_CONFIDENCE = 60
+            zone_strength = zone_summary.get('zone_strength', 0) if zone_summary else 0
+
+            # Calculate dynamic threshold
+            if zone_strength > 70:
+                MTF_MIN_CONFIDENCE = 50
+                print(f"   📊 Zone is STRONG ({zone_strength:.0f}%) → Lowering MTF threshold to 50%")
+            elif mtf_confluence['confidence'] >= 80:
+                MTF_MIN_CONFIDENCE = 40
+                print(f"   📊 MTF Confidence is VERY HIGH ({mtf_confluence['confidence']}%) → Lowering threshold to 40%")
+            else:
+                MTF_MIN_CONFIDENCE = MTF_BASE_CONFIDENCE
+                print(f"   📊 Using default MTF threshold: {MTF_MIN_CONFIDENCE}%")
+
+            print(f"   📊 Current MTF Confidence: {mtf_confluence['confidence']}% (Required: {MTF_MIN_CONFIDENCE}%)")
+            print(f"   📊 MTF Bias: {mtf_confluence['overall_bias']}")
+
             if mtf_confluence['confidence'] < MTF_MIN_CONFIDENCE:
-                print(f"   📊 MTF Confidence: {mtf_confluence['confidence']}% (Required: {MTF_MIN_CONFIDENCE}%)")
-                print(f"   📊 MTF Bias: {mtf_confluence['overall_bias']}")
-                print(f"   📊 Current Signal: {final_signal}")
-                print(f"   ⚠️  MTF Confidence TOO LOW - Rejecting signal")
+                print(f"   ⚠️  MTF Confidence BELOW threshold")
                 print(f"   🚫 {final_signal} signal → Changed to HOLD")
                 final_signal = 'HOLD'
-            
             elif final_signal == 'BUY' and mtf_confluence['overall_bias'] == 'BEARISH':
-                print(f"   📊 MTF Bias: {mtf_confluence['overall_bias']} ({mtf_confluence['confidence']}%)")
-                print(f"   📊 Current Signal: BUY")
-                print(f"   ⚠️  BUY conflicts with BEARISH multi-TF bias")
+                print(f"   📊 BUY conflicts with BEARISH MTF bias")
                 print(f"   🚫 BUY signal → Changed to HOLD")
                 final_signal = 'HOLD'
-            
             elif final_signal == 'SELL' and mtf_confluence['overall_bias'] == 'BULLISH':
-                print(f"   📊 MTF Bias: {mtf_confluence['overall_bias']} ({mtf_confluence['confidence']}%)")
-                print(f"   📊 Current Signal: SELL")
-                print(f"   ⚠️  SELL conflicts with BULLISH multi-TF bias")
+                print(f"   📊 SELL conflicts with BULLISH MTF bias")
                 print(f"   🚫 SELL signal → Changed to HOLD")
                 final_signal = 'HOLD'
-            
             else:
-                print(f"   ✅ Signal {final_signal} CONFIRMED by multi-TF analysis")
-                print(f"   📊 MTF Bias: {mtf_confluence['overall_bias']} ({mtf_confluence['confidence']}%)")
-                print(f"   💡 {mtf_confluence['recommendation']}")
-                print(f"   🎯 Trade allowed to proceed")
-            
+                print(f"   ✅ Signal {final_signal} CONFIRMED by MTF analysis")
+
+
             print("="*70)
+
+
 
             # ===== ZONE FILTER VALIDATION =====
             print("\n🔍 ZONE FILTER VALIDATION")
+            
+            zone_str = zone_summary.get('zone_strength', 0) if zone_summary else 0
             
             ENABLE_ZONE_OVERRIDE = True
             zone_allows_trade = False
@@ -979,11 +1009,35 @@ class XAUUSDTradingBot:
             if ENABLE_ZONE_OVERRIDE:
                 print("   🚨 OVERRIDE MODE ACTIVE - Zone filter relaxed for testing")
                 
-                STRONG_ZONE_THRESHOLD = 70
-                WEAK_ZONE_THRESHOLD = 30
+                # ===== FIX #3: LOWERED THRESHOLDS FOR M5 TIMEFRAME =====
+                # Original: 70% was too high for M5 (zones rarely reached 70%)
+                # New: 40% is more realistic for M5 intraday trading
+                STRONG_ZONE_THRESHOLD = 40  # Lowered from 70%
+                WEAK_ZONE_THRESHOLD = 20    # Lowered from 30%
                 ENABLE_STRONG_ZONE_OVERRIDE = True
+
+                print(f"   🎚️  Zone Thresholds: Strong={STRONG_ZONE_THRESHOLD}% | Weak={WEAK_ZONE_THRESHOLD}%")
+                print(f"   📊 Current Strength: {zone_str:.0f}%")
+
                 
-                zone_str = zone_summary.get('zone_strength', 0) if zone_summary else 0
+                # ===== FIX #3: RECALIBRATE ZONE STRENGTH =====
+                
+
+                # Add ATR-based adjustment if available
+                atr_value = historical_data.get('atr', {}).iloc[-1] if 'atr' in historical_data.columns else None
+
+                if atr_value and zone_summary:
+                    from strategy.smc_enhanced.zones import ZoneCalculator
+                    zone_str_atr = ZoneCalculator.get_zone_strength_atr(
+                        current_price['bid'],
+                        zones,
+                        atr=atr_value
+                    )
+                    print(f"   📊 Zone Strength (Base): {zone_str:.0f}% → (ATR-Adjusted): {zone_str_atr:.0f}%")
+                    zone_str = zone_str_atr
+                else:
+                    print(f"   📊 Zone Strength: {zone_str:.0f}%")
+
                 is_strong_zone = zone_str >= STRONG_ZONE_THRESHOLD
                 is_weak_zone = zone_str <= WEAK_ZONE_THRESHOLD
                 
@@ -1005,8 +1059,10 @@ class XAUUSDTradingBot:
                         )
                     
                     elif ENABLE_STRONG_ZONE_OVERRIDE and is_strong_zone and current_zone == 'DISCOUNT':
-                        print(f"   🎯 BUY signal allowed - STRONG DISCOUNT zone ({zone_str:.0f}%) overrides {combined_bias} bias")
+                        # ===== FIX #3: LOWERED THRESHOLD ALLOWS MORE OVERRIDES =====
+                        print(f"   🎯 BUY signal allowed - STRONG DISCOUNT zone ({zone_str:.0f}% > {STRONG_ZONE_THRESHOLD}%) overrides {combined_bias} bias")
                         print(f"   💡 Counter-trend reversal setup detected")
+                        print(f"   ℹ️  Narrative forcing trade despite conflicting bias")
                         zone_allows_trade = True
                     
                     elif is_weak_zone:
@@ -1035,8 +1091,12 @@ class XAUUSDTradingBot:
                         )
                     
                     elif ENABLE_STRONG_ZONE_OVERRIDE and is_strong_zone and current_zone == 'PREMIUM':
-                        print(f"   🎯 SELL signal allowed - STRONG PREMIUM zone ({zone_str:.0f}%) overrides {combined_bias} bias")
+                        # ===== FIX #3: LOWERED THRESHOLD ALLOWS MORE OVERRIDES =====
+                        print(f"   🎯 SELL signal allowed - STRONG PREMIUM zone ({zone_str:.0f}% > {STRONG_ZONE_THRESHOLD}%) overrides {combined_bias} bias")
+                        print(f"   💡 Counter-trend reversal setup detected")
+                        print(f"   ℹ️  Narrative forcing trade despite conflicting bias")
                         zone_allows_trade = True
+
                     
                     elif is_weak_zone:
                         print(f"   ⚠️  SELL signal BLOCKED - Zone too weak ({zone_str:.0f}% < {WEAK_ZONE_THRESHOLD}%)")

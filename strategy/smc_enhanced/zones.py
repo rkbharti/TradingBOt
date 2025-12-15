@@ -208,6 +208,58 @@ class ZoneCalculator:
             
         except:
             return 0
+        
+    @staticmethod
+    def get_zone_strength_atr(current_price, zones, atr=None):
+        """
+        Calculate zone strength with ATR-based adjustment.
+        
+        For M5 timeframe, wider zones are normal due to intraday volatility.
+        This accounts for that by using ATR as a reference.
+        
+        Args:
+            current_price: Current price
+            zones: Zone information dict
+            atr: Average True Range value (if available)
+        
+        Returns:
+            strength: 0-100% adjusted for ATR
+        """
+        if zones is None:
+            return 0
+        
+        try:
+            current_price = float(current_price)
+            base_strength = ZoneCalculator.get_zone_strength(current_price, zones)
+            
+            # If ATR provided, adjust the threshold
+            if atr and atr > 0:
+                # ATR-aware adjustment
+                # Higher ATR = wider zones = need to adjust expectations
+                
+                # Normalize ATR relative to zone ranges
+                premium_range = zones.get('premium_range', atr)
+                discount_range = zones.get('discount_range', atr)
+                
+                if current_price > zones.get('premium_start', current_price):
+                    # In premium zone
+                    atr_ratio = atr / premium_range if premium_range > 0 else 1
+                elif current_price < zones.get('discount_end', current_price):
+                    # In discount zone
+                    atr_ratio = atr / discount_range if discount_range > 0 else 1
+                else:
+                    atr_ratio = 1
+                
+                # Boost strength if volatility is high (meaning wider zones are normal)
+                adjusted_strength = min(100, base_strength * (1 + atr_ratio * 0.5))
+                return adjusted_strength
+            else:
+                return base_strength
+        
+        except Exception as e:
+            print(f"   ⚠️  ATR-based zone strength error: {e}")
+            return 0
+
     
     @staticmethod
     def get_next_zone_target(current_price, zones, direction='UP'):
