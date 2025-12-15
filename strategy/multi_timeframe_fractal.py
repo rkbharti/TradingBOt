@@ -235,39 +235,63 @@ class MultiTimeframeFractal:
             analysis = self.analyze_timeframe(tf)
             if analysis:
                 results[tf] = analysis
-                print(f"   {tf}: {analysis['bias']} | BOS: {'✅' if analysis['bos']['bullish_bos'] or analysis['bos']['bearish_bos'] else '❌'} | CHOC: {'✅' if analysis['choc']['bullish_choc'] or analysis['choc']['bearish_choc'] else '❌'}")
-        
-        # ===== FIX: ALIGNED TIMEFRAME COUNTING =====
-        # Now counts NEUTRAL as acceptable for trade direction
-        biases = [r['bias'] for r in results.values() if r]
-        bullish_count = biases.count('BULLISH')
-        bearish_count = biases.count('BEARISH')
-        neutral_count = biases.count('NEUTRAL')
-        total = len(biases)
+                print(
+                    f"   {tf}: {analysis['bias']} | "
+                    f"BOS: {'✅' if analysis['bos']['bullish_bos'] or analysis['bos']['bearish_bos'] else '❌'} | "
+                    f"CHOC: {'✅' if analysis['choc']['bullish_choc'] or analysis['choc']['bearish_choc'] else '❌'}"
+                )
 
-        # NEUTRAL is acceptable - counts as support for either direction
-        aligned_bullish = bullish_count + (neutral_count // 2)
-        aligned_bearish = bearish_count + (neutral_count // 2)
+        # ===== SMART MTF WEIGHTING (TIER 2 FIX #4) =====
+        # D1=40%, H4=25%, H1=20%, M15=10%, M5=5%
+        weights = {
+            'D1': 0.40,
+            'H4': 0.25,
+            'H1': 0.20,
+            'M15': 0.10,
+            'M5': 0.05
+        }
 
-        if aligned_bullish > aligned_bearish:
-            overall_bias = 'BULLISH'
-            # Confidence: 100% if all aligned, lower if mixed
-            confidence = int(((bullish_count + neutral_count) / total) * 100) if total > 0 else 0
-        elif aligned_bearish > aligned_bullish:
-            overall_bias = 'BEARISH'
-            confidence = int(((bearish_count + neutral_count) / total) * 100) if total > 0 else 0
-        else:
+        # Collect biases per timeframe
+        tf_biases = {tf: res['bias'] for tf, res in results.items()}
+
+        bull_score = 0.0
+        bear_score = 0.0
+        neutral_weight = 0.0
+
+        for tf, bias in tf_biases.items():
+            w = weights.get(tf, 0.0)
+            if bias == 'BULLISH':
+                bull_score += w
+            elif bias == 'BEARISH':
+                bear_score += w
+            elif bias == 'NEUTRAL':
+                neutral_weight += w
+
+        total_weight = bull_score + bear_score + neutral_weight
+        if total_weight == 0:
             overall_bias = 'NEUTRAL'
-            confidence = 50
+            confidence = 0
+        else:
+            # NEUTRAL supports either side: split its weight equally
+            bull_score_aligned = bull_score + neutral_weight / 2.0
+            bear_score_aligned = bear_score + neutral_weight / 2.0
 
-        # ===== DYNAMIC THRESHOLD BASED ON STRENGTH =====
-        # Default: 60% threshold, but flexible based on signal quality
+            if bull_score_aligned > bear_score_aligned:
+                overall_bias = 'BULLISH'
+                confidence = int((bull_score_aligned / total_weight) * 100)
+            elif bear_score_aligned > bull_score_aligned:
+                overall_bias = 'BEARISH'
+                confidence = int((bear_score_aligned / total_weight) * 100)
+            else:
+                overall_bias = 'NEUTRAL'
+                confidence = 50
+
+        # ===== DYNAMIC THRESHOLD (you already consume this in main.py) =====
         MTF_BASE_THRESHOLD = 60
         MTF_HIGH_CONFIDENCE_THRESHOLD = 75
+        # (thresholds are used in main.py, so no change needed here)
 
-
-        
-        # Generate recommendation
+        # Recommendation text
         if confidence >= 80:
             recommendation = f"STRONG {overall_bias} - High confidence setup"
         elif confidence >= 60:
@@ -277,13 +301,14 @@ class MultiTimeframeFractal:
         
         print(f"\n   🎯 Overall Bias: {overall_bias} ({confidence}%)")
         print(f"   💡 Recommendation: {recommendation}")
-        
+
         return {
             'overall_bias': overall_bias,
             'confidence': confidence,
             'tf_signals': results,
             'recommendation': recommendation
         }
+
         
     def get_dynamic_threshold(self, confidence, zone_strength=0):
         """

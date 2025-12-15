@@ -779,6 +779,78 @@ class XAUUSDTradingBot:
             except Exception as e:
                 print(f"   ❌ Error finding FVGs: {e}")
                 fvgs = {'bullish': [], 'bearish': []}
+            
+            # ===== FIX #5A: VOLUME SPIKE DETECTION =====
+            try:
+                # Check if FVG fill happened with volume spike
+                recent_bars = historical_data.tail(20)
+                avg_volume = recent_bars['tick_volume'].iloc[:-1].mean()
+                last_volume = recent_bars['tick_volume'].iloc[-1]
+                
+                volume_spike_ratio = last_volume / avg_volume if avg_volume > 0 else 1.0
+                fvg_volume_spike = volume_spike_ratio > 1.5  # 50% above average
+                
+                if fvg_volume_spike:
+                    print(f"   📊 Volume Spike: {volume_spike_ratio:.2f}x (above average) - FVG confirmation strong! ✅")
+                else:
+                    print(f"   📊 Volume: {volume_spike_ratio:.2f}x (normal) - No spike signal")
+                
+                volume_confirmation = {
+                    'spike_detected': fvg_volume_spike,
+                    'ratio': volume_spike_ratio,
+                    'threshold': 1.5
+                }
+            except Exception as e:
+                print(f"   ⚠️  Error analyzing volume: {e}")
+                volume_confirmation = {'spike_detected': False, 'ratio': 1.0, 'threshold': 1.5}
+                
+                # ===== FIX #5C: MOMENTUM / RSI CHECK =====
+            try:
+                # Simple 5‑bar momentum
+                recent_prices = historical_data['close'].tail(5).values
+                if len(recent_prices) == 5:
+                    momentum = float(recent_prices[-1] - recent_prices[0])
+                else:
+                    momentum = 0.0
+
+                # Basic RSI(14)
+                if len(historical_data) >= 15:
+                    delta = historical_data['close'].diff()
+                    gain = delta.where(delta > 0, 0.0)
+                    loss = -delta.where(delta < 0, 0.0)
+
+                    avg_gain = gain.rolling(window=14).mean()
+                    avg_loss = loss.rolling(window=14).mean()
+
+                    last_gain = float(avg_gain.iloc[-1]) if not pd.isna(avg_gain.iloc[-1]) else 0.0
+                    last_loss = float(avg_loss.iloc[-1]) if not pd.isna(avg_loss.iloc[-1]) else 0.0
+
+                    if last_loss == 0:
+                        rsi = 50.0
+                    else:
+                        rs = last_gain / last_loss
+                        rsi = 100.0 - (100.0 / (1.0 + rs))
+                else:
+                    rsi = 50.0
+
+                print(f"   📊 Momentum (5 bars): {momentum:.2f} | RSI(14): {rsi:.0f}")
+
+                momentum_data = {
+                    "momentum": momentum,
+                    "rsi": rsi,
+                    "overbought": rsi > 70,
+                    "oversold": rsi < 30,
+                }
+            except Exception as e:
+                print(f"   ⚠️  Error calculating momentum/RSI: {e}")
+                momentum_data = {
+                    "momentum": 0.0,
+                    "rsi": 50.0,
+                    "overbought": False,
+                    "oversold": False,
+                }
+
+
 
             try:
                 idm_probability = self.poi_identifier.identify_idm_sweep(timeframe_minutes=15)
@@ -1043,8 +1115,26 @@ class XAUUSDTradingBot:
                 
                 if final_signal == 'BUY':
                     if combined_bias in ['BULLISH', 'HIGHER_HIGH', 'NEUTRAL']:
-                        print(f"   ✅ BUY signal allowed - Bias confirms ({combined_bias})")
-                        zone_allows_trade = True
+                        # ===== FIX #5: APPLY ALL FILTERS =====
+                        filter_checks = {
+                            'atr_ok': not atr_filter_active,
+                            'volume_ok': volume_confirmation.get('spike_detected', True),
+                            'momentum_ok': momentum_data.get('rsi', 50) < 70  # Not overbought
+                        }
+                        
+                        if not filter_checks['atr_ok']:
+                            print(f"   ⚠️  BUY blocked - ATR filter (volatility too low)")
+                            zone_allows_trade = False
+                        elif not filter_checks['volume_ok']:
+                            print(f"   ⚠️  BUY blocked - Volume filter (no spike confirmation)")
+                            zone_allows_trade = False
+                        elif not filter_checks['momentum_ok']:
+                            print(f"   ⚠️  BUY blocked - Momentum filter (RSI overbought)")
+                            zone_allows_trade = False
+                        else:
+                            print(f"   ✅ BUY signal allowed - All filters passed!")
+                            zone_allows_trade = True
+
                         
                         send_telegram(
                             f"🟢 <b>BUY SIGNAL DETECTED!</b>\n\n"
@@ -1129,6 +1219,60 @@ class XAUUSDTradingBot:
                 else:
                     zone_allows_trade = False
 
+            
+
+
+            
+            # Calculate technical indicators
+            atr_filter_active = False  # <-- ensure defined for all paths
+
+            try:
+                df = historical_data.copy()
+                
+                if len(df) >= 200:
+                    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+                    ema200 = float(df['ema200'].iloc[-1])
+                else:
+                    ema200 = 0.0
+
+                if len(df) >= 50:
+                    df['ma20'] = df['close'].rolling(window=20).mean()
+                    df['ma50'] = df['close'].rolling(window=50).mean()
+                    ma20 = float(df['ma20'].iloc[-1])
+                    ma50 = float(df['ma50'].iloc[-1])
+                else:
+                    ma20 = 0.0
+                    ma50 = 0.0
+
+                recent_bars = min(50, len(df))
+                support = float(df['low'].tail(recent_bars).min())
+                resistance = float(df['high'].tail(recent_bars).max())
+
+                if len(df) >= 14:
+                    df['high_low'] = df['high'] - df['low']
+                    df['high_close'] = abs(df['high'] - df['close'].shift(1))
+                    df['low_close'] = abs(df['low'] - df['close'].shift(1))
+                    df['tr'] = df[['high_low', 'high_close', 'low_close']].max(axis=1)
+                    df['atr'] = df['tr'].rolling(window=14).mean()
+                    atr = float(df['atr'].iloc[-1])
+                else:
+                    atr = 0.0
+
+                # ===== FIX #5B: ATR VOLATILITY FILTER =====
+                MIN_ATR_XAUUSD = 1.5  # tune as needed
+
+                if atr < MIN_ATR_XAUUSD:
+                    print(f"   ⚠️  ATR too low ({atr:.2f} < {MIN_ATR_XAUUSD}) - Pausing entries")
+                    atr_filter_active = True
+                else:
+                    print(f"   ✅ ATR healthy ({atr:.2f}) - Trading allowed")
+                    atr_filter_active = False
+
+            except Exception as e:
+                print(f"   ⚠️  Error calculating technical levels: {e}")
+                ema200 = ma20 = ma50 = support = resistance = atr = 0.0
+                atr_filter_active = True # treat error as: block entries
+            
             # Store analysis data
             self.enhanced_analysis_data = {
                 'pdh': pdh,
@@ -1141,46 +1285,11 @@ class XAUUSDTradingBot:
                 'narrative': narrative,
                 'zones': zones,
                 'mtf_confluence': mtf_confluence,
-                'market_structure': structure_analysis  # ADD THIS LINE
+                'market_structure': structure_analysis,
+                'volume_confirmation': volume_confirmation,
+                'momentum_data': momentum_data,
+                'atr_filter_active': atr_filter_active,    # ADD THIS LINE
             }
-
-
-            # Calculate technical indicators
-            try:
-                df = historical_data.copy()
-                
-                if len(df) >= 200:
-                    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
-                    ema200 = float(df['ema200'].iloc[-1])
-                else:
-                    ema200 = 0.0
-                
-                if len(df) >= 50:
-                    df['ma20'] = df['close'].rolling(window=20).mean()
-                    df['ma50'] = df['close'].rolling(window=50).mean()
-                    ma20 = float(df['ma20'].iloc[-1])
-                    ma50 = float(df['ma50'].iloc[-1])
-                else:
-                    ma20 = 0.0
-                    ma50 = 0.0
-                
-                recent_bars = min(50, len(df))
-                support = float(df['low'].tail(recent_bars).min())
-                resistance = float(df['high'].tail(recent_bars).max())
-                
-                if len(df) >= 14:
-                    df['high_low'] = df['high'] - df['low']
-                    df['high_close'] = abs(df['high'] - df['close'].shift(1))
-                    df['low_close'] = abs(df['low'] - df['close'].shift(1))
-                    df['tr'] = df[['high_low', 'high_close', 'low_close']].max(axis=1)
-                    df['atr'] = df['tr'].rolling(window=14).mean()
-                    atr = float(df['atr'].iloc[-1])
-                else:
-                    atr = 0.0
-                
-            except Exception as e:
-                print(f"   ⚠️  Error calculating technical levels: {e}")
-                ema200 = ma20 = ma50 = support = resistance = atr = 0.0
 
             self.last_analysis = {
                 'smc_indicators': self.enhanced_analysis_data,
