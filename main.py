@@ -347,7 +347,7 @@ class XAUUSDTradingBot:
                     continue
                 
                 entry = pos['entry_price']
-                sl = pos['sl']
+                sl = pos.get('stop_loss', 0)  # ✅ Correct key
                 tp = pos['tp']
                 original_volume = pos['volume']
                 
@@ -1116,6 +1116,9 @@ class XAUUSDTradingBot:
                 if final_signal == 'BUY':
                     if combined_bias in ['BULLISH', 'HIGHER_HIGH', 'NEUTRAL']:
                         # ===== FIX #5: APPLY ALL FILTERS =====
+                        # Initialize atr_filter_active if not set yet
+                        if 'atr_filter_active' not in locals():
+                            atr_filter_active = False
                         filter_checks = {
                             'atr_ok': not atr_filter_active,
                             'volume_ok': volume_confirmation.get('spike_detected', True),

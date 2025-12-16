@@ -2,15 +2,18 @@
 Liquidity Detection Module
 Guardeer VIDEO 5: Liquidity Zones, PDH/PDL, Swing Highs/Lows
 
+
 Key Concepts:
 - External Liquidity: Previous Day High/Low (PDH/PDL)
 - Internal Liquidity: Swing Highs/Lows
 - Liquidity Grabs signal reversal
 """
 
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+
 
 
 class LiquidityDetector:
@@ -68,7 +71,10 @@ class LiquidityDetector:
             yesterday_end = today_start
             yesterday_start = yesterday_end - timedelta(days=1)
             
-            print(f"   🔍 Looking for PDH/PDL between {yesterday_start.strftime('%Y-%m-%d %H:%M')} and {yesterday_end.strftime('%Y-%m-%d %H:%M')}")
+            # ✅ FIXED: Better date display
+            target_date = yesterday_start.strftime('%Y-%m-%d')
+            day_name = yesterday_start.strftime('%A')
+            print(f"   🔍 Looking for PDH/PDL for {target_date} ({day_name})")
             
             # Filter DataFrame for yesterday's data
             df_yesterday = self.df[
@@ -88,7 +94,7 @@ class LiquidityDetector:
                 
                 print(f"   ℹ️  Using last 24 hours data ({len(df_yesterday)} bars)")
             else:
-                print(f"   ✅ Found {len(df_yesterday)} bars for {yesterday_start.date()}")
+                print(f"   ✅ Found {len(df_yesterday)} bars for {target_date}")
             
             pdh = float(df_yesterday['high'].max())
             pdl = float(df_yesterday['low'].min())
@@ -100,6 +106,7 @@ class LiquidityDetector:
             import traceback
             traceback.print_exc()
             return None, None
+
 
 
     
