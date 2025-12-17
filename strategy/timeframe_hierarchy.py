@@ -231,3 +231,11 @@ class TimeframeHierarchyFilter:
             print(f"   {tf:>4} (w={weight:.1f}): {indicator}{extra_str}")
         
         print("   " + "="*60)
+        
+    def validate_hierarchy(signal: str, mtf_confluence: dict, structure_analysis: dict) -> dict:
+        """
+        Standalone wrapper function for validating M5 signals
+        """
+        filter = TimeframeHierarchyFilter()
+        return filter.validate_m5_signal(signal, mtf_confluence, structure_analysis)
+

@@ -180,8 +180,6 @@ class SMCStrategy:
         
         return df
     
-    
-
     def get_current_session(self):
         """
         Determine the current active forex trading session with proper timezone handling.
@@ -228,15 +226,14 @@ class SMCStrategy:
         sydney_close = 12 * 60 + 30    # 12:30 PM
         tokyo_open = 4 * 60 + 30       # 4:30 AM
         tokyo_close = 13 * 60 + 30     # 1:30 PM
-        london_open = 13 * 60 + 30     # 1:30 PM ← CORRECTED!
-        london_close = 21 * 60 + 30    # 9:30 PM ← CORRECTED!
-        ny_open = 18 * 60 + 30         # 6:30 PM ← CORRECTED!
-        ny_close = 1 * 60 + 30         # 1:30 AM next day ← CORRECTED!
+        london_open = 13 * 60 + 30     # 1:30 PM
+        london_close = 21 * 60 + 30    # 9:30 PM
+        ny_open = 18 * 60 + 30         # 6:30 PM
+        ny_close = 1 * 60 + 30         # 1:30 AM next day
         
         # Check each session (priority: most recent session first)
         
         # NEW_YORK Session (6:30 PM - 1:30 AM next day)
-        # Spans midnight, so check in two parts
         if current_minutes >= ny_open or current_minutes < ny_close:
             return "NEW_YORK", True
         
@@ -252,22 +249,15 @@ class SMCStrategy:
         if sydney_open <= current_minutes < sydney_close:
             return "SYDNEY", True
         
-        # ===== NO ACTIVE SESSION (GAP BETWEEN SESSIONS) =====
+        # ===== NO ACTIVE SESSION =====
         return "CLOSED", False
 
-
-
-    
-
-
-    
     def check_trading_session(self):
         """Check if current time is within optimal trading sessions (IST)"""
         session_name, is_active = self.get_current_session()
         
         # Prefer London and New York sessions for gold trading
-        # Asian session has lower volume
-        if session_name in ["LONDON", "LONDON/NEW_YORK", "NEW_YORK"]:
+        if session_name in ["LONDON", "NEW_YORK"]:
             return True, session_name
         else:
             return False, session_name
@@ -367,15 +357,16 @@ class SMCStrategy:
         
         if bullish_score >= min_score and bullish_score > bearish_score:
             signal = "BUY"
-            confidence = min(bullish_score / 8 * 100, 100)  # Convert to percentage
+            confidence = min(bullish_score / 8 * 100, 100)
             reason = f"Bullish SMC: {', '.join(bullish_reasons[:3])}"
             
-            # ✅ ZONE FILTER: Only BUY in DISCOUNT zones
+            # ZONE FILTER: Only BUY in DISCOUNT zones
             if current.get('zone') not in ['DISCOUNT', 'DEEP_DISCOUNT']:
                 signal = "HOLD"
                 reason = f"[FILTERED] {reason} - Not in discount zone (current: {current.get('zone')})"
             
-            if not in_session:
+            # Session filter
+            elif not in_session:
                 signal = "HOLD"
                 reason += f" [Outside trading session - {session_name}]"
                 
@@ -384,12 +375,13 @@ class SMCStrategy:
             confidence = min(bearish_score / 8 * 100, 100)
             reason = f"Bearish SMC: {', '.join(bearish_reasons[:3])}"
             
-            # ✅ ZONE FILTER: Only SELL in PREMIUM zones
+            # ZONE FILTER: Only SELL in PREMIUM zones
             if current.get('zone') != 'PREMIUM':
                 signal = "HOLD"
                 reason = f"[FILTERED] {reason} - Not in premium zone (current: {current.get('zone')})"
             
-            if not in_session:
+            # Session filter
+            elif not in_session:
                 signal = "HOLD"
                 reason += f" [Outside trading session - {session_name}]"
         
@@ -415,7 +407,6 @@ class SMCStrategy:
         current = df.iloc[-1]
         in_session, session_name = self.get_current_session()
         
-        # ===== FIXED SESSION DISPLAY =====
         return {
             'current_price': current['close'],
             'ma20': current.get('MA20', 0),
@@ -427,7 +418,7 @@ class SMCStrategy:
             'market_structure': self.market_structure,
             'zone': current.get('zone', 'UNKNOWN'),
             'last_signal': self.last_signal,
-            'session': session_name,  # ✅ NOW SHOWS CORRECT SESSION
+            'session': session_name,
             'in_trading_hours': in_session,
             'fvg_bullish': current.get('fvg_bullish', False),
             'fvg_bearish': current.get('fvg_bearish', False),
