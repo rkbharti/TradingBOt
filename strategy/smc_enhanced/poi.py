@@ -1,11 +1,13 @@
 """
 Point of Interest (POI) Identifier
 Guardeer VIDEO 6: IDM, Order Blocks, Fair Value Gaps
+Guardeer VIDEO 7: Block Type Classification (BREAKER, MITIGATION, RECLAIMED, WEAK)
 
 Key Concepts:
 - IDM: Inducement & Displacement (sweep probability)
 - Order Blocks: Last candle without FVG
 - FVG: Fair Value Gap zones
+- Block Classification: Quality-based filtering
 """
 
 import pandas as pd
@@ -14,12 +16,13 @@ import numpy as np
 
 class POIIdentifier:
     """
-    Identifies Points of Interest (POI) from Guardeer VIDEO 6
+    Identifies Points of Interest (POI) from Guardeer VIDEO 6 & 7
     
     From Guardeer:
     - IDM sweep probability: 50% default, 75-85% on HTF, 95-100% when no lower POIs
     - Order Block = last candle without FVG
     - FVG = Mitigated when price touches the zone
+    - Block Classification = BREAKER (tested & held) > MITIGATION > RECLAIMED > WEAK
     """
     
     def __init__(self, df):
@@ -66,6 +69,8 @@ class POIIdentifier:
         
         Bearish OB: Last SELLING candle (close < open) without FVG above it
         Bullish OB: Last BUYING candle (close > open) without FVG below it
+        
+        NEW: Each OB is classified as BREAKER, MITIGATION, RECLAIMED, or WEAK
         """
         try:
             if len(self.df) < lookback:
@@ -111,8 +116,10 @@ class POIIdentifier:
                         'time': current.get('time'),
                         'strength': 'STRONG' if body_size > 5 else 'WEAK',
                         'mitigated': False,
-                        'bar_number': len(self.df) - lookback + i
+                        'bar_number': len(self.df) - lookback + i,
+                        'block_class': 'PENDING'  # Will classify after loop
                     }
+                    
                     self.order_blocks['bearish'].append(ob_block)
                 
                 # Check for Bullish OB (buying pressure)
@@ -133,15 +140,96 @@ class POIIdentifier:
                         'time': current.get('time'),
                         'strength': 'STRONG' if body_size > 5 else 'WEAK',
                         'mitigated': False,
-                        'bar_number': len(self.df) - lookback + i
+                        'bar_number': len(self.df) - lookback + i,
+                        'block_class': 'PENDING'  # Will classify after loop
                     }
+                    
                     self.order_blocks['bullish'].append(ob_block)
+            
+            # NOW classify all blocks after they've been created
+            for ob_block in self.order_blocks['bearish']:
+                ob_block['block_class'] = self.classify_block_type(ob_block, df, lookback_window=50)
+            
+            for ob_block in self.order_blocks['bullish']:
+                ob_block['block_class'] = self.classify_block_type(ob_block, df, lookback_window=50)
             
             return self.order_blocks
             
         except Exception as e:
             print(f"⚠️ Error finding order blocks: {e}")
             return self.order_blocks
+
+    
+    def classify_block_type(self, block, df, lookback_window=50):
+        """
+        NEW METHOD - Guardeer VIDEO 7: Classify OB type to filter weak ones.
+        
+        Returns: 'BREAKER_BLOCK', 'MITIGATION_BLOCK', 'RECLAIMED_BLOCK', or 'WEAK_BLOCK'
+        
+        BREAKER_BLOCK = OB tested 2+ times, price held = STRONG (use first)
+        MITIGATION_BLOCK = OB revisited, price filled through once = MEDIUM
+        RECLAIMED_BLOCK = OB broken but price returned = MEDIUM
+        WEAK_BLOCK = First time testing or no data = LOW (filter out)
+        """
+        try:
+            block_high = float(block['high'])
+            block_low = float(block['low'])
+            block_index = block['index']
+            
+            # Not enough candles ahead → treat as weak
+            if block_index + 5 >= len(df):
+                return 'WEAK_BLOCK'
+            
+            # Look at future price action after this block formed
+            future_data = df.iloc[block_index + 2:min(block_index + lookback_window, len(df))]
+            
+            if len(future_data) < 5:
+                return 'WEAK_BLOCK'
+            
+            # Count how many times price touched this block
+            touches = 0
+            holds = 0
+            breaks = 0
+            
+            for idx, row in future_data.iterrows():
+                try:
+                    high = float(row['high'])
+                    low = float(row['low'])
+                except (ValueError, TypeError):
+                    continue
+                
+                # Price touched the block zone
+                if (low <= block_high and high >= block_low):
+                    touches += 1
+                    
+                    # Did price hold (didn't break through)?
+                    if block['type'] == 'BEARISH':
+                        # For bearish OB, holding means price didn't close strongly above
+                        if high <= block_high * 1.001:  # Small tolerance
+                            holds += 1
+                        else:
+                            breaks += 1
+                    else:  # BULLISH
+                        # For bullish OB, holding means price didn't close strongly below
+                        if low >= block_low * 0.999:  # Small tolerance
+                            holds += 1
+                        else:
+                            breaks += 1
+            
+            # Classification logic (Guardeer VIDEO 7 criteria)
+            if touches >= 2 and holds >= 1 and breaks == 0:
+                return 'BREAKER_BLOCK'  # Tested multiple times and held = STRONGEST
+            elif breaks >= 1 and holds >= 1:
+                return 'RECLAIMED_BLOCK'  # Broken but returned = MEDIUM
+            elif touches >= 1 and breaks == 0:
+                return 'MITIGATION_BLOCK'  # Touched and filled but staying = MEDIUM
+            else:
+                return 'WEAK_BLOCK'  # Not tested much = WEAKEST
+                
+        except Exception as e:
+            print(f"⚠️ Error classifying block: {e}")
+            return 'WEAK_BLOCK'
+
     
     def _identify_fvg_zones(self, df):
         """Helper to identify FVG zones"""
@@ -243,6 +331,8 @@ class POIIdentifier:
         
         From Guardeer: This is what price is targeting next
         Priority: Order Blocks > FVGs
+        
+        NEW: Filters out WEAK_BLOCK (quality < 0.5) to use only high-quality POIs
         """
         try:
             current_price = float(current_price)
@@ -254,11 +344,25 @@ class POIIdentifier:
                 # Add bullish order blocks
                 for ob in self.order_blocks['bullish']:
                     if ob['mean_threshold'] > current_price:
+                        # NEW: Get block class quality weight
+                        block_class = ob.get('block_class', 'WEAK_BLOCK')
+                        
+                        quality_weight = {
+                            'BREAKER_BLOCK': 1.0,      # Use first (tested & held)
+                            'RECLAIMED_BLOCK': 0.85,   # Use second (returned after break)
+                            'MITIGATION_BLOCK': 0.70,  # Use third (filled orders)
+                            'WEAK_BLOCK': 0.40         # Filter out (untested)
+                        }.get(block_class, 0.40)
+                        
+                        # Optional: Skip very weak blocks (uncomment to enable strict filtering)
+                        # if quality_weight < 0.5:
+                        #     continue
+                        
                         poi_targets.append((
                             ob['mean_threshold'],
-                            'ORDER_BLOCK_BULLISH',
+                            f'ORDER_BLOCK_BULLISH_{block_class}',  # Now shows class in type
                             ob,
-                            'STRONG' if ob['strength'] == 'STRONG' else 'WEAK'
+                            block_class  # Pass class instead of just strength
                         ))
                 
                 # Add bullish FVGs
@@ -277,11 +381,25 @@ class POIIdentifier:
                 # Add bearish order blocks
                 for ob in self.order_blocks['bearish']:
                     if ob['mean_threshold'] < current_price:
+                        # NEW: Get block class quality weight
+                        block_class = ob.get('block_class', 'WEAK_BLOCK')
+                        
+                        quality_weight = {
+                            'BREAKER_BLOCK': 1.0,
+                            'RECLAIMED_BLOCK': 0.85,
+                            'MITIGATION_BLOCK': 0.70,
+                            'WEAK_BLOCK': 0.40
+                        }.get(block_class, 0.40)
+                        
+                        # Optional: Skip very weak blocks (uncomment to enable strict filtering)
+                        # if quality_weight < 0.5:
+                        #     continue
+                        
                         poi_targets.append((
                             ob['mean_threshold'],
-                            'ORDER_BLOCK_BEARISH',
+                            f'ORDER_BLOCK_BEARISH_{block_class}',  # Now shows class in type
                             ob,
-                            'STRONG' if ob['strength'] == 'STRONG' else 'WEAK'
+                            block_class  # Pass class instead of just strength
                         ))
                 
                 # Add bearish FVGs
@@ -324,6 +442,7 @@ class POIIdentifier:
                         'price': ob['mean_threshold'],
                         'type': 'ORDER_BLOCK_BULLISH',
                         'strength': ob['strength'],
+                        'block_class': ob.get('block_class', 'WEAK_BLOCK'),  # NEW
                         'distance': ob['mean_threshold'] - current_price
                     })
             
@@ -344,6 +463,7 @@ class POIIdentifier:
                         'price': ob['mean_threshold'],
                         'type': 'ORDER_BLOCK_BEARISH',
                         'strength': ob['strength'],
+                        'block_class': ob.get('block_class', 'WEAK_BLOCK'),  # NEW
                         'distance': current_price - ob['mean_threshold']
                     })
             

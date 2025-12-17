@@ -72,7 +72,7 @@ WEAK_ZONE_THRESHOLD = 30    # Below 30% = too weak to trade
 ENABLE_STRONG_ZONE_OVERRIDE = True
 
 # Override mode for testing (bypass strict filters)
-ENABLE_ZONE_OVERRIDE = True  # Set to False after testing
+ENABLE_ZONE_OVERRIDE = False  # Set to False after testing
 
 print(f"⚙️  Zone Configuration:")
 print(f"   Strong Zone Threshold: {STRONG_ZONE_THRESHOLD}%")
@@ -730,15 +730,23 @@ class XAUUSDTradingBot:
 
             # Initialize modules on first run
             if self.liquidity_detector is None:
+                from strategy.smc_enhanced.inducement import InducementDetector
+                from strategy.smc_enhanced.volume_analyzer import VolumeAnalyzer  # NEW
+                
                 self.liquidity_detector = LiquidityDetector(historical_data)
                 self.poi_identifier = POIIdentifier(historical_data)
                 self.bias_detector = BiasDetector(historical_data)
+                self.inducement_detector = None
+                self.volume_analyzer = VolumeAnalyzer(historical_data)  # NEW
                 self.narrative_analyzer = NarrativeAnalyzer(self.liquidity_detector, self.poi_identifier, self.bias_detector)
-                print("   ✅ Enhanced SMC modules initialized")
+                print("✅ Enhanced SMC modules initialized")
             else:
                 self.liquidity_detector.df = historical_data
                 self.poi_identifier.df = historical_data
                 self.bias_detector.df = historical_data
+                self.volume_analyzer.df = historical_data  # NEW
+
+
 
             # VIDEO 5 - LIQUIDITY DETECTION
             print("📋 VIDEO 5 - LIQUIDITY DETECTION")
@@ -763,12 +771,115 @@ class XAUUSDTradingBot:
             except Exception as e:
                 print(f"   ❌ Error checking liquidity: {e}")
                 liquidity_grabbed = {'pdh_grabbed': False, 'pdl_grabbed': False}
+                
+            # ===== VIDEO 3 - INDUCEMENT DETECTION =====
+            print("\n🚨 VIDEO 3 - INDUCEMENT DETECTION")
 
+            try:
+                # Build liquidity levels for inducement detector
+                liquidity_levels = {
+                    'PDH': pdh,
+                    'PDL': pdl,
+                    'swing_highs': [s['price'] for s in swings.get('highs', [])],
+                    'swing_lows': [s['price'] for s in swings.get('lows', [])]
+                }
+                
+                # Initialize inducement detector
+                from strategy.smc_enhanced.inducement import InducementDetector
+                inducement_detector = InducementDetector(historical_data, liquidity_levels)
+                
+                # Detect inducement
+                self.inducement = inducement_detector.detect_latest_inducement(lookback=10)
+                inducement = self.inducement
+                
+                if inducement.get('inducement'):
+                    print(f"   🚨 INDUCEMENT DETECTED!")
+                    print(f"      Type: {inducement.get('type', 'UNKNOWN')}")
+                    print(f"      Direction: {inducement.get('direction', 'UNKNOWN')}")
+                    print(f"      Level swept: ${inducement.get('level', 0):.2f}")
+                    print(f"      Wick size: {inducement.get('wick_size', 0):.2f} pips")
+                    print(f"      Confidence: {inducement.get('confidence', 'MEDIUM')}")
+                    
+                    # STEP 4: Display session weighting if available
+                    if inducement.get('session'):
+                        session = inducement.get('session', 'UNKNOWN')
+                        reliability = inducement.get('session_reliability', 0) * 100
+                        weighted_conf = inducement.get('weighted_confidence', 'MEDIUM')
+                        conf_mult = inducement.get('confidence_multiplier', 1.0)
+                        
+                        print(f"      📍 Session: {session} ({reliability:.0f}% reliability)")
+                        print(f"      🎯 Weighted Confidence: {weighted_conf}")
+                        print(f"      📊 Confidence Boost: {(conf_mult - 1.0) * 100:+.0f}%")
+                else:
+                    print(f"   ℹ️  No inducement detected in last 10 candles")
+
+            except Exception as e:
+                print(f"   ❌ Error in inducement detection: {e}")
+                inducement = {'inducement': False}
+
+            print("="*70)
+
+            
+            # ===== VIDEO 8 - VOLUME CONFIRMATION =====
+            print("\n📊 VIDEO 8 - VOLUME CONFIRMATION")
+            try:
+                # Update volume analyzer with latest data
+                self.volume_analyzer.df = historical_data
+                
+                # Detect volume spike
+                volume_spike = self.volume_analyzer.detect_volume_spike(lookback=20)
+                
+                # Detect volume divergence
+                volume_divergence = self.volume_analyzer.detect_volume_divergence(lookback=10)
+                
+                # Display results
+                if volume_spike.get('spike'):
+                    print(f"   🔥 VOLUME SPIKE DETECTED!")
+                    print(f"      Ratio: {volume_spike.get('ratio', 0):.2f}x average")
+                    print(f"      Strength: {volume_spike.get('strength', 'MEDIUM')}")
+                    print(f"      Current: {volume_spike.get('current_volume', 0):.0f}")
+                    print(f"      Average: {volume_spike.get('avg_volume', 0):.0f}")
+                else:
+                    print(f"   ℹ️  Normal volume ({volume_spike.get('ratio', 0):.2f}x average)")
+                
+                if volume_divergence != 'NONE':
+                    print(f"   ⚠️  Volume Divergence: {volume_divergence}")
+                else:
+                    print(f"   ℹ️  No divergence detected")
+
+            except Exception as e:
+                print(f"   ❌ Error in volume analysis: {e}")
+                volume_spike = {'spike': False, 'ratio': 0}
+                volume_divergence = 'NONE'
+
+            print("="*70)
+
+
+
+            # VIDEO 6 - POI IDENTIFICATION
             # VIDEO 6 - POI IDENTIFICATION
             print("🎯 VIDEO 6 - POI IDENTIFICATION")
             try:
                 order_blocks = self.poi_identifier.find_order_blocks(lookback=50)
-                print(f"   📍 Bullish OBs: {len(order_blocks.get('bullish', []))} | Bearish OBs: {len(order_blocks.get('bearish', []))}")
+                
+                # DEBUG: Show block classification
+                print("\n🔍 DEBUG - Order Block Classification:")
+                bullish_blocks = self.poi_identifier.order_blocks.get('bullish', [])
+                bearish_blocks = self.poi_identifier.order_blocks.get('bearish', [])
+                
+                if bullish_blocks:
+                    print(f"   📊 First 5 Bullish OBs:")
+                    for i, ob in enumerate(bullish_blocks[:5], 1):
+                        block_class = ob.get('block_class', 'UNKNOWN')
+                        print(f"      {i}. ${ob['mean_threshold']:.2f} - Class: {block_class}")
+                
+                if bearish_blocks:
+                    print(f"   📊 First 5 Bearish OBs:")
+                    for i, ob in enumerate(bearish_blocks[:5], 1):
+                        block_class = ob.get('block_class', 'UNKNOWN')
+                        print(f"      {i}. ${ob['mean_threshold']:.2f} - Class: {block_class}")
+
+
             except Exception as e:
                 print(f"   ❌ Error finding order blocks: {e}")
                 order_blocks = {'bullish': [], 'bearish': []}
@@ -923,7 +1034,19 @@ class XAUUSDTradingBot:
             # VIDEO 10b - NARRATIVE 3Bs FRAMEWORK
             print("📖 VIDEO 10b - NARRATIVE 3Bs")
             try:
+                # STEP 4: Use inducement data from VIDEO 3 (already detected with session weighting)
+                inducement = getattr(self, 'inducement', {'inducement': False})
+                
                 market_state = {
+                    # STEP 4: Inducement with session weighting
+                    'inducement': inducement.get('inducement', False),
+                    'inducement_type': inducement.get('type', 'NONE'),
+                    'inducement_direction': inducement.get('direction', 'NONE'),
+                    'inducement_session': inducement.get('session', 'UNKNOWN'),
+                    'inducement_reliability': inducement.get('session_reliability', 0.70),
+                    'inducement_weighted_confidence': inducement.get('weighted_confidence', 'MEDIUM'),
+                    
+                    # Existing fields
                     'liquidity_grabbed': liquidity_grabbed.get('pdh_grabbed') or liquidity_grabbed.get('pdl_grabbed'),
                     'liquidity_type': 'PDH' if liquidity_grabbed.get('pdh_grabbed') else 'PDL' if liquidity_grabbed.get('pdl_grabbed') else 'NONE',
                     'fvg_tapped': len(fvgs.get('bullish', [])) > 0 or len(fvgs.get('bearish', [])) > 0,
@@ -943,18 +1066,30 @@ class XAUUSDTradingBot:
                     'price_action': 'NEUTRAL'
                 }
 
+                
+                # Analyze market narrative
                 narrative = self.narrative_analyzer.analyze_market_story(market_state)
+                
+                # Display narrative output
                 print(f"   📌 B1 (Recent Action): {narrative.get('b1', {}).get('narrative', 'N/A')}")
                 print(f"   📌 B2 (Current Framework): {narrative.get('b2', {}).get('narrative', 'N/A')}")
                 print(f"   📌 B3 (Dealing Range): {narrative.get('b3', {}).get('narrative', 'N/A')}")
                 print(f"   🎯 Trade Signal: {narrative.get('trade_signal', 'HOLD')}")
                 print(f"   📊 Confidence: {narrative.get('confidence', 0):.0f}%")
                 print(f"   🧭 Bias: {narrative.get('bias', 'NEUTRAL')}")
+
             except Exception as e:
                 print(f"   ❌ Error in narrative analysis: {e}")
+                import traceback
+                traceback.print_exc()
+                
+                # Fallback values
+                inducement = {'inducement': False, 'session': 'UNKNOWN'}
                 narrative = {'trade_signal': 'HOLD', 'confidence': 0, 'bias': 'NEUTRAL'}
 
+            # Get final signal from narrative
             final_signal = narrative.get('trade_signal', 'HOLD')
+
             
             # ===== FIX #6: NARRATIVE OVERRIDE FOR MISSING SIGNALS =====
             print("\n🔧 FIX #6: NARRATIVE OVERRIDE CHECK")
@@ -1033,7 +1168,7 @@ class XAUUSDTradingBot:
             print("="*70)
 
             # ===== FIX #1: DYNAMIC THRESHOLD LOGIC =====
-            MTF_BASE_CONFIDENCE = 60
+            MTF_BASE_CONFIDENCE = 70
             zone_strength = zone_summary.get('zone_strength', 0) if zone_summary else 0
 
             # Calculate dynamic threshold
@@ -1075,7 +1210,7 @@ class XAUUSDTradingBot:
             
             zone_str = zone_summary.get('zone_strength', 0) if zone_summary else 0
             
-            ENABLE_ZONE_OVERRIDE = True
+            ENABLE_ZONE_OVERRIDE = False
             zone_allows_trade = False
             
             if ENABLE_ZONE_OVERRIDE:
@@ -1084,8 +1219,8 @@ class XAUUSDTradingBot:
                 # ===== FIX #3: LOWERED THRESHOLDS FOR M5 TIMEFRAME =====
                 # Original: 70% was too high for M5 (zones rarely reached 70%)
                 # New: 40% is more realistic for M5 intraday trading
-                STRONG_ZONE_THRESHOLD = 40  # Lowered from 70%
-                WEAK_ZONE_THRESHOLD = 20    # Lowered from 30%
+                STRONG_ZONE_THRESHOLD = 70  # Lowered from 70%
+                WEAK_ZONE_THRESHOLD = 50    # Lowered from 30%
                 ENABLE_STRONG_ZONE_OVERRIDE = True
 
                 print(f"   🎚️  Zone Thresholds: Strong={STRONG_ZONE_THRESHOLD}% | Weak={WEAK_ZONE_THRESHOLD}%")

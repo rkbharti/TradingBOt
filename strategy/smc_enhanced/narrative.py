@@ -1,21 +1,32 @@
 """
 Narrative Analyzer Module
 Guardeer VIDEO 10: Market Narrative (3Bs Framework)
+Guardeer VIDEO 3: Inducement Integration
+
+
+FIXED VERSION - December 2024:
+- Reduced inducement weight (25% → 15%)
+- Added volume requirement for inducement
+- Inducement no longer overrides zone requirement
+- STEP 4: Added session weighting for inducement
+
 
 Key Concepts:
-B1: Based on what market did RECENTLY
+B1: Based on what market did RECENTLY (now includes inducement WITH SESSION DATA)
 B2: Based on CURRENT framework (which liquidity targeted?)
 B3: Based on CURRENT dealing range (premium/discount)
 
+
 From Guardeer: "The 3Bs tells the complete story the market is telling"
 """
+
 
 
 class NarrativeAnalyzer:
     """
     Market Narrative Analysis (3Bs Framework) from Guardeer VIDEO 10
     
-    B1: Based on what market did recently
+    B1: Based on what market did recently (WITH INDUCEMENT + SESSION WEIGHTING)
     B2: Based on current framework (which liquidity targeted?)
     B3: Based on current dealing range (premium/discount)
     
@@ -66,6 +77,7 @@ class NarrativeAnalyzer:
         """
         B1: What has market done RECENTLY?
         
+        - Inducement detected? (HIGHEST PRIORITY WITH SESSION DATA)
         - Liquidity grabbed?
         - FVG tapped?
         - Order block hit?
@@ -73,14 +85,27 @@ class NarrativeAnalyzer:
         """
         try:
             b1 = {
+                'inducement': market_state.get('inducement', False),
+                'inducement_type': market_state.get('inducement_type', 'NONE'),
+                'inducement_direction': market_state.get('inducement_direction', 'NONE'),
+                # STEP 4: Session weighting fields
+                'inducement_session': market_state.get('inducement_session', 'UNKNOWN'),
+                'inducement_reliability': market_state.get('inducement_reliability', 0.70),
+                'inducement_weighted_confidence': market_state.get('inducement_weighted_confidence', 'MEDIUM'),
+                # Volume fields
+                'volume_spike': market_state.get('volume_spike', False),
+                'volume_ratio': market_state.get('volume_ratio', 0),
+                # Other recent action
                 'liquidity_grabbed': market_state.get('liquidity_grabbed', False),
-                'liquidity_type': market_state.get('liquidity_type', 'NONE'),  # 'PDH', 'PDL', 'SWING_HIGH', etc
+                'liquidity_type': market_state.get('liquidity_type', 'NONE'),
                 'fvg_tapped': market_state.get('fvg_tapped', False),
                 'fvg_type': market_state.get('fvg_type', 'NONE'),
                 'ob_hit': market_state.get('ob_hit', False),
-                'ob_type': market_state.get('ob_type', 'NONE'),  # 'BULLISH', 'BEARISH'
-                'price_action': market_state.get('price_action', 'NEUTRAL'),  # 'STRONG_UP', 'STRONG_DOWN', etc
+                'ob_type': market_state.get('ob_type', 'NONE'),
+                'price_action': market_state.get('price_action', 'NEUTRAL'),
                 'narrative': self._build_b1_narrative(
+                    market_state.get('inducement', False),
+                    market_state.get('volume_spike', False),
                     market_state.get('liquidity_grabbed', False),
                     market_state.get('fvg_tapped', False),
                     market_state.get('ob_hit', False)
@@ -93,11 +118,17 @@ class NarrativeAnalyzer:
             print(f"⚠️ Error in B1 analysis: {e}")
             return {}
     
-    def _build_b1_narrative(self, liquidity_grabbed, fvg_tapped, ob_hit):
+    def _build_b1_narrative(self, inducement, volume_spike, liquidity_grabbed, fvg_tapped, ob_hit):
         """
         Build narrative string from B1 conditions.
+        
+        FIXED: Inducement gets highest priority BUT volume matters
         """
-        if liquidity_grabbed:
+        if inducement and volume_spike:
+            return "🚨 INDUCEMENT + VOLUME SPIKE detected - High probability reversal"
+        elif inducement:
+            return "🚨 Market created INDUCEMENT sweep (awaiting volume confirmation)"
+        elif liquidity_grabbed:
             return "Market recently GRABBED liquidity and is likely reversing"
         elif fvg_tapped:
             return "Market recently FILLED a fair value gap"
@@ -117,12 +148,12 @@ class NarrativeAnalyzer:
         """
         try:
             b2 = {
-                'current_direction': market_state.get('current_direction', 'NEUTRAL'),  # 'BULLISH', 'BEARISH', 'NEUTRAL'
+                'current_direction': market_state.get('current_direction', 'NEUTRAL'),
                 'current_bias': market_state.get('current_bias', 'NEUTRAL'),
-                'next_poi_target': market_state.get('next_poi_target'),  # Price level
-                'target_type': market_state.get('target_type'),  # 'ORDER_BLOCK', 'FVG', 'SWING', etc
-                'target_distance': market_state.get('target_distance'),  # Pips away
-                'target_confidence': market_state.get('target_confidence', 'MEDIUM'),  # 'LOW', 'MEDIUM', 'HIGH'
+                'next_poi_target': market_state.get('next_poi_target'),
+                'target_type': market_state.get('target_type'),
+                'target_distance': market_state.get('target_distance'),
+                'target_confidence': market_state.get('target_confidence', 'MEDIUM'),
                 'pullback_pattern': market_state.get('pullback_pattern', 'UNKNOWN'),
                 'timeframe': market_state.get('timeframe', '15min'),
                 'narrative': self._build_b2_narrative(
@@ -160,12 +191,12 @@ class NarrativeAnalyzer:
         """
         try:
             b3 = {
-                'zone': market_state.get('zone', 'EQUILIBRIUM'),  # 'PREMIUM', 'DISCOUNT', 'EQUILIBRIUM'
-                'zone_strength': market_state.get('zone_strength', 0),  # 0-100%
+                'zone': market_state.get('zone', 'EQUILIBRIUM'),
+                'zone_strength': market_state.get('zone_strength', 0),
                 'distance_from_equilibrium': market_state.get('distance_from_equilibrium', 0),
                 'can_buy': market_state.get('zone') in ['DISCOUNT', 'DEEP_DISCOUNT'],
                 'can_sell': market_state.get('zone') == 'PREMIUM',
-                'equilibrium_breach_risk': market_state.get('zone_strength', 0) > 80,  # High strength = breach risk
+                'equilibrium_breach_risk': market_state.get('zone_strength', 0) > 80,
                 'narrative': self._build_b3_narrative(
                     market_state.get('zone', 'EQUILIBRIUM'),
                     market_state.get('zone_strength', 0)
@@ -216,8 +247,16 @@ class NarrativeAnalyzer:
         Calculate how urgent the trade setup is.
         
         Returns: 'LOW', 'MEDIUM', 'HIGH'
+        
+        FIXED: Inducement with volume = HIGH urgency
         """
         urgency_score = 0
+        
+        # B1: Inducement + Volume = VERY urgent (FIXED)
+        if b1.get('inducement') and b1.get('volume_spike'):
+            urgency_score += 3
+        elif b1.get('inducement'):
+            urgency_score += 1  # REDUCED from 3
         
         # B1: Liquidity grabbed = urgent reversal expected
         if b1.get('liquidity_grabbed'):
@@ -243,9 +282,26 @@ class NarrativeAnalyzer:
         Get final bias recommendation from all 3 Bs.
         
         Voting system: Which direction appears most?
+        
+        FIXED: Inducement gets 2 votes ONLY with volume confirmation
         """
         bullish_votes = 0
         bearish_votes = 0
+        
+        # B1: Inducement direction (FIXED - volume matters)
+        if b1.get('inducement'):
+            if b1.get('volume_spike'):
+                # With volume = 2 votes
+                if b1.get('inducement_direction') == 'BULLISH':
+                    bullish_votes += 2
+                elif b1.get('inducement_direction') == 'BEARISH':
+                    bearish_votes += 2
+            else:
+                # Without volume = 1 vote only
+                if b1.get('inducement_direction') == 'BULLISH':
+                    bullish_votes += 1
+                elif b1.get('inducement_direction') == 'BEARISH':
+                    bearish_votes += 1
         
         # B2 direction
         if b2.get('current_direction') == 'BULLISH':
@@ -277,16 +333,45 @@ class NarrativeAnalyzer:
         Derive final trading signal from all components.
         
         Signal: 'BUY', 'SELL', 'HOLD'
+        
+        FIXED: Inducement SUGGESTS direction but still requires:
+        1. Zone confirmation (40%+ strength)
+        2. Volume confirmation (spike present)
+        3. Bias alignment
         """
-        # Must be in correct zone first
+        # Inducement detected = suggests direction but needs confirmation
+        if b1.get('inducement'):
+            # RULE 1: Require minimum zone strength
+            if b3.get('zone_strength', 0) < 40:
+                return 'HOLD'  # Zone too weak
+            
+            # RULE 2: Require volume confirmation
+            if not b1.get('volume_spike'):
+                return 'HOLD'  # No volume = no trade
+            
+            # RULE 3: Check direction alignment with bias
+            if b1.get('inducement_direction') == 'BULLISH' and bias == 'BULLISH':
+                # RULE 4: Must be in correct zone
+                if b3.get('can_buy'):
+                    return 'BUY'
+            elif b1.get('inducement_direction') == 'BEARISH' and bias == 'BEARISH':
+                # RULE 4: Must be in correct zone
+                if b3.get('can_sell'):
+                    return 'SELL'
+            
+            # If any rule fails, return HOLD
+            return 'HOLD'
+        
+        # Original logic (no inducement)
+        # Must be in correct zone
         if not (b3.get('can_buy') or b3.get('can_sell')):
-            return 'HOLD'  # Wrong zone
+            return 'HOLD'
         
         # Must have direction confirmation
         if b2.get('current_direction') == 'NEUTRAL':
-            return 'HOLD'  # No direction
+            return 'HOLD'
         
-        # Now apply logic
+        # Apply logic
         if b3.get('can_buy') and b2.get('current_direction') == 'BULLISH' and bias == 'BULLISH':
             return 'BUY'
         elif b3.get('can_sell') and b2.get('current_direction') == 'BEARISH' and bias == 'BEARISH':
@@ -298,13 +383,31 @@ class NarrativeAnalyzer:
         """
         Calculate confidence level in the narrative (0-100%).
         
-        Based on how much evidence supports the story.
+        STEP 4 ENHANCED: Session weighting for inducement
         """
         confidence = 50  # Base confidence
         
+        # B1: Inducement with session weighting
+        if b1.get('inducement'):
+            base_boost = 10  # Start conservative
+            
+            # STEP 4: Apply session reliability multiplier
+            session_reliability = b1.get('inducement_reliability', 0.70)
+            session_boost = int(base_boost * (session_reliability / 0.70))  # Scale by reliability
+            
+            # Volume confirmation adds extra boost
+            if b1.get('volume_spike'):
+                session_boost += 10  # Extra 10% for volume
+            
+            confidence += session_boost
+            
+            # Debug output with session name
+            session = b1.get('inducement_session', 'UNKNOWN')
+            print(f"   📊 Inducement confidence: +{session_boost}% ({session} session)")
+        
         # B1: Recent action confirmation
         if b1.get('liquidity_grabbed') or b1.get('ob_hit'):
-            confidence += 20
+            confidence += 15  # REDUCED from 20
         
         # B2: Clear target
         if b2.get('target_type') and b2.get('target_confidence') == 'HIGH':
@@ -335,6 +438,10 @@ class NarrativeAnalyzer:
         
         print(f"\n① B1 (What Happened Recently):")
         print(f"   {b1.get('narrative', 'N/A')}")
+        if b1.get('inducement'):
+            print(f"   🚨 INDUCEMENT: {b1.get('inducement_type')} - {b1.get('inducement_direction')}")
+            print(f"   📍 Session: {b1.get('inducement_session')} ({b1.get('inducement_reliability', 0)*100:.0f}% reliability)")
+            print(f"   📊 Volume: {'✅ SPIKE' if b1.get('volume_spike') else '❌ NO SPIKE'}")
         print(f"   - Liquidity Grabbed: {b1.get('liquidity_grabbed')}")
         print(f"   - FVG Tapped: {b1.get('fvg_tapped')}")
         print(f"   - OB Hit: {b1.get('ob_hit')}")

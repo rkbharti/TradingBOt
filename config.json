@@ -38,5 +38,11 @@
     "london_session_end": "17:00",
     "new_york_session_start": "13:00",
     "new_york_session_end": "22:00"
-  }
+  },
+
+
+  "mtf_threshold": 70,
+  "strong_zone_override": false,
+  "testing_override_mode": false   
+   
 }
