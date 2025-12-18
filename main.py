@@ -72,7 +72,7 @@ WEAK_ZONE_THRESHOLD = 30    # Below 30% = too weak to trade
 ENABLE_STRONG_ZONE_OVERRIDE = True
 
 # Override mode for testing (bypass strict filters)
-ENABLE_ZONE_OVERRIDE = False  # Set to False after testing
+ENABLE_ZONE_OVERRIDE = True  # ✅ FIXED: Allow zone-based signal generation!
 
 print(f"⚙️  Zone Configuration:")
 print(f"   Strong Zone Threshold: {STRONG_ZONE_THRESHOLD}%")
@@ -347,12 +347,17 @@ class XAUUSDTradingBot:
                     continue
                 
                 entry = pos['entry_price']
-                sl = pos.get('stop_loss', 0)  # ✅ Correct key
-                tp = pos['tp']
-                original_volume = pos['volume']
+                sl = pos.get('stop_loss', 0)
+                tp = pos.get('take_profit', 0)  # ✅ CORRECT KEY
+                original_volume = pos.get('lot_size', 0)  # ✅ CORRECT KEY
+
+                # ✅ ADD NULL CHECK
+                if not tp or not original_volume:
+                    continue
+
                 
                 # Calculate risk (R)
-                if pos['type'] == 'BUY':
+                if pos['signal'] == 'BUY':
                     risk = entry - sl
                     profit_pips = (current_price - entry) * 100
                     target_pips = risk * 2 * 100  # 2R target
@@ -1094,15 +1099,17 @@ class XAUUSDTradingBot:
             # ===== FIX #6: NARRATIVE OVERRIDE FOR MISSING SIGNALS =====
             print("\n🔧 FIX #6: NARRATIVE OVERRIDE CHECK")
 
+
             if zone_summary:
                 print(f"   📊 Zone: {current_zone} | Strength: {zone_summary.get('zone_strength', 0):.0f}% | Signal: {final_signal}")
             else:
                 print(f"   ⚠️  No zone_summary available!")
 
+
             # Override logic with LOWER threshold (50% instead of 70%)
             if final_signal == 'HOLD' and current_zone == 'DISCOUNT' and zone_summary:
                 zone_str = zone_summary.get('zone_strength', 0)
-                if zone_str > 50:
+                if zone_str >= 50:  # ✅ CHANGED: > 50 to >= 50
                     print(f"   🎯 OVERRIDE: DISCOUNT ({zone_str:.0f}%) → Forcing BUY Signal")
                     final_signal = 'BUY'
                     print(f"   ✅ Signal changed to: {final_signal}")
@@ -1111,7 +1118,7 @@ class XAUUSDTradingBot:
                     
             elif final_signal == 'HOLD' and current_zone == 'PREMIUM' and zone_summary:
                 zone_str = zone_summary.get('zone_strength', 0)
-                if zone_str > 50:
+                if zone_str >= 50:  # ✅ CHANGED: > 50 to >= 50
                     print(f"   🎯 OVERRIDE: PREMIUM ({zone_str:.0f}%) → Forcing SELL Signal")
                     final_signal = 'SELL'
                     print(f"   ✅ Signal changed to: {final_signal}")
@@ -1120,6 +1127,7 @@ class XAUUSDTradingBot:
                     
             else:
                 print(f"   ℹ️  No override needed. Current signal: {final_signal}")
+
                 
             # ===== MARKET STRUCTURE FILTER (VIDEO 3) =====
             print("\n🔍 MARKET STRUCTURE VALIDATION")
@@ -1138,22 +1146,38 @@ class XAUUSDTradingBot:
                 
                 # Check for trend alignment
                 elif final_signal == 'BUY' and structure_analysis['current_trend'] == 'DOWNTREND':
-                    print(f"   📊 BUY signal but trend is DOWNTREND")
+                    print(f"   📊 BUY signal but trend is DOWNTREND (counter-trend)")
                     print(f"   ⚠️  Structure doesn't support BUY")
-                    if structure_analysis['structure_shift'] not in ['CHOCH_BULLISH', 'BOS_BULLISH']:
-                        print(f"   🚫 No CHOCH/BOS confirmation - Signal BLOCKED")
-                        final_signal = 'HOLD'
+
+                    # ✅ FIX #3: Check for inducement (liquidity sweep)
+                    inducement_ok = inducement.get('inducement', False) and inducement.get('direction') == 'BULLISH'
+                    struct_ok = structure_analysis['structure_shift'] in ['CHOCH_BULLISH', 'BOS_BULLISH']
+
+                    if struct_ok:
+                        print(f"   ✅ {structure_analysis['structure_shift']} detected - Signal allowed")
+                    elif inducement_ok:
+                        print(f"   🚨 Inducement sweep detected - Counter-trend BUY ALLOWED")
+                        print(f"      Liquidity level: ${inducement.get('level', 0):.2f}")
                     else:
-                        print(f"   ✅ But {structure_analysis['structure_shift']} detected - Signal allowed")
+                        print(f"   🚫 No CHOCH/BOS/Inducement - Signal BLOCKED")
+                        final_signal = 'HOLD'
                 
                 elif final_signal == 'SELL' and structure_analysis['current_trend'] == 'UPTREND':
-                    print(f"   📊 SELL signal but trend is UPTREND")
+                    print(f"   📊 SELL signal but trend is UPTREND (counter-trend)")
                     print(f"   ⚠️  Structure doesn't support SELL")
-                    if structure_analysis['structure_shift'] not in ['CHOCH_BEARISH', 'BOS_BEARISH']:
-                        print(f"   🚫 No CHOCH/BOS confirmation - Signal BLOCKED")
-                        final_signal = 'HOLD'
+
+                    # ✅ FIX #3: Check for inducement (liquidity sweep)
+                    inducement_ok = inducement.get('inducement', False) and inducement.get('direction') == 'BEARISH'
+                    struct_ok = structure_analysis['structure_shift'] in ['CHOCH_BEARISH', 'BOS_BEARISH']
+
+                    if struct_ok:
+                        print(f"   ✅ {structure_analysis['structure_shift']} detected - Signal allowed")
+                    elif inducement_ok:
+                        print(f"   🚨 Inducement sweep detected - Counter-trend SELL ALLOWED")
+                        print(f"      Liquidity level: ${inducement.get('level', 0):.2f}")
                     else:
-                        print(f"   ✅ But {structure_analysis['structure_shift']} detected - Signal allowed")
+                        print(f"   🚫 No CHOCH/BOS/Inducement - Signal BLOCKED")
+                        final_signal = 'HOLD'
                 
                 else:
                     print(f"   ✅ Signal aligned with market structure")
@@ -1168,16 +1192,16 @@ class XAUUSDTradingBot:
             print("="*70)
 
             # ===== FIX #1: DYNAMIC THRESHOLD LOGIC =====
-            MTF_BASE_CONFIDENCE = 70
+            MTF_BASE_CONFIDENCE = 50  # ✅ REDUCED from 70 (M5 moves too fast)
             zone_strength = zone_summary.get('zone_strength', 0) if zone_summary else 0
 
             # Calculate dynamic threshold
             if zone_strength > 70:
-                MTF_MIN_CONFIDENCE = 50
-                print(f"   📊 Zone is STRONG ({zone_strength:.0f}%) → Lowering MTF threshold to 50%")
+                MTF_MIN_CONFIDENCE = 35  # ✅ REDUCED from 50
+                print(f"   📊 Zone is STRONG ({zone_strength:.0f}%) → Lowering MTF threshold to 35%")
             elif mtf_confluence['confidence'] >= 80:
-                MTF_MIN_CONFIDENCE = 40
-                print(f"   📊 MTF Confidence is VERY HIGH ({mtf_confluence['confidence']}%) → Lowering threshold to 40%")
+                MTF_MIN_CONFIDENCE = 30  # ✅ REDUCED from 40
+                print(f"   📊 MTF Confidence is VERY HIGH ({mtf_confluence['confidence']}%) → Lowering threshold to 30%")
             else:
                 MTF_MIN_CONFIDENCE = MTF_BASE_CONFIDENCE
                 print(f"   📊 Using default MTF threshold: {MTF_MIN_CONFIDENCE}%")
@@ -1191,12 +1215,32 @@ class XAUUSDTradingBot:
                 final_signal = 'HOLD'
             elif final_signal == 'BUY' and mtf_confluence['overall_bias'] == 'BEARISH':
                 print(f"   📊 BUY conflicts with BEARISH MTF bias")
-                print(f"   🚫 BUY signal → Changed to HOLD")
-                final_signal = 'HOLD'
+                
+                # ✅ FIX: Allow if inducement detected
+                if inducement.get('inducement', False) and inducement.get('direction') == 'BULLISH':
+                    print(f"   🚨 INDUCEMENT OVERRIDE - Allowing counter-trend BUY")
+                    print(f"      Type: {inducement.get('type', 'UNKNOWN')}")
+                    print(f"      Session: {inducement.get('session', 'UNKNOWN')} ({inducement.get('session_reliability', 0)*100:.0f}% reliability)")
+                    print(f"      Weighted Confidence: {inducement.get('weighted_confidence', 'UNKNOWN')}")
+                    print(f"   ✅ Counter-trend BUY ALLOWED due to liquidity sweep")
+                else:
+                    print(f"   🚫 BUY signal → Changed to HOLD")
+                    final_signal = 'HOLD'
+
             elif final_signal == 'SELL' and mtf_confluence['overall_bias'] == 'BULLISH':
                 print(f"   📊 SELL conflicts with BULLISH MTF bias")
-                print(f"   🚫 SELL signal → Changed to HOLD")
-                final_signal = 'HOLD'
+                
+                # ✅ FIX: Allow if inducement detected
+                if inducement.get('inducement', False) and inducement.get('direction') == 'BEARISH':
+                    print(f"   🚨 INDUCEMENT OVERRIDE - Allowing counter-trend SELL")
+                    print(f"      Type: {inducement.get('type', 'UNKNOWN')}")
+                    print(f"      Session: {inducement.get('session', 'UNKNOWN')} ({inducement.get('session_reliability', 0)*100:.0f}% reliability)")
+                    print(f"      Weighted Confidence: {inducement.get('weighted_confidence', 'UNKNOWN')}")
+                    print(f"   ✅ Counter-trend SELL ALLOWED due to liquidity sweep")
+                else:
+                    print(f"   🚫 SELL signal → Changed to HOLD")
+                    final_signal = 'HOLD'
+
             else:
                 print(f"   ✅ Signal {final_signal} CONFIRMED by MTF analysis")
 
