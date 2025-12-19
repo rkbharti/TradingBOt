@@ -1878,6 +1878,12 @@ class XAUUSDTradingBot:
 
     def execute_trade(self, signal, price, historical_data, stats):
         """Execute trade with standard parameters + SAFETY CAPS"""
+        
+        # ===== SL SAFETY LIMITS (CRITICAL FIX) =====
+        MIN_STOP_LOSS_PIPS = 20  # Minimum 20 pips
+        MAX_STOP_LOSS_PIPS = 40  # Maximum 40 pips
+        # ==========================================
+        
         entry_price = price['ask'] if signal == 'BUY' else price['bid']
         atr = stats.get('atr', entry_price * 0.01)
         market_structure = stats.get('market_structure', 'NEUTRAL')
@@ -1912,7 +1918,6 @@ class XAUUSDTradingBot:
             takeprofit = entry_price + (tp_pips * pip_value)
         else:
             takeprofit = entry_price - (tp_pips * pip_value)
-
 
         # ===== FIX #3: USE SAFE LOT SIZE CALCULATION =====
         lot_size, adjusted_stoploss = calculate_lot_size_with_safety(
@@ -1964,6 +1969,7 @@ class XAUUSDTradingBot:
         else:
             print(f"❌ Order placement failed")
             return False
+
 
     def execute_enhanced_trade(self, signal, price, historical_data, zones):
         """Execute trade with enhanced SMC-based parameters + SAFETY CAPS"""
