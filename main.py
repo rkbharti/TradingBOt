@@ -65,7 +65,7 @@ print("✅ Telegram notification system loaded!")
 # ========================================
 
 # Strong zone threshold for counter-trend trades
-STRONG_ZONE_THRESHOLD = 70  # 70%+ zones can override bias
+STRONG_ZONE_THRESHOLD = 50  # 70%+ zones can override bias
 WEAK_ZONE_THRESHOLD = 30    # Below 30% = too weak to trade
 
 # Allow strong zones to override conflicting bias
@@ -1436,8 +1436,8 @@ class XAUUSDTradingBot:
                 # ===== FIX #3: LOWERED THRESHOLDS FOR M5 TIMEFRAME =====
                 # Original: 70% was too high for M5 (zones rarely reached 70%)
                 # New: 40% is more realistic for M5 intraday trading
-                STRONG_ZONE_THRESHOLD = 70  # Lowered from 70%
-                WEAK_ZONE_THRESHOLD = 50    # Lowered from 30%
+                STRONG_ZONE_THRESHOLD = 50  # Lowered from 70%
+                WEAK_ZONE_THRESHOLD = 30   # Lowered from 30%
                 ENABLE_STRONG_ZONE_OVERRIDE = True
 
                 print(f"   🎚️  Zone Thresholds: Strong={STRONG_ZONE_THRESHOLD}% | Weak={WEAK_ZONE_THRESHOLD}%")
@@ -1849,6 +1849,7 @@ class XAUUSDTradingBot:
         stoploss, takeprofit = self.risk_calculator.calculate_stop_loss_takeprofit(
             signal, entry_price, atr, stats.get('zone', 'EQUILIBRIUM'), market_structure
         )
+        
         # ===== ENFORCE STOP LOSS LIMITS (CRITICAL FIX) =====
         pip_value = 0.01  # For XAUUSD
         sl_pips = abs(entry_price - stoploss) / pip_value
@@ -1875,6 +1876,7 @@ class XAUUSDTradingBot:
             takeprofit = entry_price + (tp_pips * pip_value)
         else:
             takeprofit = entry_price - (tp_pips * pip_value)
+
 
         # ===== FIX #3: USE SAFE LOT SIZE CALCULATION =====
         lot_size, adjusted_stoploss = calculate_lot_size_with_safety(
