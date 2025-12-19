@@ -186,6 +186,34 @@ except ImportError as e:
     print(f"⚠️  Dashboard not available: {e}")
 
 
+
+
+# =====================================================
+# 🛡️ PRODUCTION SAFETY CONFIGURATION
+# =====================================================
+
+# Risk Management Limits
+MAX_POSITIONS_PER_DIRECTION = 2  # Only 2 BUYs OR 2 SELLs at once
+MAX_TOTAL_POSITIONS = 3  # Never more than 3 trades total
+DAILY_LOSS_LIMIT_PERCENT = 2.0  # Stop trading at -2% daily loss
+MAX_CONSECUTIVE_LOSSES = 3  # Pause after 3 losses in a row
+MIN_STOP_LOSS_PIPS = 20  # Minimum 20 pip SL (for M5)
+MAX_STOP_LOSS_PIPS = 40  # Maximum 40 pip SL (prevent huge losses)
+
+# Trend Filter Settings (H1 timeframe)
+TREND_EMA_FAST = 20  # Fast EMA for trend
+TREND_EMA_SLOW = 50  # Slow EMA for trend
+USE_TREND_FILTER = True  # CRITICAL: Enable trend protection
+
+# Session-Based Configuration
+SESSION_CONFIG = {
+    "LONDON": {"zone_threshold": 35, "rr_ratio": 2.5, "active": True},
+    "NEW_YORK": {"zone_threshold": 40, "rr_ratio": 2.5, "active": True},
+    "ASIAN": {"zone_threshold": 60, "rr_ratio": 2.0, "active": False},  # Avoid Asian (low liquidity)
+    "OVERLAP": {"zone_threshold": 30, "rr_ratio": 3.0, "active": True}  # London+NY overlap
+}
+
+
 class XAUUSDTradingBot:
     """Enhanced trading bot with Guardeer's complete 10-video SMC strategy for XAUUSD"""
 
@@ -207,6 +235,15 @@ class XAUUSDTradingBot:
         self.running = False
         self.trade_log = []
         self.open_positions = []
+
+        # Production Safety Tracking
+        self.daily_start_balance = None
+        self.daily_loss_limit_triggered = False
+        self.consecutive_losses = 0
+        self.consecutive_loss_pause = False
+        self.consecutive_loss_pause_until = None
+        self.last_trade_result = None  # 'WIN' or 'LOSS'
+
 
         self.last_signal = "HOLD"
         self.last_analysis = {}
@@ -497,6 +534,142 @@ class XAUUSDTradingBot:
 
         except Exception as e:
             print(f"❌ Error syncing positions: {e}")
+
+
+    def get_market_trend(self, timeframe='H1'):
+        """
+        🛡️ CRITICAL SAFETY: Detect market trend to prevent counter-trend trades
+        Returns: ("BULLISH", "BEARISH", "RANGING")
+        """
+        try:
+            import MetaTrader5 as mt5
+
+            # Get H1 data for trend analysis
+            if timeframe == 'H1':
+                tf = mt5.TIMEFRAME_H1
+            elif timeframe == 'H4':
+                tf = mt5.TIMEFRAME_H4
+            else:
+                tf = mt5.TIMEFRAME_H1
+
+            rates = mt5.copy_rates_from_pos(self.symbol, tf, 0, 100)
+
+            if rates is None or len(rates) < 50:
+                print("⚠️ Trend filter: Not enough data, defaulting to RANGING")
+                return "RANGING"
+
+            closes = pd.Series([float(r['close']) for r in rates])
+
+            # Calculate EMAs
+            ema20 = closes.ewm(span=TREND_EMA_FAST, adjust=False).mean().iloc[-1]
+            ema50 = closes.ewm(span=TREND_EMA_SLOW, adjust=False).mean().iloc[-1]
+            current_price = closes.iloc[-1]
+
+            # Calculate trend strength
+            ema_diff_percent = abs(ema20 - ema50) / ema50 * 100
+
+            # Determine trend
+            if ema20 > ema50 and current_price > ema20:
+                if ema_diff_percent > 0.15:  # Strong uptrend
+                    return "BULLISH"
+                else:
+                    return "RANGING"  # Weak uptrend = ranging
+            elif ema20 < ema50 and current_price < ema20:
+                if ema_diff_percent > 0.15:  # Strong downtrend
+                    return "BEARISH"
+                else:
+                    return "RANGING"
+            else:
+                return "RANGING"
+
+        except Exception as e:
+            print(f"⚠️ Trend filter error: {e}")
+            return "RANGING"  # Default to RANGING on error (safe mode)
+
+    def can_open_position(self, signal_type):
+        """
+        🛡️ Check if we can open another position (prevent over-trading)
+        """
+        # Check total position limit
+        if len(self.open_positions) >= MAX_TOTAL_POSITIONS:
+            print(f"🚫 Max total positions ({MAX_TOTAL_POSITIONS}) reached")
+            return False
+
+        # Check same-direction limit
+        same_direction_count = sum(1 for pos in self.open_positions 
+                                   if pos['signal'] == signal_type)
+
+        if same_direction_count >= MAX_POSITIONS_PER_DIRECTION:
+            print(f"🚫 Max {signal_type} positions ({MAX_POSITIONS_PER_DIRECTION}) reached")
+            return False
+
+        return True
+
+    def check_daily_loss_limit(self):
+        """
+        🛡️ CIRCUIT BREAKER: Stop trading if daily loss exceeds limit
+        """
+        if not hasattr(self, 'daily_start_balance'):
+            account_info = self.mt5.get_account_info()
+            if account_info:
+                self.daily_start_balance = float(account_info.balance)
+                self.daily_loss_limit_triggered = False
+            else:
+                return False
+
+        current_account = self.mt5.get_account_info()
+        if not current_account:
+            return False
+
+        current_balance = float(current_account.balance)
+        daily_loss = self.daily_start_balance - current_balance
+        daily_loss_percent = (daily_loss / self.daily_start_balance) * 100
+
+        if daily_loss_percent >= DAILY_LOSS_LIMIT_PERCENT:
+            if not self.daily_loss_limit_triggered:
+                self.daily_loss_limit_triggered = True
+                msg = (f"🚨 CIRCUIT BREAKER ACTIVATED!\n\n"
+                      f"Daily Loss Limit Hit: {daily_loss_percent:.2f}%\n"
+                      f"Loss Amount: ${daily_loss:.2f}\n"
+                      f"Starting Balance: ${self.daily_start_balance:.2f}\n"
+                      f"Current Balance: ${current_balance:.2f}\n\n"
+                      f"🛑 Trading STOPPED for today!")
+                print(f"\n{'='*70}\n{msg}\n{'='*70}\n")
+                self.send_telegram(msg)
+            return True
+
+        return False
+
+    def check_consecutive_losses(self):
+        """
+        🛡️ Pause trading after consecutive losses
+        """
+        if not hasattr(self, 'consecutive_losses'):
+            self.consecutive_losses = 0
+            self.consecutive_loss_pause = False
+
+        if self.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+            if not self.consecutive_loss_pause:
+                self.consecutive_loss_pause = True
+                msg = (f"⚠️ CONSECUTIVE LOSS LIMIT\n\n"
+                      f"Lost {self.consecutive_losses} trades in a row.\n"
+                      f"Taking a break for 30 minutes...")
+                print(f"\n{msg}\n")
+                self.send_telegram(msg)
+                self.consecutive_loss_pause_until = datetime.now() + timedelta(minutes=30)
+            return True
+
+        # Check if pause period has expired
+        if self.consecutive_loss_pause:
+            if datetime.now() > self.consecutive_loss_pause_until:
+                self.consecutive_loss_pause = False
+                self.consecutive_losses = 0
+                print("✅ Consecutive loss pause expired. Resuming trading...")
+                return False
+            return True
+
+        return False
+
 
     def load_historical_trades(self, max_trades=50):
         """Load recent trades from tradelog.json for dashboard"""
@@ -1545,27 +1718,58 @@ class XAUUSDTradingBot:
 
 
     def analyze_and_trade(self):
-        """Standard SMC analysis (used when enhanced mode disabled)"""
+        """Standard SMC analysis with PRODUCTION SAFETY SYSTEMS"""
         try:
-            self.sync_positions_with_mt5()
-
-            at_max_positions = len(self.open_positions) >= self.max_positions
-            if at_max_positions:
-                print(f"⚠️  Max positions ({self.max_positions}) reached. Monitoring only...")
-                print(f"   Currently tracking {len(self.open_positions)} positions")
+            # ===== CIRCUIT BREAKER #1: Daily Loss Limit =====
+            if self.check_daily_loss_limit():
+                print("🚫 Daily loss limit active. Monitoring only (no new trades)")
                 return
-
+            
+            # ===== CIRCUIT BREAKER #2: Consecutive Losses =====
+            if self.check_consecutive_losses():
+                print("🚫 Consecutive loss pause active. Waiting...")
+                return
+            
+            self.sync_positions_with_mt5()
+            
+            at_max_positions = len(self.open_positions) >= MAX_TOTAL_POSITIONS
+            if at_max_positions:
+                print(f"⚠️ Max positions ({MAX_TOTAL_POSITIONS}) reached. Monitoring only...")
+                return
+            
             print(f"📊 Analyzing market at {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
-
+            
             market_data = self.fetch_market_data()
             if market_data is None:
                 return
-
+            
             historical_data, current_price = market_data
-
             signal, reason = self.strategy.generate_signal(historical_data)
             stats = self.strategy.get_strategy_stats(historical_data)
-
+            
+            # ===== TREND FILTER: Block counter-trend trades =====
+            if USE_TREND_FILTER and signal != 'HOLD':
+                market_trend = self.get_market_trend('H1')
+                
+                print(f"🧭 Market Trend (H1): {market_trend}")
+                
+                # Block BUY in downtrend
+                if signal == 'BUY' and market_trend == 'BEARISH':
+                    print(f"🚫 TREND FILTER BLOCK: BUY signal ignored (H1 downtrend)")
+                    signal = 'HOLD'
+                    reason += " [BLOCKED: Downtrend]"
+                
+                # Block SELL in uptrend
+                elif signal == 'SELL' and market_trend == 'BULLISH':
+                    print(f"🚫 TREND FILTER BLOCK: SELL signal ignored (H1 uptrend)")
+                    signal = 'HOLD'
+                    reason += " [BLOCKED: Uptrend]"
+            
+            # ===== POSITION LIMIT CHECK =====
+            if signal != 'HOLD' and not self.can_open_position(signal):
+                print(f"🚫 Position limit reached for {signal} trades")
+                signal = 'HOLD'
+            
             self.last_signal = signal
             self.last_analysis = {
                 'smc_indicators': {
@@ -1585,27 +1789,34 @@ class XAUUSDTradingBot:
                 'market_structure': stats.get('market_structure', 'NEUTRAL'),
                 'zone': stats.get('zone', 'EQUILIBRIUM'),
             }
-
+            
             self.display_analysis(current_price, signal, reason, stats)
-
-            if not at_max_positions and signal != 'HOLD':
+            
+            if signal != 'HOLD':
                 total_risk = sum(pos.get('risk_percent', 0) for pos in self.open_positions)
                 can_trade, risk_msg = self.risk_calculator.check_risk_limits(self.open_positions, total_risk)
-
+                
                 if can_trade:
-                    self.execute_trade(signal, current_price, historical_data, stats)
+                    success = self.execute_trade(signal, current_price, historical_data, stats)
+                    
+                    # Track consecutive losses
+                    if success and hasattr(self, 'last_trade_result'):
+                        if self.last_trade_result == 'WIN':
+                            self.consecutive_losses = 0
+                        elif self.last_trade_result == 'LOSS':
+                            self.consecutive_losses = getattr(self, 'consecutive_losses', 0) + 1
                 else:
-                    print(f"⚠️  Trade blocked: {risk_msg}")
-            elif at_max_positions and signal != 'HOLD':
-                print(f"⚠️  Signal {signal} detected, but max positions reached. Skipping trade.")
-
+                    print(f"⚠️ Trade blocked: {risk_msg}")
+            
             self.log_trade_analysis(signal, reason, current_price, stats)
             self.update_dashboard_state()
-
+            
         except Exception as e:
             print(f"❌ Error in analyze_and_trade: {e}")
             import traceback
             traceback.print_exc()
+
+
 
     def display_analysis(self, price, signal, reason, stats):
         """Display standard market analysis"""
@@ -1638,6 +1849,32 @@ class XAUUSDTradingBot:
         stoploss, takeprofit = self.risk_calculator.calculate_stop_loss_takeprofit(
             signal, entry_price, atr, stats.get('zone', 'EQUILIBRIUM'), market_structure
         )
+        # ===== ENFORCE STOP LOSS LIMITS (CRITICAL FIX) =====
+        pip_value = 0.01  # For XAUUSD
+        sl_pips = abs(entry_price - stoploss) / pip_value
+
+        if sl_pips < MIN_STOP_LOSS_PIPS:
+            print(f"⚠️ SL too tight ({sl_pips:.1f} pips). Adjusting to {MIN_STOP_LOSS_PIPS} pips...")
+            if signal == 'BUY':
+                stoploss = entry_price - (MIN_STOP_LOSS_PIPS * pip_value)
+            else:
+                stoploss = entry_price + (MIN_STOP_LOSS_PIPS * pip_value)
+            sl_pips = MIN_STOP_LOSS_PIPS
+
+        if sl_pips > MAX_STOP_LOSS_PIPS:
+            print(f"🚫 SL too wide ({sl_pips:.1f} pips). Capping at {MAX_STOP_LOSS_PIPS} pips...")
+            if signal == 'BUY':
+                stoploss = entry_price - (MAX_STOP_LOSS_PIPS * pip_value)
+            else:
+                stoploss = entry_price + (MAX_STOP_LOSS_PIPS * pip_value)
+            sl_pips = MAX_STOP_LOSS_PIPS
+
+        # Adjust TP based on new SL (maintain R:R ratio)
+        tp_pips = sl_pips * 2.5  # 1:2.5 R:R
+        if signal == 'BUY':
+            takeprofit = entry_price + (tp_pips * pip_value)
+        else:
+            takeprofit = entry_price - (tp_pips * pip_value)
 
         # ===== FIX #3: USE SAFE LOT SIZE CALCULATION =====
         lot_size, adjusted_stoploss = calculate_lot_size_with_safety(
