@@ -269,38 +269,56 @@ class XAUUSDTradingBot:
         else:
             print("⚠️  Using Standard SMC Strategy")
 
-    # ===== FIX #3: COOLDOWN FILTER FUNCTION =====
     def check_trade_cooldown(self, signal_type):
         """
         Prevent multiple trades in same direction too quickly
         Cooldown: 5 minutes between BUY trades or SELL trades
-        This prevents "catching falling knife" scenarios
+        
+        Returns:
+            True = Allow trade (cooldown cleared)
+            False = Block trade (cooldown active)
         """
+        from datetime import datetime
+        
         now = datetime.now()
+        cooldown_seconds = 300  # 5 minutes = 300 seconds
         
         if signal_type == 'BUY':
-            if self.last_buy_time:
-                time_since_last = (now - self.last_buy_time).total_seconds()
-                if time_since_last < self.COOLDOWN_SECONDS:
-                    remaining = self.COOLDOWN_SECONDS - time_since_last
-                    print(f"   ⏳ BUY cooldown active ({remaining:.0f}s remaining) - SIGNAL BLOCKED")
-                    return False
+            if self.last_buy_time is not None:
+                time_since = (now - self.last_buy_time).total_seconds()
+                
+                if time_since < cooldown_seconds:
+                    # COOLDOWN ACTIVE - BLOCK TRADE
+                    remaining = cooldown_seconds - time_since
+                    print(f"\n   ⏳ BUY cooldown active: {remaining:.0f}s remaining ({remaining/60:.1f} min)")
+                    print(f"   🚫 TRADE BLOCKED - Last BUY was {time_since:.0f}s ago")
+                    return False  # ← Block immediately after check
+            
+            # Cooldown cleared - update timestamp and allow
             self.last_buy_time = now
-            print(f"   ✅ BUY cooldown cleared - Signal allowed")
+            print(f"\n   ✅ BUY cooldown cleared - Trade allowed")
             return True
         
         elif signal_type == 'SELL':
-            if self.last_sell_time:
-                time_since_last = (now - self.last_sell_time).total_seconds()
-                if time_since_last < self.COOLDOWN_SECONDS:
-                    remaining = self.COOLDOWN_SECONDS - time_since_last
-                    print(f"   ⏳ SELL cooldown active ({remaining:.0f}s remaining) - SIGNAL BLOCKED")
-                    return False
+            if self.last_sell_time is not None:
+                time_since = (now - self.last_sell_time).total_seconds()
+                
+                if time_since < cooldown_seconds:
+                    # COOLDOWN ACTIVE - BLOCK TRADE
+                    remaining = cooldown_seconds - time_since
+                    print(f"\n   ⏳ SELL cooldown active: {remaining:.0f}s remaining ({remaining/60:.1f} min)")
+                    print(f"   🚫 TRADE BLOCKED - Last SELL was {time_since:.0f}s ago")
+                    return False  # ← Block immediately after check
+            
+            # Cooldown cleared - update timestamp and allow
             self.last_sell_time = now
-            print(f"   ✅ SELL cooldown cleared - Signal allowed")
+            print(f"\n   ✅ SELL cooldown cleared - Trade allowed")
             return True
         
+        # Unknown signal type - allow by default
         return True
+
+
 
     # ===== FIX #1: ZONE-BASED EXIT LOGIC =====
     def check_zone_based_exits(self, current_zone, current_price):
@@ -1690,6 +1708,24 @@ class XAUUSDTradingBot:
                     final_signal = 'HOLD'
 
             if not at_max_positions and final_signal != 'HOLD' and zone_allows_trade:
+                
+                # Around line 1520 (before cooldown check)
+                print(f"\n{'='*70}")
+                print(f"🐛 DEBUG: COOLDOWN CHECK")
+                print(f"{'='*70}")
+                print(f"   Signal: {final_signal}")
+                print(f"   last_sell_time: {self.last_sell_time}")
+                print(f"   last_buy_time: {self.last_buy_time}")
+                print(f"   Current time: {datetime.now()}")
+
+                if final_signal == 'SELL' and self.last_sell_time:
+                    time_since = (datetime.now() - self.last_sell_time).total_seconds()
+                    print(f"   Time since last SELL: {time_since:.0f} seconds ({time_since/60:.1f} minutes)")
+                    print(f"   Cooldown required: {self.COOLDOWN_SECONDS} seconds (5 minutes)")
+                    print(f"   Should block?: {time_since < self.COOLDOWN_SECONDS}")
+
+                print(f"{'='*70}\n")
+
                 # ===== FIX #3: CHECK COOLDOWN BEFORE TRADING =====
                 print("\n🎯 FIX #3: COOLDOWN FILTER")
                 if self.check_trade_cooldown(final_signal):
