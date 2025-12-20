@@ -2425,7 +2425,7 @@ class XAUUSDTradingBot:
         except Exception as e:
             print(f"❌ Error saving trade log: {e}")
 
-    def run(self, interval_seconds=60):
+    def run (self, interval_seconds=60):
         """Run the trading bot main loop"""
         if not self.initialize():
             return
