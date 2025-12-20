@@ -1,3 +1,5 @@
+
+    
 import time
 import json
 import pandas as pd
@@ -13,6 +15,154 @@ import threading
 import sys
 import os
 import requests
+# ============================================================
+# MARKET HOURS & SESSION MANAGEMENT (Added Dec 20, 2025)
+# ============================================================
+
+def is_market_open():
+    """
+    Check if Forex market is open
+    Prevents trading during weekends and validates MT5 connection
+    """
+    import MetaTrader5 as mt5
+    from datetime import datetime
+    
+    now = datetime.now()
+    day = now.weekday()  # 0=Monday, 4=Friday, 5=Saturday, 6=Sunday
+    
+    # Market closed on weekends
+    if day == 5:  # Saturday
+        print(f"⏸️  Market CLOSED - Saturday")
+        return False
+    
+    if day == 6:  # Sunday
+        print(f"⏸️  Market CLOSED - Sunday")
+        return False
+    
+    # Friday closes at 02:00 IST Saturday morning
+    if day == 4 and now.hour >= 2:
+        print(f"⏸️  Market CLOSED - Friday close")
+        return False
+    
+    # Market opens Monday 03:30 IST
+    if day == 0 and now.hour < 3:
+        print(f"⏸️  Market opens at 03:30 IST Monday")
+        return False
+    
+    # Validate MT5 connection and tick data
+    try:
+        current_tick = mt5.symbol_info_tick("XAUUSD")
+        
+        if current_tick is None:
+            print("⚠️  MT5 connection lost - cannot get tick data")
+            return False
+        
+        # Check for zero spread (indicates market closed)
+        spread = current_tick.ask - current_tick.bid
+        if spread == 0:
+            print("⚠️  Zero spread detected - market likely closed")
+            return False
+        
+        # Check for frozen price (no movement for long time)
+        # This is already handled by your existing logic, just validate here
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error checking market status: {e}")
+        return False
+
+
+def is_good_trading_session():
+    """
+    Only trade during London and NY sessions (high liquidity)
+    Avoids Asian session which has wide spreads
+    
+    Returns:
+        tuple: (is_tradeable, session_name)
+    """
+    from datetime import datetime
+    
+    now = datetime.now()
+    hour = now.hour
+    
+    # Trading Sessions (IST):
+    # Asian: 00:00-09:00 (LOW liquidity - AVOID)
+    # London: 13:30-22:30 (HIGH liquidity - TRADE)
+    # NY: 18:30-03:30 next day (HIGH liquidity - TRADE)
+    # Overlap: 18:30-22:30 (BEST liquidity - TRADE)
+    
+    # Check if we're in a tradeable session
+    london = 13 <= hour < 23
+    ny = (18 <= hour <= 23) or (0 <= hour < 4)
+    
+    if not (london or ny):
+        # Asian session - skip
+        return False, f"Asian session ({hour:02d}:00 IST - Low liquidity)"
+    
+    # Determine which session we're in
+    if 18 <= hour < 23:
+        return True, f"London/NY Overlap ({hour:02d}:00 IST) ⭐ BEST"
+    elif 13 <= hour < 18:
+        return True, f"London session ({hour:02d}:00 IST)"
+    else:
+        return True, f"NY session ({hour:02d}:00 IST)"
+
+
+def get_mtf_signal_consensus(mtf_m15, mtf_m30, mtf_h1):
+    """
+    Multi-timeframe consensus using 2/3 majority rule
+    More realistic than requiring all 3 timeframes to align
+    
+    Args:
+        mtf_m15: M15 timeframe bias ("BULLISH", "BEARISH", or "NEUTRAL")
+        mtf_m30: M30 timeframe bias
+        mtf_h1: H1 timeframe bias
+    
+    Returns:
+        str: "BUY", "SELL", or "HOLD"
+    """
+    mtf_signals = [mtf_m15, mtf_m30, mtf_h1]
+    
+    # Count votes
+    bullish_count = mtf_signals.count("BULLISH")
+    bearish_count = mtf_signals.count("BEARISH")
+    
+    # 2 out of 3 agreement
+    if bullish_count >= 2:
+        return "BUY"
+    elif bearish_count >= 2:
+        return "SELL"
+    else:
+        return "HOLD"
+
+
+def log_trade_analysis(zone, zone_strength, mtf_m15, mtf_m30, mtf_h1, 
+                       mtf_signal, spread, final_signal, reason, price):
+    """
+    Detailed logging for forensic analysis
+    Helps identify why trades are blocked
+    """
+    from datetime import datetime
+    
+    print(f"\n{'='*70}")
+    print(f"📊 TRADE ANALYSIS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
+    print(f"{'='*70}")
+    print(f"   💰 Price: ${price:.2f}")
+    print(f"   📍 Zone: {zone} (Strength: {zone_strength:.1%})")
+    print(f"   📈 MTF M15: {mtf_m15}")
+    print(f"   📈 MTF M30: {mtf_m30}")
+    print(f"   📈 MTF H1: {mtf_h1}")
+    print(f"   🎯 MTF Consensus: {mtf_signal}")
+    print(f"   💸 Spread: ${spread:.4f}")
+    print(f"   🚦 SIGNAL: {final_signal}")
+    print(f"   📝 Reason: {reason}")
+    print(f"{'='*70}\n")
+
+# ============================================================
+# END OF NEW FUNCTIONS
+# ============================================================
+
 
 
 # ========================================
@@ -750,6 +900,26 @@ class XAUUSDTradingBot:
         print("=" * 70)
         print("🤖 Initializing Enhanced XAUUSD Trading Bot...")
         print("=" * 70)
+        
+        # ===== NEW: MARKET HOURS CHECK =====    
+        def is_market_open_check():
+            """Quick market check before full initialization"""
+            from datetime import datetime
+            now = datetime.now()
+            day = now.weekday()  # 0=Monday, 6=Sunday
+            
+            if day == 5 or day == 6:  # Saturday or Sunday
+                print(f"⏸️  Market CLOSED (Weekend - {now.strftime('%A')})")
+                print(f"   Next open: Monday 03:30 IST")
+                return False
+            
+            return True
+        
+        if not is_market_open_check():
+            print("💤 Waiting for market to open...")
+            return False
+        # ===== END NEW CODE =====
+
 
         if not self.mt5.initialize_mt5():
             print("❌ Failed to initialize MT5 connection")
@@ -1300,7 +1470,7 @@ class XAUUSDTradingBot:
             # Override logic with LOWER threshold (50% instead of 70%)
             if final_signal == 'HOLD' and current_zone == 'DISCOUNT' and zone_summary:
                 zone_str = zone_summary.get('zone_strength', 0)
-                if zone_str >= 50:  # ✅ CHANGED: > 50 to >= 50
+                if zone_str >= 50:
                     print(f"   🎯 OVERRIDE: DISCOUNT ({zone_str:.0f}%) → Forcing BUY Signal")
                     final_signal = 'BUY'
                     print(f"   ✅ Signal changed to: {final_signal}")
@@ -1309,7 +1479,7 @@ class XAUUSDTradingBot:
                     
             elif final_signal == 'HOLD' and current_zone == 'PREMIUM' and zone_summary:
                 zone_str = zone_summary.get('zone_strength', 0)
-                if zone_str >= 50:  # ✅ CHANGED: > 50 to >= 50
+                if zone_str >= 50:
                     print(f"   🎯 OVERRIDE: PREMIUM ({zone_str:.0f}%) → Forcing SELL Signal")
                     final_signal = 'SELL'
                     print(f"   ✅ Signal changed to: {final_signal}")
@@ -1318,6 +1488,31 @@ class XAUUSDTradingBot:
                     
             else:
                 print(f"   ℹ️  No override needed. Current signal: {final_signal}")
+
+            # 🔥 CRITICAL: CHECK COOLDOWN IMMEDIATELY AFTER ZONE OVERRIDE
+            print(f"\n{'='*70}")
+            print(f"⏱️  COOLDOWN CHECK (AFTER ZONE OVERRIDE)")
+            print(f"{'='*70}")
+
+            if final_signal != 'HOLD':
+                print(f"   📊 Signal to check: {final_signal}")
+                print(f"   🕒 Last BUY time: {self.last_buy_time}")
+                print(f"   🕒 Last SELL time: {self.last_sell_time}")
+                print(f"   🕒 Current time: {datetime.now()}")
+                
+                # Check cooldown
+                cooldown_ok = self.check_trade_cooldown(final_signal)
+                
+                if not cooldown_ok:
+                    print(f"   🚫 {final_signal} BLOCKED BY COOLDOWN - Forcing to HOLD")
+                    final_signal = 'HOLD'
+                else:
+                    print(f"   ✅ {final_signal} cooldown cleared - Continuing analysis")
+            else:
+                print(f"   ℹ️  Signal is HOLD - No cooldown check needed")
+
+            print(f"{'='*70}\n")
+
 
                 
             # ===== MARKET STRUCTURE FILTER (VIDEO 3) =====
@@ -1695,17 +1890,6 @@ class XAUUSDTradingBot:
             # Execute trade if conditions met
             at_max_positions = len(self.open_positions) >= self.max_positions
             
-            # ===== FIX #7: SESSION FILTER CHECK =====
-            print("\n⏰ FIX #7: SESSION FILTER")
-            session_name, is_active = self.strategy.get_current_session()
-
-            if is_active:
-                print(f"   ✅ Session: {session_name} is OPEN - Trading allowed")
-            else:
-                print(f"   ⏸️  Session: {session_name} is CLOSED - Trading blocked")
-                if final_signal != 'HOLD':
-                    print(f"   🚫 {final_signal} signal suppressed due to closed session")
-                    final_signal = 'HOLD'
 
             if not at_max_positions and final_signal != 'HOLD' and zone_allows_trade:
                 
@@ -1726,13 +1910,48 @@ class XAUUSDTradingBot:
 
                 print(f"{'='*70}\n")
 
-                # ===== FIX #3: CHECK COOLDOWN BEFORE TRADING =====
+                # ===== FIX #3: CHECK COOLDOWN BEFORE TRADING (FIXED LOGIC) =====
                 print("\n🎯 FIX #3: COOLDOWN FILTER")
-                if self.check_trade_cooldown(final_signal):
-                    print(f"✅ Executing {final_signal} trade...")
-                    self.execute_enhanced_trade(final_signal, current_price, historical_data, zones)
+
+                # Check cooldown WITHOUT updating timestamp yet
+                from datetime import datetime
+                now = datetime.now()
+                cooldown_clear = True
+
+                if final_signal == 'BUY':
+                    if self.last_buy_time is not None:
+                        time_since = (now - self.last_buy_time).total_seconds()
+                        if time_since < 300:  # 5 minutes
+                            cooldown_clear = False
+                            print(f"   ⏳ BUY cooldown active: {(300 - time_since)/60:.1f} min remaining")
+                            print(f"   🚫 Trade blocked")
+
+                elif final_signal == 'SELL':
+                    if self.last_sell_time is not None:
+                        time_since = (now - self.last_sell_time).total_seconds()
+                        if time_since < 300:  # 5 minutes
+                            cooldown_clear = False
+                            print(f"   ⏳ SELL cooldown active: {(300 - time_since)/60:.1f} min remaining")
+                            print(f"   🚫 Trade blocked")
+
+                # Only execute if cooldown cleared
+                if cooldown_clear:
+                    print(f"   ✅ Cooldown clear - Executing {final_signal} trade...")
+                    
+                    # Execute trade
+                    success = self.execute_enhanced_trade(final_signal, current_price, historical_data, zones)
+                    
+                    # Update cooldown timestamp AFTER successful execution
+                    if success:
+                        if final_signal == 'BUY':
+                            self.last_buy_time = datetime.now()
+                            print(f"   ✅ BUY cooldown timestamp updated")
+                        elif final_signal == 'SELL':
+                            self.last_sell_time = datetime.now()
+                            print(f"   ✅ SELL cooldown timestamp updated")
                 else:
                     print(f"   🚫 Trade blocked by cooldown")
+
             elif at_max_positions and final_signal != 'HOLD':
                 print(f"⚠️  Signal {final_signal} detected but max positions ({self.max_positions}) reached")
 
@@ -2228,6 +2447,36 @@ class XAUUSDTradingBot:
                 print("=" * 70)
                 print(f"🔄 Iteration {iteration} | Positions {len(self.open_positions)}/{self.max_positions}")
                 print("=" * 70)
+                
+                # ===== NEW: MARKET HOURS & SESSION CHECK =====
+                from datetime import datetime
+                now = datetime.now()
+                day = now.weekday()
+                hour = now.hour
+                
+                # Check if market is closed (weekend)
+                if day == 5 or day == 6:  # Saturday or Sunday
+                    print(f"⏸️  Market CLOSED ({now.strftime('%A')}) - Sleeping for 1 hour...")
+                    time.sleep(3600)  # Sleep 1 hour
+                    continue
+                
+                # Check session (only trade during London/NY)
+                london = 13 <= hour < 23
+                ny = (18 <= hour <= 23) or (0 <= hour < 4)
+                
+                if not (london or ny):
+                    print(f"⏸️  Asian session ({hour:02d}:00 IST) - Low liquidity, sleeping 30 min...")
+                    time.sleep(1800)  # Sleep 30 minutes
+                    continue
+                
+                if 18 <= hour < 23:
+                    print(f"✅ Trading: London/NY Overlap ⭐ BEST TIME")
+                elif 13 <= hour < 18:
+                    print(f"✅ Trading: London Session")
+                else:
+                    print(f"✅ Trading: NY Session")
+                # ===== END NEW CODE =====
+
 
                 if self.use_enhanced_smc:
                     self.analyze_enhanced()
