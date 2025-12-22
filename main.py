@@ -25,7 +25,6 @@ def is_market_open():
     Prevents trading during weekends and validates MT5 connection
     """
     import MetaTrader5 as mt5
-    from datetime import datetime
     
     now = datetime.now()
     day = now.weekday()  # 0=Monday, 4=Friday, 5=Saturday, 6=Sunday
@@ -81,8 +80,6 @@ def is_good_trading_session():
     Returns:
         tuple: (is_tradeable, session_name)
     """
-    from datetime import datetime
-    
     now = datetime.now()
     hour = now.hour
     
@@ -143,7 +140,6 @@ def log_trade_analysis(zone, zone_strength, mtf_m15, mtf_m30, mtf_h1,
     Detailed logging for forensic analysis
     Helps identify why trades are blocked
     """
-    from datetime import datetime
     
     print(f"\n{'='*70}")
     print(f"📊 TRADE ANALYSIS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}")
@@ -168,7 +164,7 @@ def log_trade_analysis(zone, zone_strength, mtf_m15, mtf_m30, mtf_h1,
 # ========================================
 # TELEGRAM NOTIFICATION SYSTEM
 # ========================================
-TELEGRAM_BOT_TOKEN = "8537260766:AAHUp5kb8WP2GDxDD4SE8Y0nIIvE1IyIp1g"
+TELEGRAM_BOT_TOKEN = "8521230130:AAGW2Qa-Sx7b0iroE_qW0e5EI4azRL2DHqM"
 TELEGRAM_CHAT_ID = "962450327"
 ENABLE_TELEGRAM = True  # Set to False to disable notifications
 
@@ -428,7 +424,6 @@ class XAUUSDTradingBot:
             True = Allow trade (cooldown cleared)
             False = Block trade (cooldown active)
         """
-        from datetime import datetime
         
         now = datetime.now()
         cooldown_seconds = 300  # 5 minutes = 300 seconds
@@ -904,7 +899,6 @@ class XAUUSDTradingBot:
         # ===== NEW: MARKET HOURS CHECK =====    
         def is_market_open_check():
             """Quick market check before full initialization"""
-            from datetime import datetime
             now = datetime.now()
             day = now.weekday()  # 0=Monday, 6=Sunday
             
@@ -1913,8 +1907,7 @@ class XAUUSDTradingBot:
                 # ===== FIX #3: CHECK COOLDOWN BEFORE TRADING (FIXED LOGIC) =====
                 print("\n🎯 FIX #3: COOLDOWN FILTER")
 
-                # Check cooldown WITHOUT updating timestamp yet
-                from datetime import datetime
+                # Check cooldown WITHOUT updating timestamp
                 now = datetime.now()
                 cooldown_clear = True
 
@@ -2449,7 +2442,6 @@ class XAUUSDTradingBot:
                 print("=" * 70)
                 
                 # ===== NEW: MARKET HOURS & SESSION CHECK =====
-                from datetime import datetime
                 now = datetime.now()
                 day = now.weekday()
                 hour = now.hour
