@@ -353,13 +353,13 @@ TREND_EMA_FAST = 20  # Fast EMA for trend
 TREND_EMA_SLOW = 50  # Slow EMA for trend
 USE_TREND_FILTER = True  # CRITICAL: Enable trend protection
 
-# Session-Based Configuration
 SESSION_CONFIG = {
-    STRONG_ZO"LONDON": {"zone_threshold": 30NE_THRESHOLD = 45, "rr_ratio": 2.5, "active": True},
+    "LONDON": {"zone_threshold": 30, "rr_ratio": 2.5, "active": True},
     "NEW_YORK": {"zone_threshold": 40, "rr_ratio": 2.5, "active": True},
-    "ASIAN": {"zone_threshold": 60, "rr_ratio": 2.0, "active": False},  # Avoid Asian (low liquidity)
-    "OVERLAP": {"zone_threshold": 30, "rr_ratio": 3.0, "active": True}  # London+NY overlap
+    "ASIAN": {"zone_threshold": 60, "rr_ratio": 2.0, "active": False},
+    "OVERLAP": {"zone_threshold": 30, "rr_ratio": 3.0, "active": True}
 }
+
 
 
 class XAUUSDTradingBot:
