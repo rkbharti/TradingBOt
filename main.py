@@ -1,5 +1,7 @@
 
-    
+
+# ===== EXECUTION MODE CONTROL =====
+DRY_RUN = False  # Set to True to simulate execution without sending real orders
 import time
 import json
 import pandas as pd
@@ -211,7 +213,7 @@ print("✅ Telegram notification system loaded!")
 # ========================================
 
 # Strong zone threshold for counter-trend trades
-STRONG_ZONE_THRESHOLD = 50  # 70%+ zones can override bias
+STRONG_ZONE_THRESHOLD = 45  # 70%+ zones can override bias
 WEAK_ZONE_THRESHOLD = 30    # Below 30% = too weak to trade
 
 # Allow strong zones to override conflicting bias
@@ -353,7 +355,7 @@ USE_TREND_FILTER = True  # CRITICAL: Enable trend protection
 
 # Session-Based Configuration
 SESSION_CONFIG = {
-    "LONDON": {"zone_threshold": 35, "rr_ratio": 2.5, "active": True},
+    STRONG_ZO"LONDON": {"zone_threshold": 30NE_THRESHOLD = 45, "rr_ratio": 2.5, "active": True},
     "NEW_YORK": {"zone_threshold": 40, "rr_ratio": 2.5, "active": True},
     "ASIAN": {"zone_threshold": 60, "rr_ratio": 2.0, "active": False},  # Avoid Asian (low liquidity)
     "OVERLAP": {"zone_threshold": 30, "rr_ratio": 3.0, "active": True}  # London+NY overlap
@@ -440,8 +442,6 @@ class XAUUSDTradingBot:
                     return False  # ← Block immediately after check
             
             # Cooldown cleared - update timestamp and allow
-            self.last_buy_time = now
-            print(f"\n   ✅ BUY cooldown cleared - Trade allowed")
             return True
         
         elif signal_type == 'SELL':
@@ -456,8 +456,6 @@ class XAUUSDTradingBot:
                     return False  # ← Block immediately after check
             
             # Cooldown cleared - update timestamp and allow
-            self.last_sell_time = now
-            print(f"\n   ✅ SELL cooldown cleared - Trade allowed")
             return True
         
         # Unknown signal type - allow by default
@@ -1643,7 +1641,7 @@ class XAUUSDTradingBot:
                 # ===== FIX #3: LOWERED THRESHOLDS FOR M5 TIMEFRAME =====
                 # Original: 70% was too high for M5 (zones rarely reached 70%)
                 # New: 40% is more realistic for M5 intraday trading
-                STRONG_ZONE_THRESHOLD = 50  # Lowered from 70%
+                STRONG_ZONE_THRESHOLD = 45  # Lowered from 70%
                 WEAK_ZONE_THRESHOLD = 30   # Lowered from 30%
                 ENABLE_STRONG_ZONE_OVERRIDE = True
 
