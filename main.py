@@ -1,7 +1,7 @@
 
+DRY_RUN = True
+from monitoring.pre_london_tracker import PreLondonTracker
 
-# ===== EXECUTION MODE CONTROL =====
-DRY_RUN = False  # Set to True to simulate execution without sending real orders
 import time
 import json
 import pandas as pd
@@ -13,10 +13,14 @@ from strategy.stoploss_calc import StopLossCalculator
 from strategy.multi_timeframe_fractal import MultiTimeframeFractal
 from strategy.market_structure import MarketStructureDetector
 from strategy.smc_enhanced.zones import ZoneCalculator
+from strategy.idea_memory import IdeaMemory
 import threading
 import sys
 import os
 import requests
+import pytz
+
+
 # ============================================================
 # MARKET HOURS & SESSION MANAGEMENT (Added Dec 20, 2025)
 # ============================================================
@@ -72,40 +76,62 @@ def is_market_open():
     except Exception as e:
         print(f"❌ Error checking market status: {e}")
         return False
-
-
-def is_good_trading_session():
-    """
-    Only trade during London and NY sessions (high liquidity)
-    Avoids Asian session which has wide spreads
     
-    Returns:
-        tuple: (is_tradeable, session_name)
+
+def is_trading_session():
     """
-    now = datetime.now()
+    SINGLE SOURCE OF TRUTH for session detection (IST)
+    Returns: (is_tradeable: bool, session_name: str)
+    """
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(ist)
     hour = now.hour
-    
-    # Trading Sessions (IST):
-    # Asian: 00:00-09:00 (LOW liquidity - AVOID)
-    # London: 13:30-22:30 (HIGH liquidity - TRADE)
-    # NY: 18:30-03:30 next day (HIGH liquidity - TRADE)
-    # Overlap: 18:30-22:30 (BEST liquidity - TRADE)
-    
-    # Check if we're in a tradeable session
-    london = 13 <= hour < 23
-    ny = (18 <= hour <= 23) or (0 <= hour < 4)
-    
-    if not (london or ny):
-        # Asian session - skip
-        return False, f"Asian session ({hour:02d}:00 IST - Low liquidity)"
-    
-    # Determine which session we're in
-    if 18 <= hour < 23:
-        return True, f"London/NY Overlap ({hour:02d}:00 IST) ⭐ BEST"
-    elif 13 <= hour < 18:
-        return True, f"London session ({hour:02d}:00 IST)"
+    minute = now.minute
+    t = hour + minute / 60
+
+    # IST Sessions
+    if 13.5 <= t < 18.5:
+        return True, "LONDON"
+    elif 18.5 <= t < 22.5:
+        return True, "NY_OVERLAP"
+    elif t >= 22.5 or t < 3.5:
+        return True, "NY_SESSION"
     else:
-        return True, f"NY session ({hour:02d}:00 IST)"
+        return False, "ASIAN"
+
+
+# def is_good_trading_session():
+#     """
+#     Only trade during London and NY sessions (high liquidity)
+#     Avoids Asian session which has wide spreads
+    
+#     Returns:
+#         tuple: (is_tradeable, session_name)
+#     """
+#     now = datetime.now()
+#     hour = now.hour
+    
+#     # Trading Sessions (IST):
+#     # Asian: 00:00-09:00 (LOW liquidity - AVOID)
+#     # London: 13:30-22:30 (HIGH liquidity - TRADE)
+#     # NY: 18:30-03:30 next day (HIGH liquidity - TRADE)
+#     # Overlap: 18:30-22:30 (BEST liquidity - TRADE)
+    
+#     # Check if we're in a tradeable session
+#     london = 13 <= hour < 23
+#     ny = (18 <= hour <= 23) or (0 <= hour < 4)
+    
+#     if not (london or ny):
+#         # Asian session - skip
+#         return False, f"Asian session ({hour:02d}:00 IST - Low liquidity)"
+    
+#     # Determine which session we're in
+#     if 18 <= hour < 23:
+#         return True, f"London/NY Overlap ({hour:02d}:00 IST) ⭐ BEST"
+#     elif 13 <= hour < 18:
+#         return True, f"London session ({hour:02d}:00 IST)"
+#     else:
+#         return True, f"NY session ({hour:02d}:00 IST)"
 
 
 def get_mtf_signal_consensus(mtf_m15, mtf_m30, mtf_h1):
@@ -353,22 +379,40 @@ TREND_EMA_FAST = 20  # Fast EMA for trend
 TREND_EMA_SLOW = 50  # Slow EMA for trend
 USE_TREND_FILTER = True  # CRITICAL: Enable trend protection
 
+# Session-Based Configuration
 SESSION_CONFIG = {
-    "LONDON": {"zone_threshold": 30, "rr_ratio": 2.5, "active": True},
+    "LONDON": {"zone_threshold": 35, "rr_ratio": 2.5, "active": True},
     "NEW_YORK": {"zone_threshold": 40, "rr_ratio": 2.5, "active": True},
-    "ASIAN": {"zone_threshold": 60, "rr_ratio": 2.0, "active": False},
-    "OVERLAP": {"zone_threshold": 30, "rr_ratio": 3.0, "active": True}
+    "ASIAN": {"zone_threshold": 60, "rr_ratio": 2.0, "active": False},  # Avoid Asian (low liquidity)
+    "OVERLAP": {"zone_threshold": 30, "rr_ratio": 3.0, "active": True}  # London+NY overlap
 }
-
 
 
 class XAUUSDTradingBot:
     """Enhanced trading bot with Guardeer's complete 10-video SMC strategy for XAUUSD"""
 
     def __init__(self, config_path="config.json", use_enhanced_smc=True):
+        import logging
+
+        self.logger = logging.getLogger("XAUUSDTradingBot")
+        self.logger.setLevel(logging.INFO)
+        self.logger.propagate = False
+        
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                "%(asctime)s | %(levelname)s | %(message)s",
+                datefmt="%H:%M:%S"
+            )
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            
+
         self.config_path = config_path
         self.mtf_analyzer = MultiTimeframeFractal(symbol="XAUUSD")
         self.market_structure = None  # Will be initialized when data is available
+        self.pre_london_tracker = PreLondonTracker()
+
 
 
         
@@ -378,6 +422,13 @@ class XAUUSDTradingBot:
             load_config_with_safety(config_path)
         
         self.mt5 = MT5Connection(config_path)
+        # --- DAILY RISK BASELINE ---
+        account_info = self.mt5.get_account_info()
+        self.daily_start_balance = (
+            float(account_info.balance) if account_info else 0.0
+        )
+        self.last_balance_reset_date = datetime.now().date()
+
         self.strategy = SMCStrategy()
         self.risk_calculator = None
         self.running = False
@@ -407,6 +458,8 @@ class XAUUSDTradingBot:
         self.last_buy_time = None
         self.last_sell_time = None
         self.COOLDOWN_SECONDS = 300  # 5 minutes between same-direction trades
+        self.idea_memory = IdeaMemory(expiry_minutes=30)
+
 
         # ===== FIX #4: TRAILING STOPS TRACKER =====
         self.partial_profit_taken = {}  # Track which positions already took partial profit
@@ -416,6 +469,48 @@ class XAUUSDTradingBot:
             print("✅ Using Guardeer 10-Video Enhanced SMC Strategy")
         else:
             print("⚠️  Using Standard SMC Strategy")
+            
+    def sync_closed_positions(self):
+        """
+        Detect closed MT5 positions, evaluate outcome,
+        update IdeaMemory, and clean open_positions.
+        """
+        try:
+            if not self.open_positions:
+                return
+
+            mt5_positions = self.mt5.positions_get(symbol="XAUUSD")
+            open_tickets = {p.ticket for p in mt5_positions} if mt5_positions else set()
+
+            closed = [p for p in self.open_positions if p["ticket"] not in open_tickets]
+
+            for position in closed:
+                ticket = position["ticket"]
+                deals = self.mt5.history_deals_get(ticket=ticket)
+                profit = sum(d.profit for d in deals) if deals else 0.0
+
+                outcome = "WIN" if profit > 0 else "LOSS"
+
+                # 🧠 HUMAN LEARNING
+                self.idea_memory.mark_result(
+                    direction=position["signal"],
+                    zone=position["zone"],
+                    session=position["session"],
+                    outcome=outcome
+                )
+
+                self.open_positions.remove(position)
+
+                print(
+                    f"🧠 TRADE CLOSED | {outcome} | "
+                    f"{position['signal']} | {position['zone']} | "
+                    f"{position['session']} | PnL: ${profit:.2f}"
+                )
+
+        except Exception as e:
+            print(f"❌ sync_closed_positions error: {e}")
+
+
 
     def check_trade_cooldown(self, signal_type):
         """
@@ -442,6 +537,7 @@ class XAUUSDTradingBot:
                     return False  # ← Block immediately after check
             
             # Cooldown cleared - update timestamp and allow
+            print(f"\n   ✅ BUY cooldown cleared - Trade allowed")
             return True
         
         elif signal_type == 'SELL':
@@ -456,6 +552,7 @@ class XAUUSDTradingBot:
                     return False  # ← Block immediately after check
             
             # Cooldown cleared - update timestamp and allow
+            print(f"\n   ✅ SELL cooldown cleared - Trade allowed")
             return True
         
         # Unknown signal type - allow by default
@@ -769,37 +866,40 @@ class XAUUSDTradingBot:
     def check_daily_loss_limit(self):
         """
         🛡️ CIRCUIT BREAKER: Stop trading if daily loss exceeds limit
+        SAFE against None initialization
         """
-        if not hasattr(self, 'daily_start_balance'):
-            account_info = self.mt5.get_account_info()
-            if account_info:
-                self.daily_start_balance = float(account_info.balance)
-                self.daily_loss_limit_triggered = False
-            else:
-                return False
-
-        current_account = self.mt5.get_account_info()
-        if not current_account:
+        account = self.mt5.get_account_info()
+        if not account:
             return False
 
-        current_balance = float(current_account.balance)
+        current_balance = float(account.balance)
+
+        # ✅ HARD GUARD (this is what was missing)
+        if self.daily_start_balance is None:
+            self.daily_start_balance = current_balance
+            self.daily_loss_limit_triggered = False
+            return False
+
         daily_loss = self.daily_start_balance - current_balance
         daily_loss_percent = (daily_loss / self.daily_start_balance) * 100
 
         if daily_loss_percent >= DAILY_LOSS_LIMIT_PERCENT:
             if not self.daily_loss_limit_triggered:
                 self.daily_loss_limit_triggered = True
-                msg = (f"🚨 CIRCUIT BREAKER ACTIVATED!\n\n"
-                      f"Daily Loss Limit Hit: {daily_loss_percent:.2f}%\n"
-                      f"Loss Amount: ${daily_loss:.2f}\n"
-                      f"Starting Balance: ${self.daily_start_balance:.2f}\n"
-                      f"Current Balance: ${current_balance:.2f}\n\n"
-                      f"🛑 Trading STOPPED for today!")
-                print(f"\n{'='*70}\n{msg}\n{'='*70}\n")
+                msg = (
+                    f"🚨 CIRCUIT BREAKER ACTIVATED!\n\n"
+                    f"Daily Loss: {daily_loss_percent:.2f}%\n"
+                    f"Loss Amount: ${daily_loss:.2f}\n"
+                    f"Start Balance: ${self.daily_start_balance:.2f}\n"
+                    f"Current Balance: ${current_balance:.2f}\n\n"
+                    f"🛑 Trading stopped for today."
+                )
+                self.logger.error(msg)
                 self.send_telegram(msg)
             return True
 
         return False
+
 
     def check_consecutive_losses(self):
         """
@@ -1011,7 +1111,15 @@ class XAUUSDTradingBot:
         global ZoneCalculator
         """Complete analysis using ALL 10 Guardeer video concepts + Multi-TF"""
         
-        # ===== STEP 1: RUN MULTI-TIMEFRAME FRACTAL ANALYSIS =====
+        # ===== STEP 1: RUN MULTI-TIMEFRAME FRACTAL ANALYSIS =====\
+        is_active, current_session = is_trading_session()
+        self.current_session = current_session
+
+        if not is_active:
+            self.logger.info("⏸️ Asian session — skipping analysis")
+            return
+
+   
         mtf_confluence = self.mtf_analyzer.get_multi_tf_confluence()
         
         try:
@@ -1641,7 +1749,7 @@ class XAUUSDTradingBot:
                 # ===== FIX #3: LOWERED THRESHOLDS FOR M5 TIMEFRAME =====
                 # Original: 70% was too high for M5 (zones rarely reached 70%)
                 # New: 40% is more realistic for M5 intraday trading
-                STRONG_ZONE_THRESHOLD = 45  # Lowered from 70%
+                STRONG_ZONE_THRESHOLD = 50  # Lowered from 70%
                 WEAK_ZONE_THRESHOLD = 30   # Lowered from 30%
                 ENABLE_STRONG_ZONE_OVERRIDE = True
 
@@ -1945,9 +2053,38 @@ class XAUUSDTradingBot:
 
             elif at_max_positions and final_signal != 'HOLD':
                 print(f"⚠️  Signal {final_signal} detected but max positions ({self.max_positions}) reached")
+                
+                if final_signal in ["BUY", "SELL"]:
+                    zone_bucket = f"{int(current_price // 10) * 10}-{int(current_price // 10) * 10 + 10}"
+
+                    if not self.idea_memory.is_allowed(
+                        direction=final_signal,
+                        zone=current_zone,
+                        zone_bucket=zone_bucket,
+                        session=current_session   # ✅ FIXED
+                    ):
+                        self.logger.info(
+                            f"🧠 IDEA MEMORY BLOCK: {final_signal} {current_zone} {zone_bucket} {current_session}"
+                        )
+                        final_signal = "HOLD"
+
 
             self.log_trade_analysis(final_signal, 'Enhanced SMC Analysis', current_price, market_state)
             self.update_dashboard_state()
+            # ---- PRE-LONDON OBSERVATION LOG ----
+            blocked_reason = None
+            if final_signal == "HOLD":
+                blocked_reason = market_state.get("block_reason", "UNKNOWN")
+
+            self.pre_london_tracker.log(
+                session=self.current_session,
+                is_active=True,
+                final_signal=final_signal,
+                blocked_reason=blocked_reason,
+                open_positions=len(self.open_positions),
+                note="analysis_complete"
+            )
+
 
         except Exception as e:
             print(f"❌ Error in enhanced analysis: {e}")
@@ -2087,222 +2224,121 @@ class XAUUSDTradingBot:
         print("-" * 70)
 
     def execute_trade(self, signal, price, historical_data, stats):
-        """Execute trade with standard parameters + SAFETY CAPS"""
-        
-        # ===== SL SAFETY LIMITS (CRITICAL FIX) =====
-        MIN_STOP_LOSS_PIPS = 20  # Minimum 20 pips
-        MAX_STOP_LOSS_PIPS = 40  # Maximum 40 pips
-        # ==========================================
-        
-        entry_price = price['ask'] if signal == 'BUY' else price['bid']
-        atr = stats.get('atr', entry_price * 0.01)
-        market_structure = stats.get('market_structure', 'NEUTRAL')
+        """
+        Legacy execution wrapper.
+        Redirects all execution to execute_enhanced_trade
+        to maintain a single execution authority.
+        """
+        try:
+            self.logger.warning(
+                "⚠️ Legacy execute_trade() called — redirecting to execute_enhanced_trade()"
+            )
 
-        stoploss, takeprofit = self.risk_calculator.calculate_stop_loss_takeprofit(
-            signal, entry_price, atr, stats.get('zone', 'EQUILIBRIUM'), market_structure
-        )
-        
-        # ===== ENFORCE STOP LOSS LIMITS (CRITICAL FIX) =====
-        pip_value = 0.01  # For XAUUSD
-        sl_pips = abs(entry_price - stoploss) / pip_value
+            # Forward stats as zones/context (safe fallback)
+            zones = stats if isinstance(stats, dict) else {}
 
-        if sl_pips < MIN_STOP_LOSS_PIPS:
-            print(f"⚠️ SL too tight ({sl_pips:.1f} pips). Adjusting to {MIN_STOP_LOSS_PIPS} pips...")
-            if signal == 'BUY':
-                stoploss = entry_price - (MIN_STOP_LOSS_PIPS * pip_value)
-            else:
-                stoploss = entry_price + (MIN_STOP_LOSS_PIPS * pip_value)
-            sl_pips = MIN_STOP_LOSS_PIPS
+            return self.execute_enhanced_trade(
+                signal=signal,
+                price=price,
+                historical_data=historical_data,
+                zones=zones
+            )
 
-        if sl_pips > MAX_STOP_LOSS_PIPS:
-            print(f"🚫 SL too wide ({sl_pips:.1f} pips). Capping at {MAX_STOP_LOSS_PIPS} pips...")
-            if signal == 'BUY':
-                stoploss = entry_price - (MAX_STOP_LOSS_PIPS * pip_value)
-            else:
-                stoploss = entry_price + (MAX_STOP_LOSS_PIPS * pip_value)
-            sl_pips = MAX_STOP_LOSS_PIPS
-
-        # Adjust TP based on new SL (maintain R:R ratio)
-        tp_pips = sl_pips * 2.5  # 1:2.5 R:R
-        if signal == 'BUY':
-            takeprofit = entry_price + (tp_pips * pip_value)
-        else:
-            takeprofit = entry_price - (tp_pips * pip_value)
-
-        # ===== FIX #3: USE SAFE LOT SIZE CALCULATION =====
-        lot_size, adjusted_stoploss = calculate_lot_size_with_safety(
-            account_balance=self.mt5.get_account_info().balance if self.mt5.get_account_info() else 50000,
-            risk_percent=self.risk_per_trade,
-            entry_price=entry_price,
-            stop_loss=stoploss,
-            max_lot=self.max_lot_size,
-            min_sl_pips=self.min_sl_pips
-        )
-        
-        stoploss = adjusted_stoploss
-
-        risk_metrics = self.risk_calculator.get_risk_metrics(entry_price, stoploss, lot_size, takeprofit)
-
-        print(f"\n{'='*70}")
-        print(f"📋 Trade Execution Details")
-        print(f"{'='*70}")
-        print(f"   Direction: {signal}")
-        print(f"   Entry: ${entry_price:.2f}")
-        print(f"   Stop Loss: ${stoploss:.2f} ({risk_metrics['stoploss_pips']:.2f} pips)")
-        print(f"   Take Profit: ${takeprofit:.2f} ({risk_metrics['takeprofit_pips']:.2f} pips)")
-        print(f"   Lot Size: {lot_size} lots")
-        print(f"   Risk: ${risk_metrics['risk_amount']:.2f} ({risk_metrics['risk_percent']:.2f}%)")
-        print(f"   R:R Ratio: 1:{risk_metrics['reward_ratio']:.1f}")
-        print(f"{'='*70}\n")
-
-        ticket = self.mt5.place_order(signal, lot_size, stoploss, takeprofit)
-
-        if ticket:
-            position = {
-                'ticket': ticket,
-                'signal': signal,
-                'entry_price': entry_price,
-                'stop_loss': stoploss,
-                'take_profit': takeprofit,
-                'lot_size': lot_size,
-                'entry_time': datetime.now(),
-                'risk_percent': risk_metrics['risk_percent'],
-                'atr': atr,
-                'zone': stats.get('zone', 'EQUILIBRIUM'),
-                'market_structure': market_structure
-            }
-            self.open_positions.append(position)
-            print(f"✅ Position opened successfully")
-            print(f"   Ticket: {ticket}")
-            print(f"   Open Positions: {len(self.open_positions)}/{self.max_positions}")
-            return True
-        else:
-            print(f"❌ Order placement failed")
+        except Exception as e:
+            self.logger.error(f"❌ execute_trade wrapper failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
 
     def execute_enhanced_trade(self, signal, price, historical_data, zones):
-        """Execute trade with enhanced SMC-based parameters + SAFETY CAPS"""
+        """
+        SINGLE SOURCE OF TRUTH for trade execution.
+        Human-like SMC execution with safety caps.
+        """
         try:
+            # --- ENTRY PRICE ---
             entry_price = price['ask'] if signal == 'BUY' else price['bid']
-            atr = historical_data['atr'].iloc[-1] if 'atr' in historical_data.columns else 1.0
 
-            # Calculate SL and TP based on zones with CORRECT direction + MINIMUM SAFETY
-            MIN_SL_PIPS = 20  # Minimum 20 pips stop loss
-            pip_value = 0.01  # For XAUUSD
+            # --- ATR ---
+            atr = (
+                historical_data['atr'].iloc[-1]
+                if 'atr' in historical_data.columns
+                else max(entry_price * 0.001, 1.0)
+            )
 
+            pip_value = 0.01  # XAUUSD
+            MIN_SL_PIPS = 20
+
+            # --- STOP LOSS / TAKE PROFIT ---
             if signal == 'BUY':
-                # For BUY: SL below entry, TP above entry
-                if zones:
-                    stoploss = min(
-                        zones.get('discount_start', entry_price - max(atr * 3, MIN_SL_PIPS * pip_value)),
-                        entry_price - max(atr * 3, MIN_SL_PIPS * pip_value)
-                    )
-                    takeprofit = max(
-                        zones.get('swing_high', entry_price + atr * 4),
-                        entry_price + (atr * 4)
-                    )
-                else:
-                    stoploss = entry_price - max(atr * 3, MIN_SL_PIPS * pip_value)
-                    takeprofit = entry_price + (atr * 4)
-            else:  # SELL
-                # For SELL: SL above entry, TP below entry
-                if zones:
-                    stoploss = max(
-                        zones.get('premium_end', entry_price + max(atr * 3, MIN_SL_PIPS * pip_value)),
-                        entry_price + max(atr * 3, MIN_SL_PIPS * pip_value)
-                    )
-                    takeprofit = min(
-                        zones.get('swing_low', entry_price - atr * 4),
-                        entry_price - (atr * 4)
-                    )
-                else:
-                    stoploss = entry_price + max(atr * 3, MIN_SL_PIPS * pip_value)
-                    takeprofit = entry_price - (atr * 4)
+                stoploss = entry_price - max(atr * 3, MIN_SL_PIPS * pip_value)
+                takeprofit = entry_price + (atr * 4)
+            else:
+                stoploss = entry_price + max(atr * 3, MIN_SL_PIPS * pip_value)
+                takeprofit = entry_price - (atr * 4)
 
+            # --- HARD VALIDATION (never skip) ---
+            if signal == 'BUY' and stoploss >= entry_price:
+                stoploss = entry_price - (atr * 2)
+            if signal == 'SELL' and stoploss <= entry_price:
+                stoploss = entry_price + (atr * 2)
 
-            # CRITICAL: Validate stop levels
-            if signal == 'BUY':
-                if stoploss >= entry_price:
-                    print(f"   ⚠️  BUY SL was above entry! Correcting...")
-                    stoploss = entry_price - (atr * 2)
-                if takeprofit <= entry_price:
-                    print(f"   ⚠️  BUY TP was below entry! Correcting...")
-                    takeprofit = entry_price + (atr * 3)
-            else:  # SELL
-                if stoploss <= entry_price:
-                    print(f"   ⚠️  SELL SL was below entry! Correcting...")
-                    stoploss = entry_price + (atr * 2)
-                if takeprofit >= entry_price:
-                    print(f"   ⚠️  SELL TP was above entry! Correcting...")
-                    takeprofit = entry_price - (atr * 3)
+            if signal == 'BUY' and takeprofit <= entry_price:
+                takeprofit = entry_price + (atr * 3)
+            if signal == 'SELL' and takeprofit >= entry_price:
+                takeprofit = entry_price - (atr * 3)
 
-            print(f"   🔧 Final Levels: Entry=${entry_price:.2f}, SL=${stoploss:.2f}, TP=${takeprofit:.2f}")
-
-            # ===== FIX #3: USE SAFE LOT SIZE CALCULATION FOR ENHANCED TRADES =====
-            lot_size, adjusted_stoploss = calculate_lot_size_with_safety(
-                account_balance=self.mt5.get_account_info().balance if self.mt5.get_account_info() else 50000,
+            # --- LOT SIZE WITH SAFETY ---
+            lot_size, adjusted_sl = calculate_lot_size_with_safety(
+                account_balance=self.mt5.get_account_info().balance,
                 risk_percent=self.risk_per_trade,
                 entry_price=entry_price,
                 stop_loss=stoploss,
                 max_lot=self.max_lot_size,
                 min_sl_pips=self.min_sl_pips
             )
-            
-            stoploss = adjusted_stoploss
+            stoploss = adjusted_sl
 
-            risk_metrics = self.risk_calculator.get_risk_metrics(entry_price, stoploss, lot_size, takeprofit)
+            # --- FINAL LOG ---
+            print("\n" + "=" * 70)
+            print("✨ ENHANCED TRADE EXECUTION")
+            print(f"Signal      : {signal}")
+            print(f"Entry       : {entry_price:.2f}")
+            print(f"Stop Loss  : {stoploss:.2f}")
+            print(f"Take Profit: {takeprofit:.2f}")
+            print(f"Lot Size   : {lot_size}")
+            print("=" * 70)
 
-            # Calculate pip distances manually
-            pip_value = 0.01  # For XAUUSD
-            sl_pips = abs(entry_price - stoploss) / pip_value
-            tp_pips = abs(takeprofit - entry_price) / pip_value
-            risk_amount = abs(entry_price - stoploss) * lot_size * 100
-            reward_amount = abs(takeprofit - entry_price) * lot_size * 100
-            rr_ratio = reward_amount / risk_amount if risk_amount > 0 else 0
-
-            print(f"\n{'='*70}")
-            print(f"✨ Enhanced Trade Execution")
-            print(f"{'='*70}")
-            print(f"   Direction: {signal}")
-            print(f"   Entry: ${entry_price:.2f}")
-            print(f"   Stop Loss: ${stoploss:.2f} ({sl_pips:.1f} pips)")
-            print(f"   Take Profit: ${takeprofit:.2f} ({tp_pips:.1f} pips)")
-            print(f"   Lot Size: {lot_size} lots")
-            print(f"   Risk: ${risk_amount:.2f}")
-            print(f"   Reward: ${reward_amount:.2f}")
-            print(f"   R:R Ratio: 1:{rr_ratio:.2f}")
-            print(f"{'='*70}\n")
-
+            # --- EXECUTE ---
             ticket = self.mt5.place_order(signal, lot_size, stoploss, takeprofit)
-
-            if ticket:
-                position = {
-                    'ticket': ticket,
-                    'signal': signal,
-                    'entry_price': entry_price,
-                    'stop_loss': stoploss,
-                    'take_profit': takeprofit,
-                    'lot_size': lot_size,
-                    'entry_time': datetime.now(),
-                    'risk_percent': risk_metrics['risk_percent'],
-                    'atr': atr,
-                    'zone': self.enhanced_analysis_data.get('current_zone', 'UNKNOWN'),
-                    'market_structure': 'ENHANCED_SMC'
-                }
-                self.open_positions.append(position)
-                print(f"✅ Enhanced trade executed")
-                print(f"   Ticket: {ticket}")
-                return True
-            else:
-                print(f"❌ Order placement failed")
+            if not ticket:
+                print("❌ Order rejected by broker")
                 return False
 
+            # --- TRACK POSITION ---
+            self.open_positions.append({
+                "ticket": ticket,
+                "signal": signal,
+                "entry_price": entry_price,
+                "stop_loss": stoploss,
+                "take_profit": takeprofit,
+                "lot_size": lot_size,
+                "entry_time": datetime.now(),
+                "zone": self.enhanced_analysis_data.get("current_zone", "UNKNOWN"),
+                "session": self.current_session
+            })
+
+            print(f"✅ Trade executed | Ticket {ticket}")
+            return True
+
         except Exception as e:
-            print(f"❌ Error executing enhanced trade: {e}")
+            print(f"❌ execute_enhanced_trade error: {e}")
             import traceback
             traceback.print_exc()
             return False
+
+
 
     def log_trade_analysis(self, signal, reason, price, stats):
         """Log trade analysis"""
@@ -2416,7 +2452,7 @@ class XAUUSDTradingBot:
         except Exception as e:
             print(f"❌ Error saving trade log: {e}")
 
-    def run (self, interval_seconds=60):
+    def run(self, interval_seconds=60):
         """Run the trading bot main loop"""
         if not self.initialize():
             return
@@ -2434,51 +2470,34 @@ class XAUUSDTradingBot:
         try:
             iteration = 0
             while self.running:
-                iteration += 1
-                print("=" * 70)
-                print(f"🔄 Iteration {iteration} | Positions {len(self.open_positions)}/{self.max_positions}")
-                print("=" * 70)
-                
-                # ===== NEW: MARKET HOURS & SESSION CHECK =====
-                now = datetime.now()
-                day = now.weekday()
-                hour = now.hour
-                
-                # Check if market is closed (weekend)
-                if day == 5 or day == 6:  # Saturday or Sunday
-                    print(f"⏸️  Market CLOSED ({now.strftime('%A')}) - Sleeping for 1 hour...")
-                    time.sleep(3600)  # Sleep 1 hour
-                    continue
-                
-                # Check session (only trade during London/NY)
-                london = 13 <= hour < 23
-                ny = (18 <= hour <= 23) or (0 <= hour < 4)
-                
-                if not (london or ny):
-                    print(f"⏸️  Asian session ({hour:02d}:00 IST) - Low liquidity, sleeping 30 min...")
-                    time.sleep(1800)  # Sleep 30 minutes
-                    continue
-                
-                if 18 <= hour < 23:
-                    print(f"✅ Trading: London/NY Overlap ⭐ BEST TIME")
-                elif 13 <= hour < 18:
-                    print(f"✅ Trading: London Session")
-                else:
-                    print(f"✅ Trading: NY Session")
-                # ===== END NEW CODE =====
+                # ===== SESSION DETECTION (SINGLE SOURCE OF TRUTH) =====
+                self.current_session, is_active = self.strategy.get_current_session()
 
+                if not is_active:
+                    time.sleep(60)
+                    continue
 
+                # 🧠 REFLECTION FIRST (HUMAN BEHAVIOR)
+                self.sync_closed_positions()
+
+                # SAFETY CHECKS
+                if self.check_daily_loss_limit():
+                    time.sleep(300)
+                    continue
+
+                # MARKET ANALYSIS + EXECUTION
                 if self.use_enhanced_smc:
                     self.analyze_enhanced()
                 else:
                     self.analyze_and_trade()
 
-                # Save log every 10 iterations
-                if iteration % 10 == 0:
-                    self.save_trade_log()
+                iteration += 1
+                print("=" * 70)
+                print(f"🔄 Iteration {iteration} | Positions {len(self.open_positions)}/{self.max_positions}")
+                print("=" * 70)
 
-                # Wait for next interval
-                for _ in range(int(interval_seconds)):
+                # CLEAN TIMING (ONE sleep system only)
+                for _ in range(interval_seconds):
                     if not self.running:
                         break
                     time.sleep(1)
@@ -2487,6 +2506,7 @@ class XAUUSDTradingBot:
             print("\n🛑 Bot stopped by user")
         finally:
             self.shutdown()
+
 
     def shutdown(self):
         """Shutdown the trading bot"""
