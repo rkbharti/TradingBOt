@@ -1,6 +1,5 @@
 
 DRY_RUN = True
-from monitoring.pre_london_tracker import PreLondonTracker
 
 import time
 import json
@@ -393,25 +392,46 @@ class XAUUSDTradingBot:
 
     def __init__(self, config_path="config.json", use_enhanced_smc=True):
         import logging
+        import os
+        from datetime import datetime
+
+        # ===== LOGGER SETUP (TERMINAL + FILE) =====
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)
+
+        log_file = os.path.join(
+            log_dir,
+            f"tradingbot_{datetime.now().strftime('%Y-%m-%d')}.log"
+        )
 
         self.logger = logging.getLogger("XAUUSDTradingBot")
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False
-        
+
+        formatter = logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+
         if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                "%(asctime)s | %(levelname)s | %(message)s",
-                datefmt="%H:%M:%S"
-            )
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
+            # Console
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
+
+            # File
+            file_handler = logging.FileHandler(log_file, encoding="utf-8")
+            file_handler.setFormatter(formatter)
+
+            self.logger.addHandler(console_handler)
+            self.logger.addHandler(file_handler)
+
+        self.logger.info("🧠 Logger initialized (terminal + file)")
+
             
 
         self.config_path = config_path
         self.mtf_analyzer = MultiTimeframeFractal(symbol="XAUUSD")
         self.market_structure = None  # Will be initialized when data is available
-        self.pre_london_tracker = PreLondonTracker()
 
 
 
@@ -2075,15 +2095,6 @@ class XAUUSDTradingBot:
             blocked_reason = None
             if final_signal == "HOLD":
                 blocked_reason = market_state.get("block_reason", "UNKNOWN")
-
-            self.pre_london_tracker.log(
-                session=self.current_session,
-                is_active=True,
-                final_signal=final_signal,
-                blocked_reason=blocked_reason,
-                open_positions=len(self.open_positions),
-                note="analysis_complete"
-            )
 
 
         except Exception as e:
