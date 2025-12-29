@@ -234,3 +234,26 @@ class MT5Connection:
 
         result = mt5.order_send(request)
         return result and result.retcode == mt5.TRADE_RETCODE_DONE
+    
+    def modify_position(self, ticket, new_sl=None, new_tp=None):
+        """Modify existing position's SL/TP"""
+        position = mt5.positions_get(ticket=ticket)
+        if not position:
+            return False
+        
+        position = position[0]
+        
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "sl": new_sl if new_sl else position.sl,
+            "tp": new_tp if new_tp else position.tp,
+        }
+        
+        result = mt5.order_send(request)
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            print(f"❌ Modify failed: {result.comment}")
+            return False
+        
+        return True
+

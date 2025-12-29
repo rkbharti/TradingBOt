@@ -20,6 +20,7 @@ class IdeaMemory:
     def __init__(self, expiry_minutes=30):
         self.ideas = {}
         self.expiry = timedelta(minutes=expiry_minutes)
+        self.results = {} 
 
     def _now(self):
         return datetime.now()
@@ -69,6 +70,13 @@ class IdeaMemory:
             "state": IdeaState.FAILED,
             "last_update": self._now(),
             "reason": reason
+        }
+    def mark_result(self, idea_id, result):
+        """Track trade outcome for learning"""
+        self.results[idea_id] = {
+            'result': result,  # 'win' or 'loss'
+            'timestamp': datetime.now(),
+            'profit': result.get('profit', 0)
         }
 
     def reset_all(self, reason="context_change"):

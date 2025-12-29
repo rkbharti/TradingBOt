@@ -1577,42 +1577,53 @@ class XAUUSDTradingBot:
             final_signal = narrative.get('trade_signal', 'HOLD')
 
             
-            # ===== FIX #6: NARRATIVE OVERRIDE FOR MISSING SIGNALS =====
+            # ===== FIX #6: NARRATIVE OVERRIDE CHECK =====
             print("\n🔧 FIX #6: NARRATIVE OVERRIDE CHECK")
 
+            # 🚨 CRITICAL: Extract zone_strength at the TOP for later use
+            zone_strength = zone_summary.get('zone_strength', 0) if zone_summary else 0
 
             if zone_summary:
-                print(f"   📊 Zone: {current_zone} | Strength: {zone_summary.get('zone_strength', 0):.0f}% | Signal: {final_signal}")
+                print(f"   📊 Zone: {current_zone} | Strength: {zone_strength:.0f}% | Signal: {final_signal}")
             else:
                 print(f"   ⚠️  No zone_summary available!")
 
-
-            # Override logic with LOWER threshold (50% instead of 70%)
+            # Override logic with threshold (50% instead of 70%)
             if final_signal == 'HOLD' and current_zone == 'DISCOUNT' and zone_summary:
-                zone_str = zone_summary.get('zone_strength', 0)
-                if zone_str >= 50:
-                    print(f"   🎯 OVERRIDE: DISCOUNT ({zone_str:.0f}%) → Forcing BUY Signal")
+                if zone_strength >= 50:
+                    print(f"   🎯 OVERRIDE: DISCOUNT ({zone_strength:.0f}%) → Forcing BUY Signal")
                     final_signal = 'BUY'
                     print(f"   ✅ Signal changed to: {final_signal}")
                 else:
-                    print(f"   ⚠️  Zone strength too weak ({zone_str:.0f}% < 50%) - No override")
+                    print(f"   ⚠️  Zone strength too weak ({zone_strength:.0f}% < 50%) - No override")
                     
             elif final_signal == 'HOLD' and current_zone == 'PREMIUM' and zone_summary:
-                zone_str = zone_summary.get('zone_strength', 0)
-                if zone_str >= 50:
-                    print(f"   🎯 OVERRIDE: PREMIUM ({zone_str:.0f}%) → Forcing SELL Signal")
+                if zone_strength >= 50:
+                    print(f"   🎯 OVERRIDE: PREMIUM ({zone_strength:.0f}%) → Forcing SELL Signal")
                     final_signal = 'SELL'
                     print(f"   ✅ Signal changed to: {final_signal}")
                 else:
-                    print(f"   ⚠️  Zone strength too weak ({zone_str:.0f}% < 50%) - No override")
+                    print(f"   ⚠️  Zone strength too weak ({zone_strength:.0f}% < 50%) - No override")
                     
             else:
                 print(f"   ℹ️  No override needed. Current signal: {final_signal}")
 
-            # 🔥 CRITICAL: CHECK COOLDOWN IMMEDIATELY AFTER ZONE OVERRIDE
+            # ===== NEW: STRICT ZONE FILTER - ENFORCE BEFORE COOLDOWN =====
+            # Now zone_strength is already defined above ✅
+            if final_signal in ['BUY', 'SELL']:
+                if zone_strength < 50:  # ✅ Variable now in scope!
+                    print(f"\n⚠️  ZONE FILTER ENFORCEMENT")
+                    print(f"   📊 Zone Strength: {zone_strength}%")
+                    print(f"   📊 Required: 50%+")
+                    print(f"   🔒 FORCING HOLD - Zone too weak for {final_signal}")
+                    final_signal = 'HOLD'  # Override the signal
+
+            # ===== COOLDOWN CHECK =====
             print(f"\n{'='*70}")
             print(f"⏱️  COOLDOWN CHECK (AFTER ZONE OVERRIDE)")
             print(f"{'='*70}")
+            # ... rest of your code ...
+
 
             if final_signal != 'HOLD':
                 print(f"   📊 Signal to check: {final_signal}")
@@ -1672,18 +1683,25 @@ class XAUUSDTradingBot:
                     print(f"   📊 SELL signal but trend is UPTREND (counter-trend)")
                     print(f"   ⚠️  Structure doesn't support SELL")
 
-                    # ✅ FIX #3: Check for inducement (liquidity sweep)
-                    inducement_ok = inducement.get('inducement', False) and inducement.get('direction') == 'BEARISH'
+                    # ✅ FIXED: BULLISH sweep supports SELL (liquidity grab before reversal)
+                    inducement_detected = inducement.get('inducement', False)
+                    inducement_direction = inducement.get('direction', 'NONE')
                     struct_ok = structure_analysis['structure_shift'] in ['CHOCH_BEARISH', 'BOS_BEARISH']
+
+                    # For SELL: BULLISH inducement = liquidity sweep above before sell-off
+                    inducement_ok = inducement_detected and inducement_direction == 'BULLISH'
 
                     if struct_ok:
                         print(f"   ✅ {structure_analysis['structure_shift']} detected - Signal allowed")
                     elif inducement_ok:
-                        print(f"   🚨 Inducement sweep detected - Counter-trend SELL ALLOWED")
-                        print(f"      Liquidity level: ${inducement.get('level', 0):.2f}")
+                        print(f"   🚨 BULLISH Inducement sweep detected - SELL from PREMIUM ALLOWED")
+                        print(f"      Type: {inducement.get('type', 'UNKNOWN')}")
+                        print(f"      Level: ${inducement.get('level', 0):.2f}")
+                        print(f"      Session: {inducement.get('session', 'UNKNOWN')} ({inducement.get('session_reliability', 0)*100:.0f}% reliability)")
                     else:
                         print(f"   🚫 No CHOCH/BOS/Inducement - Signal BLOCKED")
                         final_signal = 'HOLD'
+
                 
                 else:
                     print(f"   ✅ Signal aligned with market structure")
@@ -2003,7 +2021,7 @@ class XAUUSDTradingBot:
 
             # ===== FIX #5: UPDATE TRAILING STOPS =====
             print("\n📈 FIX #5: TRAILING STOPS")
-            trailing_count = self.update_trailing_stops(current_price['bid'])
+            trailing_count = self.update_trailing_stops_with_min_profit(current_price['bid'])
             if trailing_count == 0:
                 print("   ℹ️  No positions ready for trailing stops")
 
@@ -2058,8 +2076,7 @@ class XAUUSDTradingBot:
                     print(f"   ✅ Cooldown clear - Executing {final_signal} trade...")
                     
                     # Execute trade
-                    success = self.execute_enhanced_trade(final_signal, current_price, historical_data, zones)
-                    
+                    success = self.execute_enhanced_trade(final_signal, current_price)
                     # Update cooldown timestamp AFTER successful execution
                     if success:
                         if final_signal == 'BUY':
@@ -2075,8 +2092,8 @@ class XAUUSDTradingBot:
                 print(f"⚠️  Signal {final_signal} detected but max positions ({self.max_positions}) reached")
                 
                 if final_signal in ["BUY", "SELL"]:
-                    zone_bucket = f"{int(current_price // 10) * 10}-{int(current_price // 10) * 10 + 10}"
-
+                    price_value = current_price if isinstance(current_price, (int, float)) else current_price.get('bid', 0)
+                    zone_bucket = f"{int(price_value // 10) * 10}-{int(price_value // 10) * 10 + 10}"
                     if not self.idea_memory.is_allowed(
                         direction=final_signal,
                         zone=current_zone,
@@ -2109,6 +2126,85 @@ class XAUUSDTradingBot:
                 f"🔧 Bot is still running and monitoring..."
             )
 
+    def update_trailing_stops_with_min_profit(self, current_price):
+        """
+        Update trailing stops for profitable positions
+        Only trails if profit >= MIN_PROFIT_FOR_TRAILING pips
+        """
+        MIN_PROFIT_FOR_TRAILING = 50  # pips threshold
+        trailing_count = 0
+        
+        if not self.open_positions:
+            print("   ℹ️  No positions ready for trailing stops")
+            return 0
+        
+        for ticket, position in list(self.open_positions.items()):
+            try:
+                entry_price = position['entry']
+                current_sl = position.get('sl', 0)
+                position_type = position['type']
+                
+                # Calculate current profit in pips
+                if position_type == 'BUY':
+                    profit_pips = (current_price - entry_price) * 100
+                else:
+                    profit_pips = (entry_price - current_price) * 100
+                
+                # 🚨 CHECK: Minimum profit before trailing
+                if profit_pips < MIN_PROFIT_FOR_TRAILING:
+                    print(f"   ℹ️  Position #{ticket}: {profit_pips:.1f} pips")
+                    print(f"      Need {MIN_PROFIT_FOR_TRAILING} pips to activate trailing")
+                    continue  # Skip this position
+                
+                # Calculate ATR-based trailing distance
+                atr = self.last_analysis.get('technical_levels', {}).get('atr', 7.0)
+                trailing_distance = atr * 2  # 2x ATR
+                
+                # Calculate new stop loss
+                if position_type == 'BUY':
+                    new_sl = current_price - trailing_distance
+                    
+                    # Only update if new SL is better (higher) than current
+                    if new_sl > current_sl:
+                        success = self.mt5.modify_position(ticket, new_sl=new_sl)
+                        
+                        if success:
+                            print(f"   📈 Trailing Stop Updated: #{ticket}")
+                            print(f"      Old SL: ${current_sl:.2f} → New SL: ${new_sl:.2f}")
+                            print(f"      Profit: {profit_pips:.1f} pips")
+                            
+                            # Update local tracking
+                            position['sl'] = new_sl
+                            trailing_count += 1
+                        else:
+                            print(f"   ❌ Failed to update trailing stop for #{ticket}")
+                
+                elif position_type == 'SELL':
+                    new_sl = current_price + trailing_distance
+                    
+                    # Only update if new SL is better (lower) than current
+                    if current_sl == 0 or new_sl < current_sl:
+                        success = self.mt5.modify_position(ticket, new_sl=new_sl)
+                        
+                        if success:
+                            print(f"   📉 Trailing Stop Updated: #{ticket}")
+                            print(f"      Old SL: ${current_sl:.2f} → New SL: ${new_sl:.2f}")
+                            print(f"      Profit: {profit_pips:.1f} pips")
+                            
+                            # Update local tracking
+                            position['sl'] = new_sl
+                            trailing_count += 1
+                        else:
+                            print(f"   ❌ Failed to update trailing stop for #{ticket}")
+            
+            except Exception as e:
+                print(f"   ❌ Error updating trailing stop for #{ticket}: {e}")
+                continue
+        
+        if trailing_count > 0:
+            print(f"\n   ✅ Updated {trailing_count} trailing stop(s)")
+        
+        return trailing_count
 
 
     def analyze_and_trade(self):
