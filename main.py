@@ -347,17 +347,17 @@ except ImportError as e:
     print(f"⚠️  Warning: SMC Enhanced modules not available: {e}")
     print("   Bot will run with standard SMC strategy only")
 
-sys.path.append(os.path.join(os.path.dirname(__file__), 'api'))
-
+# ===== DASHBOARD SERVER IMPORT (FIXED) =====
 DASHBOARD_AVAILABLE = False
 update_bot_state = None
+
 try:
-    from api.server import update_bot_state as update_bot_state
-    update_bot_state = update_bot_state
+    # TRY IMPORTING FROM ROOT (The New Way)
+    from server import update_bot_state
     DASHBOARD_AVAILABLE = True
     print("✅ Dashboard integration loaded")
-except ImportError as e:
-    print(f"⚠️  Dashboard not available: {e}")
+except ImportError:
+    print("⚠️ Dashboard server.py not found in root directory")
 
 
 
@@ -495,58 +495,6 @@ class XAUUSDTradingBot:
         else:
             print("⚠️  Using Standard SMC Strategy")
             
-        # ===== ADD THESE 3 METHODS TO END OF CLASS =====
-    
-    def update_dashboard_state(self):
-        """Live dashboard - shows your MT5 positions + analysis"""
-        global update_bot_state
-        if not DASHBOARD_AVAILABLE or update_bot_state is None:
-            return
-            
-        try:
-            account_info = self.mt5.get_account_info()
-            current_price = self.mt5.get_current_price()
-            
-            import MetaTrader5 as mt5_lib
-            positions = mt5_lib.positions_get(symbol="XAUUSD") or []
-            trades = []
-            
-            for pos in positions:
-                trades.append({
-                    'id': pos.ticket,
-                    'type': 'BUY' if pos.type == 0 else 'SELL',
-                    'lot_size': float(pos.volume),
-                    'entry': float(pos.price_open),
-                    'sl': float(pos.sl) if pos.sl else None,
-                    'tp': float(pos.tp) if pos.tp else None,
-                    'time': 'Live',
-                    'status': 'OPEN',
-                    'pnl': round(float(pos.profit), 2),
-                    'risk_percent': self.risk_per_trade * 100,
-                    'zone': self.last_analysis.get('zone', 'LIVE'),
-                    'market_structure': self.last_analysis.get('market_structure', 'DOWNTREND'),
-                })
-            
-            state = {
-                'running': self.running,
-                'balance': round(float(account_info.balance), 2) if account_info else 77850,
-                'equity': round(float(account_info.equity), 2) if account_info else 77850,
-                'pnl': round(float(account_info.equity - account_info.balance), 2) if account_info else 0,
-                'open_positions_count': len(trades),
-                'current_price': current_price or {'bid': 0, 'ask': 0},
-                'last_signal': str(self.last_signal),
-                'trades': trades,
-                'market_structure': self.last_analysis.get('market_structure', 'DOWNTREND'),
-                'zone': self.last_analysis.get('zone', 'DISCOUNT'),
-            }
-            
-            update_bot_state(state)
-            print(f"📊 Dashboard LIVE - {len(trades)} positions | Equity: ${state['equity']:,.0f}")
-            
-        except Exception as e:
-            print(f"⚠️ Dashboard: {e}")
-
-
             
     def cleanup(self):
             """Safe shutdown - closes MT5, saves logs"""
@@ -2096,7 +2044,8 @@ class XAUUSDTradingBot:
         self.trade_log.append(log_entry)
 
     def update_dashboard_state(self):
-        """Update dashboard with current bot state - FIXED for your MT5Connection wrapper"""
+        """Live dashboard - shows your MT5 positions + analysis + CHART DATA"""
+        global update_bot_state
         if not DASHBOARD_AVAILABLE or update_bot_state is None:
             return
 
@@ -2114,7 +2063,7 @@ class XAUUSDTradingBot:
                 for idx, pos in enumerate(mt5_positions):
                     pnl = float(pos.profit)
                     trades_list.append({
-                        'id': idx + 1,
+                        'id': pos.ticket,  # Use actual ticket ID
                         'type': 'BUY' if pos.type == 0 else 'SELL',
                         'lot_size': float(pos.volume),
                         'entry': float(pos.price_open),
@@ -2127,6 +2076,21 @@ class XAUUSDTradingBot:
                         'zone': 'LIVE_MT5',
                         'market_structure': 'DOWNTREND',  # From your analysis
                     })
+
+            # ===== CRITICAL ADDITION: FETCH CHART DATA =====
+            # Fetch last 100 candles for M15 timeframe so dashboard has data to draw
+            rates = mt5_lib.copy_rates_from_pos("XAUUSD", mt5_lib.TIMEFRAME_M15, 0, 100)
+            chart_data = []
+            if rates is not None:
+                for rate in rates:
+                    chart_data.append({
+                        'time': int(rate['time']), # Unix timestamp for JS
+                        'open': float(rate['open']),
+                        'high': float(rate['high']),
+                        'low': float(rate['low']),
+                        'close': float(rate['close']),
+                    })
+            # ===============================================
 
             # Use MT5 equity directly
             initial_balance = float(account_info.balance) if account_info else 77850.78
@@ -2154,7 +2118,8 @@ class XAUUSDTradingBot:
                 'balance': round(initial_balance, 2),
                 'equity': round(current_equity, 2),
                 'pnl': round(current_pnl, 2),
-                'open_positions_count': len(trades_list),  # ✅ trades_list
+                'open_positions_count': len(trades_list),
+                'chart_data': chart_data,  # <--- CRITICAL: Sends candle data to frontend
                 'current_price': current_price or {'bid': 0.0, 'ask': 0.0, 'spread': 0.0},
                 'last_signal': str(getattr(self, 'last_signal', 'HOLD')),
                 'smc_indicators': {
@@ -2163,6 +2128,8 @@ class XAUUSDTradingBot:
                     'bos': str(smc.get('bos')) if smc.get('bos') else None,
                     'session': session_name,
                     'in_trading_hours': is_active,
+                    # Pass full enhancement data if available
+                    'inducement_data': self.enhanced_analysis_data.get('inducement_data', {}) if hasattr(self, 'enhanced_analysis_data') else {}
                 },
                 'technical_levels': {
                     'ma20': float(convert_value(tech.get('ma20', 0))),
@@ -2174,14 +2141,14 @@ class XAUUSDTradingBot:
                 },
                 'market_structure': str(getattr(self, 'last_analysis', {}).get('market_structure', 'DOWNTREND')),
                 'zone': str(getattr(self, 'last_analysis', {}).get('zone', 'DISCOUNT')),
-                'trades': trades_list,  # ✅ trades_list
+                'zone_strength': self.last_analysis.get('smc_indicators', {}).get('zone_strength', 0),
+                'trades': trades_list,
             }
 
             update_bot_state(state)
             
-            # ✅ FIXED: Use trades_list + current_equity
             main_ticket = trades_list[0]['id'] if trades_list else 'NONE'
-            print(f"📊 Dashboard - Equity: ${current_equity:,.2f} | Positions: {len(trades_list)} | Main: #{main_ticket}")
+            # print(f"📊 Dashboard - Equity: ${current_equity:,.2f} | Positions: {len(trades_list)} | Main: #{main_ticket}")
 
         except Exception as e:
             print(f"⚠️ Dashboard update error: {e}")
@@ -2449,7 +2416,8 @@ def execute_manual_trade(trade_type: str, lot_size: float):
 def start_api_server():
     """Start the dashboard API server"""
     try:
-        from api.server import app
+        # CORRECTION: Import from root 'server.py', not 'api.server'
+        from server import app
         import uvicorn
         import socket
 
@@ -2463,11 +2431,9 @@ def start_api_server():
         print(f"📱 Phone Access: http://{local_ip}:8000/dashboard")
         print(f"📚 API Docs: http://localhost:8000/docs")
         print("=" * 70)
-        print("✅ Copy the Phone Access URL to use on your mobile")
-        print("✅ Make sure phone is on the same WiFi network")
-        print("=" * 70)
-
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+        
+        # Log level critical to keep terminal clean
+        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="critical")
 
     except Exception as e:
         print(f"❌ API Server error: {e}")
