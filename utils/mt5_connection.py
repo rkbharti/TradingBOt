@@ -256,4 +256,36 @@ class MT5Connection:
             return False
         
         return True
+    
+    def close_position_partial(self, ticket, volume_to_close, comment="Partial Close"):
+        """Close a specific volume of an open position"""
+        if not mt5.initialize(): return {'success': False, 'message': "No connection"}
+        
+        pos = mt5.positions_get(ticket=ticket)
+        if not pos: return {'success': False, 'message': "Position not found"}
+        pos = pos[0]
+        
+        # Action is opposite of position type
+        action_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        price = mt5.symbol_info_tick(pos.symbol).bid if action_type == mt5.ORDER_TYPE_SELL else mt5.symbol_info_tick(pos.symbol).ask
+        
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": pos.symbol,
+            "volume": float(volume_to_close),
+            "type": action_type,
+            "position": ticket,
+            "price": price,
+            "deviation": 20,
+            "magic": pos.magic,
+            "comment": comment,
+        }
+        
+        res = mt5.order_send(request)
+        if res.retcode != mt5.TRADE_RETCODE_DONE:
+            print(f"❌ Partial close failed: {res.comment}")
+            return {'success': False}
+            
+        print(f"✅ Closed {volume_to_close} lots")
+        return {'success': True, 'remaining_volume': pos.volume - volume_to_close}
 
