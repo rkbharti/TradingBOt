@@ -1,4 +1,6 @@
 # TradingBOt
+<img width="1919" height="932" alt="image" src="https://github.com/user-attachments/assets/7bb468c2-c469-41fa-bab3-568f406d466c" />
+
 
 ## XAUUSD Smart Money Concepts (SMC) Trading Bot for MT5
 
@@ -109,7 +111,7 @@ A professional automated trading bot for XAUUSD (Gold) using **Guardeer 10-Video
 
 ### 1. Clone Repository
 
-git clone https://github.com/yourusername/TradingBOt.git
+git clone https://github.com/rkbharti/TradingBOt.git
 cd TradingBOt
 
 text
