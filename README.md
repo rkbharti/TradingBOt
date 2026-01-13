@@ -244,19 +244,35 @@ text
 
 ## 📁 Project Structure
 
-TradingBOt/
-├── main.py # Main bot entry point
-├── config.py # Configuration settings
-├── requirements.txt # Python dependencies
-├── strategy.py # Guardeer SMC strategy
-├── zones.py # Zone detection logic
-├── risk_calculator.py # Risk management
-├── mt5_connection.py # MT5 API wrapper
-├── telegram_notifier.py # Telegram integration
-├── dashboard.py # Web dashboard
-└── README.md # This file
-
-text
+Directory structure:
+└── rkbharti-tradingbot/
+    ├── README.md
+    ├── requirements.txt
+    ├── server.py
+    ├── main.py
+    ├── strategy/
+    │   ├── backtester.py
+    │   ├── idea_memory.py
+    │   ├── market_structure.py
+    │   ├── multi_timeframe_fractal.py
+    │   ├── smc_strategy.py
+    │   ├── stoploss_calc.py
+    │   ├── timeframe_hierarchy.py
+    │   └── smc_enhanced/
+    │       ├── __init__.py
+    │       ├── bias.py
+    │       ├── inducement.py
+    │       ├── liquidity.py
+    │       ├── narrative.py
+    │       ├── poi.py
+    │       ├── session_detector.py
+    │       ├── volume_analyzer.py
+    │       └── zones.py
+    └── utils/
+        ├── mt5_connection.py
+        ├── smart_exits.py
+        ├── volume_analyzer_gold.py
+        └── xauusd_filter.py
 
 ---
 
