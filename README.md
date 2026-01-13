@@ -1,4 +1,6 @@
 # TradingBOt
+##TradingBOt is a safety-first, demo-only automated XAUUSD trading system
+focused on discipline, structure, and professional risk management.
 <img width="1919" height="932" alt="image" src="https://github.com/user-attachments/assets/7bb468c2-c469-41fa-bab3-568f406d466c" />
 
 
