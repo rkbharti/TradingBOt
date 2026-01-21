@@ -19,6 +19,7 @@ import os
 import requests
 
 import pytz
+# Add these 3 lines after line 15 (after "import pytz")
 from utils.xauusd_filter import XAUUSDFilter
 from utils.volume_analyzer_gold import GoldVolumeAnalyzer
 from utils.smart_exits import SmartExitManager
@@ -28,7 +29,7 @@ QUIET_LOGGING = True
 
 
 # ============================================================
-# MARKET HOURS & SESSION MANAGEMENT (Added Jan 12, 2026)
+# MARKET HOURS & SESSION MANAGEMENT (Added Dec 20, 2025)
 # ============================================================
 
 def is_market_open():
@@ -542,7 +543,7 @@ class XAUUSDTradingBot:
         # ===== FIX #3: COOLDOWN TRACKER FOR BUY/SELL SIGNALS =====
         self.last_buy_time = None
         self.last_sell_time = None
-        self.COOLDOWN_SECONDS = 300  # 5 minutes between same-direction trades
+        self.COOLDOWN_SECONDS = 60  # 1 minutes between same-direction trades
         self.idea_memory = IdeaMemory(expiry_minutes=30)
 
         # ===== FIX #4: TRAILING STOPS TRACKER =====
@@ -645,7 +646,7 @@ class XAUUSDTradingBot:
         """
 
         now = datetime.now()
-        cooldown_seconds = 300  # 5 minutes = 300 seconds
+        cooldown_seconds = 60  # 1 minutes = 60 seconds
 
         if signal_type == 'BUY':
             if self.last_buy_time is not None:
