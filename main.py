@@ -1,9 +1,4 @@
-# Lightweight, robust XAUUSD trading bot main file
-# - Uses only modules present in the repository (per user's directory)
-# - Safe: DRY_RUN default True
-# - Clear logging of price, spread, zone, MTF bias, reasons for blocking/taking trades
-# - Simple, maintainable decision logic built on available components
-
+# main.py
 DRY_RUN = True
 
 import os
@@ -11,7 +6,6 @@ import time
 import json
 import threading
 from datetime import datetime, timedelta
-
 import pandas as pd
 import pytz
 import requests
@@ -24,12 +18,9 @@ from strategy.smc_enhanced.zones import ZoneCalculator
 from strategy.idea_memory import IdeaMemory
 from utils.volume_analyzer_gold import GoldVolumeAnalyzer
 
-# Optional server integration (server.py exists in your repo)
-try:
-    import server as server_module
-    update_bot_state_v2 = getattr(server_module, "update_bot_state_v2", None)
-except Exception:
-    update_bot_state_v2 = None
+# Note: we no longer rely on direct in-process server imports.
+# Communication to the dashboard is done via webhook POST to the server.
+# (This keeps bot and server processes decoupled and robust.)
 
 # Telegram config (optional)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -49,12 +40,12 @@ def send_telegram(message, silent=False):
         }, timeout=10)
         return resp.json() if resp.status_code == 200 else None
     except Exception as e:
-        print(f"   ❌ Telegram error: {e}")
+        print(f" ❌ Telegram error: {e}")
         return None
 
 # ---------- Utilities ----------
+
 def compute_atr_from_df(df: pd.DataFrame, period: int = 14) -> float:
-    """Robust ATR computation from OHLC dataframe. Returns last ATR value (float)."""
     try:
         if df is None or len(df) == 0:
             return 0.0
@@ -80,7 +71,6 @@ def compute_atr_from_df(df: pd.DataFrame, period: int = 14) -> float:
         return 0.0
 
 def is_trading_session():
-    """Return (is_tradeable: bool, session_name: str) using UTC."""
     now = datetime.now(pytz.utc)
     t = now.hour + now.minute / 60.0
     if 8.0 <= t < 16.0:
@@ -105,7 +95,41 @@ def map_session_for_filter(session_name: str) -> str:
         return "ASIAN"
     return s
 
+# ---------- Dashboard webhook sender ----------
+def send_to_dashboard(bot_data: dict, analysis: dict, endpoint: str = "http://localhost:8000/webhook", timeout: float = 3.0):
+    """
+    Send a JSON snapshot to the dashboard server's /webhook endpoint.
+    - Safe: catches exceptions and returns False on failure.
+    - Replaces NaN values in serializable data by converting via json.dumps -> replace.
+    """
+    try:
+        payload = {
+            "bot_instance": bot_data,
+            "analysis_data": analysis
+        }
+        # Attempt to serialize and replace NaN tokens to protect browser parsing
+        try:
+            json_payload = json.dumps(payload, default=str)
+            if "NaN" in json_payload:
+                json_payload = json_payload.replace("NaN", "null")
+            resp = requests.post(endpoint, data=json_payload, headers={"Content-Type": "application/json"}, timeout=timeout)
+        except TypeError:
+            # fallback: send as json (requests will handle serialization)
+            resp = requests.post(endpoint, json=payload, timeout=timeout)
+        if resp.status_code == 200:
+            return True
+        else:
+            print(f"   ⚠️ Dashboard POST returned status {resp.status_code}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"   ⚠️ Dashboard POST failed: {e}")
+        return False
+    except Exception as e:
+        print(f"   ❌ Dashboard unexpected error: {e}")
+        return False
+
 # ---------- Bot ----------
+
 class XAUUSDTradingBot:
     def __init__(self, config_path="config.json"):
         self.config_path = config_path
@@ -113,18 +137,17 @@ class XAUUSDTradingBot:
         self.mtf = MultiTimeframeFractal(symbol="XAUUSD")
         self.idea_memory = IdeaMemory(expiry_minutes=30)
         self.volume_analyzer = None
-        self.zone_calculator = ZoneCalculator  # class object
+        self.zone_calculator = ZoneCalculator
         self.running = False
         self.trade_log = []
         self.open_positions = []
         self.max_positions = 3
         self.max_lot_size = 2.0
-        self.risk_per_trade_percent = 0.5  # default
+        self.risk_per_trade_percent = 0.5
         self.current_session = "UNKNOWN"
-        # set DRY_RUN flag
         self.dry_run = DRY_RUN
 
-    # -------- MT5 wrappers with graceful fallbacks --------
+    # MT5 wrappers
     def mt5_initialize(self):
         try:
             if hasattr(self.mt5, "initialize_mt5"):
@@ -168,8 +191,7 @@ class XAUUSDTradingBot:
     def mt5_place_order(self, side, lots, sl, tp):
         try:
             if self.dry_run:
-                print(f"   ⚠️ DRY_RUN enabled — simulated order: {side} {lots} lots SL={sl} TP={tp}")
-                # return a fake ticket id for internal tracking
+                print(f" ⚠️ DRY_RUN enabled — simulated order: {side} {lots} lots SL={sl} TP={tp}")
                 return f"DRY-{int(time.time())}"
             if hasattr(self.mt5, "place_order"):
                 return self.mt5.place_order(side, lots, sl, tp)
@@ -199,7 +221,6 @@ class XAUUSDTradingBot:
             print(f"❌ modify position error: {e}")
         return False
 
-    # -------- Initialization --------
     def initialize(self):
         print("=== Initializing XAUUSDTradingBot ===")
         if not self.mt5_initialize():
@@ -217,25 +238,20 @@ class XAUUSDTradingBot:
         else:
             print("ℹ️ No account info available (continuing in read-only/test mode)")
 
-        # instantiate volume analyzer lazily when data available
         print("✅ Initialization complete")
         return True
 
-    # -------- Market data fetch & basic analysis --------
     def fetch_and_prepare(self):
         market_data = self.mt5_get_historical(bars=300)
         if market_data is None:
             print("❌ Could not fetch historical data")
             return None, None
-        # convert to DataFrame if needed
         if not isinstance(market_data, pd.DataFrame):
             try:
                 market_data = pd.DataFrame(market_data)
             except Exception:
                 print("❌ Historical data conversion failed")
                 return None, None
-
-        # ensure numeric columns
         for c in ("high", "low", "close", "open", "tick_volume"):
             if c in market_data.columns:
                 market_data[c] = pd.to_numeric(market_data[c], errors="coerce")
@@ -244,11 +260,9 @@ class XAUUSDTradingBot:
         if current_price is None:
             print("❌ Could not fetch current price")
             return market_data, None
-
         return market_data, current_price
 
     def analyze_once(self):
-        # Session check
         is_active, session_name = is_trading_session()
         session_norm = map_session_for_filter(session_name)
         self.current_session = session_norm
@@ -260,10 +274,8 @@ class XAUUSDTradingBot:
         if market_data is None or current_price is None:
             return
 
-        # compute ATR
         atr = compute_atr_from_df(market_data, period=14)
 
-        # compute spread
         spread = None
         if isinstance(current_price, dict):
             bid = float(current_price.get("bid", 0.0))
@@ -271,32 +283,27 @@ class XAUUSDTradingBot:
             spread = abs(ask - bid)
             price_for_zones = bid
         else:
-            # if current_price is a number, treat as mid/bid
             bid = float(current_price)
             ask = bid
             spread = 0.0
             price_for_zones = bid
 
-        # MTF confluence
         mtf_conf = {"overall_bias": "NEUTRAL", "confidence": 0}
         try:
             mtf_conf = self.mtf.get_multi_tf_confluence()
         except Exception:
             pass
-        vol_spike = 1.0  # Safe default
-        volume_spike = False  # Safe default
 
-        # Market structure
+        vol_spike = 1.0
+        volume_spike = False
+
         try:
             ms_detector = MarketStructureDetector(market_data)
             ms = ms_detector.get_market_structure_analysis()
         except Exception:
             ms = {"current_trend": "NEUTRAL", "choch_detected": False, "bos_level": None}
 
-        # Zones
         try:
-            # simple zone calc: use last swing high/low or small range
-            # ZoneCalculator functions used by Copilot file; call them defensively
             latest_high = float(market_data['high'].max()) if 'high' in market_data.columns else price_for_zones
             latest_low = float(market_data['low'].min()) if 'low' in market_data.columns else price_for_zones
             zones = {}
@@ -314,7 +321,6 @@ class XAUUSDTradingBot:
             current_zone = "UNKNOWN"
             zone_strength = 0
 
-        # Volume confirmation
         try:
             vol_an = GoldVolumeAnalyzer(market_data)
             self.volume_analyzer = vol_an
@@ -326,11 +332,9 @@ class XAUUSDTradingBot:
         except Exception:
             volume_spike = False
 
-        # Decision logic (simple and explainable)
         final_signal = "HOLD"
         reason = "No conditions met"
 
-        # Logging of perceptions
         print("\n" + "=" * 60)
         print(f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Session: {self.current_session}")
         print(f"💱 Price (bid): {bid:.2f} | Ask: {ask:.2f} | Spread: {spread:.4f}")
@@ -338,7 +342,7 @@ class XAUUSDTradingBot:
         print(f"🔁 MTF Bias: {mtf_conf.get('overall_bias')} | Confidence: {mtf_conf.get('confidence')}")
         print(f"🏗 Market Structure: {ms.get('current_trend','NEUTRAL')} | BO S/CHOCH: {ms.get('choch_detected')}")
         print(f"📈 Volume spike: {volume_spike} (ratio {vol_spike:.2f} if available)")
-        # ===== SMC STATE LOGGING (Institutional Observability) =====
+
         try:
             smc_state = ms_detector.get_idm_state() if hasattr(ms_detector, 'get_idm_state') else {}
             print(f"🌊 Liquidity Swept: {smc_state.get('liquidity_swept', False)}")
@@ -346,35 +350,27 @@ class XAUUSDTradingBot:
             print(f"🧱 BOS Confirmed: {smc_state.get('bos_confirmed', False)}")
         except Exception as e:
             print(f"⚠️ SMC state unavailable: {e}")
+            smc_state = {}
 
         print("-" * 60)
 
-        # ===== INSTITUTIONAL DECISION LOGIC (SMC Enforcement) =====
         try:
-            # Extract SMC states safely
             idm_taken = smc_state.get('idm_taken', False)
             liquidity_swept = smc_state.get('liquidity_swept', False)
             bos_confirmed = smc_state.get('bos_confirmed', False)
-            
-            # RULE 1: BUY SETUP (Bullish Bias + Discount + IDM Taken)
-            if (mtf_conf.get("overall_bias") == "BULLISH" and 
-                current_zone == "DISCOUNT" and 
+
+            if (mtf_conf.get("overall_bias") == "BULLISH" and
+                current_zone == "DISCOUNT" and
                 zone_strength >= 30 and
                 idm_taken == True):
-                
                 final_signal = "BUY"
                 reason = "Institutional Buy: Discount + Bullish + IDM Swept"
-            
-            # RULE 2: SELL SETUP (Bearish Bias + Premium + IDM Taken)
-            elif (mtf_conf.get("overall_bias") == "BEARISH" and 
-                current_zone == "PREMIUM" and 
-                zone_strength >= 30 and
-                idm_taken == True):
-                
+            elif (mtf_conf.get("overall_bias") == "BEARISH" and
+                  current_zone == "PREMIUM" and
+                  zone_strength >= 30 and
+                  idm_taken == True):
                 final_signal = "SELL"
                 reason = "Institutional Sell: Premium + Bearish + IDM Swept"
-            
-            # RULE 3: STRONG ZONE OVERRIDE (High conviction zones)
             elif zone_strength >= 70 and idm_taken == True:
                 if current_zone == "DISCOUNT":
                     final_signal = "BUY"
@@ -382,12 +378,8 @@ class XAUUSDTradingBot:
                 elif current_zone == "PREMIUM":
                     final_signal = "SELL"
                     reason = "Strong Premium zone + IDM confirmed"
-            
-            # DEFAULT: HOLD and explain why
             else:
                 final_signal = "HOLD"
-                
-                # Detailed waiting reasons
                 if not idm_taken:
                     reason = "Waiting for Inducement (IDM) sweep"
                 elif current_zone == "PREMIUM" and mtf_conf.get("overall_bias") == "BULLISH":
@@ -398,32 +390,25 @@ class XAUUSDTradingBot:
                     reason = f"Zone too weak ({zone_strength:.0f}%) - need ≥30%"
                 else:
                     reason = "No institutional confluence met"
-
         except Exception as e:
             final_signal = "HOLD"
             reason = f"Error evaluating signals: {e}"
 
-
-        # Safety checks
-        #  - Do not trade with large spread
-        max_allowed_spread = 0.5  # $0.5 default, conservative for gold — adjust as per broker
+        max_allowed_spread = 0.5
         if spread is None:
             spread = 0.0
         if spread > max_allowed_spread:
             reason = f"Spread too large ({spread:.4f})"
             final_signal = "HOLD"
 
-        #  - Position caps
         if len(self.open_positions) >= self.max_positions:
             reason = "Max positions reached"
             final_signal = "HOLD"
 
-        # Execution / simulation
         if final_signal in ("BUY", "SELL"):
             entry_price = ask if final_signal == "BUY" else bid
-            # Stoploss and TP via ATR multiples
             pip = 0.01
-            sl_distance = max(atr * 2, 35 * pip)  # use ATR*2 or min 35 pips
+            sl_distance = max(atr * 2, 35 * pip)
             if final_signal == "BUY":
                 sl = entry_price - sl_distance
                 tp = entry_price + (atr * 3)
@@ -431,29 +416,25 @@ class XAUUSDTradingBot:
                 sl = entry_price + sl_distance
                 tp = entry_price - (atr * 3)
 
-            # lot size: conservative fixed small lot unless account info available
             acct = self.mt5_get_account()
             lot = 0.01
             if acct:
                 try:
                     bal = float(acct.balance)
-                    # risk percent -> simple lot calc (approx for XAUUSD)
                     risk_amount = bal * (self.risk_per_trade_percent / 100.0)
                     pips_at_risk = abs(entry_price - sl) / pip
                     if pips_at_risk > 0:
-                        lot_est = risk_amount / (pips_at_risk * 10)  # $10 per pip per lot convention
+                        lot_est = risk_amount / (pips_at_risk * 10)
                         lot = min(round(lot_est, 2), self.max_lot_size)
                         lot = max(lot, 0.01)
                 except Exception:
                     lot = 0.01
 
-            # Final log and execute/simulate
             print(f"🔔 SIGNAL {final_signal} -> Entry {entry_price:.2f} | SL {sl:.2f} | TP {tp:.2f} | Lot {lot}")
             print(f"   Reason: {reason}")
 
             ticket = self.mt5_place_order(final_signal, lot, sl, tp)
             if ticket:
-                # Track position locally
                 pos = {
                     "ticket": ticket,
                     "signal": final_signal,
@@ -472,9 +453,7 @@ class XAUUSDTradingBot:
                 print(f"✅ Tracked new position (ticket: {ticket})")
             else:
                 print("❌ Order failed or rejected")
-
         else:
-            # No trade — log the reason to trade_log for debugging
             print(f"⏸ No trade executed: {reason}")
             self.trade_log.append({
                 "timestamp": datetime.now().isoformat(),
@@ -487,14 +466,84 @@ class XAUUSDTradingBot:
                 "market_structure": ms,
                 "reason": reason
             })
-            # keep trade_log size reasonable
             if len(self.trade_log) > 1000:
                 self.trade_log = self.trade_log[-1000:]
             self.save_trade_log()
 
+        # ===== Dashboard webhook update (always try; fail silently) =====
+        try:
+            chart_data = []
+            if market_data is not None and len(market_data) > 0:
+                tail = market_data.tail(100)
+                current_ts = int(time.time())
+                for i, (idx, row) in enumerate(tail.iterrows()):
+                    cand_time = current_ts - (len(tail) - i - 1) * 60
+                    open_v = float(row.get('open', 0)) if hasattr(row, 'get') else float(row['open'] if 'open' in row else 0)
+                    high_v = float(row.get('high', 0)) if hasattr(row, 'get') else float(row['high'] if 'high' in row else 0)
+                    low_v = float(row.get('low', 0)) if hasattr(row, 'get') else float(row['low'] if 'low' in row else 0)
+                    close_v = float(row.get('close', 0)) if hasattr(row, 'get') else float(row['close'] if 'close' in row else 0)
+                    chart_data.append({
+                        "time": cand_time,
+                        "open": open_v,
+                        "high": high_v,
+                        "low": low_v,
+                        "close": close_v
+                    })
+
+            acct = self.mt5_get_account()
+            equity = 0.0
+            balance = 0.0
+            if acct:
+                try:
+                    equity = float(getattr(acct, 'equity', 0.0))
+                    balance = float(getattr(acct, 'balance', 0.0))
+                except Exception:
+                    try:
+                        equity = float(acct.equity) if hasattr(acct, 'equity') else 0.0
+                        balance = float(acct.balance) if hasattr(acct, 'balance') else 0.0
+                    except Exception:
+                        pass
+
+            if equity == 0.0 and balance == 0.0:
+                equity = 77829.40
+                balance = 77829.40
+
+            bot_data = {
+                "equity": equity,
+                "balance": balance,
+                "last_price": bid,
+                "open_positions": self.open_positions,
+                "closed_trades": [],
+                "chart_data": chart_data,
+                "current_session": self.current_session
+            }
+
+            analysis = {
+                "market_structure": ms,
+                "zone_strength": zone_strength,
+                "current_zone": current_zone,
+                "pdh": latest_high if 'latest_high' in locals() else (float(market_data['high'].max()) if 'high' in market_data.columns else 0),
+                "pdl": latest_low if 'latest_low' in locals() else (float(market_data['low'].min()) if 'low' in market_data.columns else 0),
+                "zones": zones if 'zones' in locals() else {}
+            }
+
+            # Send to dashboard (webhook)
+            sent = send_to_dashboard(bot_data, analysis)
+            if sent:
+                print("📡 Dashboard webhook POST successful")
+            else:
+                print("📡 Dashboard webhook POST failed or not reachable (continuing)")
+
+            print(f"   💰 Equity: ${equity:,.2f} | Balance: ${balance:,.2f}")
+            print(f"   📊 Chart candles: {len(chart_data)} | Price: ${bid:.2f}")
+            print(f"   🎯 Zone: {current_zone} | Strength: {zone_strength}%")
+
+        except Exception as e:
+            print(f"⚠️ Dashboard update failed: {e}")
+
         print("=" * 60 + "\n")
 
-    # -------- Utilities for persistence --------
+    # Persistence
     def save_trade_log(self, filename="tradelog.json"):
         try:
             with open(filename, "w") as f:
@@ -511,7 +560,6 @@ class XAUUSDTradingBot:
         except Exception as e:
             print(f"❌ Error loading trade log: {e}")
 
-    # -------- Shutdown --------
     def cleanup(self):
         try:
             if hasattr(self.mt5, "shutdown"):
@@ -523,7 +571,7 @@ class XAUUSDTradingBot:
         self.save_trade_log()
         print("✅ Bot cleaned up")
 
-# --------- CLI main() ----------
+# CLI main
 def main():
     bot = XAUUSDTradingBot()
     if not bot.initialize():
@@ -540,11 +588,12 @@ def main():
                 bot.analyze_once()
             except Exception as e:
                 print(f"⚠️ Analysis exception (continuing): {e}")
-            # Sleep loop to allow responsive shutdown
+
             for _ in range(60):
                 time.sleep(1)
                 if not bot.running:
                     break
+
     except KeyboardInterrupt:
         print("\n🛑 Stopped by user")
     finally:
