@@ -1,4 +1,5 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+# server.py
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -11,48 +12,13 @@ import traceback
 import math
 
 # ============================================================================== 
-# 🎨 DASHBOARD V3.7+: GUARDEER "COMMAND OS" (PRODUCTION-BOUND)
-# Changes: Reduced broadcast chatter, state-delta broadcasts, enhanced PnL tracking
-# Added: Today / Week / Total realized P&L to main widget and positions widget
-# NOTE: Small defensive logging left in place — remove if you want quieter logs.
+# 🎨 DASHBOARD v3 - Webhook Bridge ready FastAPI server
+# - Accepts POST /webhook from trading bot (main.py)
+# - Cleans payload (NaN -> null)
+# - Updates internal bot_state and PnL tracker
+# - Broadcasts to dashboard clients via WebSocket
+# - Preserves original HTML/CSS layout in html_content
 # ==============================================================================
-
-# --- BACKGROUND BROADCASTER ---
-async def broadcast_loop():
-    """
-    Broadcast only when state changes (stable hashing) and throttle frequency.
-    """
-    last_state_hash = None
-    while True:
-        if active_connections and bot_state:
-            # stable digest of json sorted keys
-            state_json = json.dumps(bot_state, sort_keys=True, default=str)
-            state_hash = hashlib.sha256(state_json.encode()).hexdigest()
-            if state_hash != last_state_hash:
-                payload = state_json
-                # log a lightweight message for diagnostics
-                try:
-                    print(f"📡 Broadcasting state update ({len(active_connections)} clients) size={len(payload)} bytes")
-                except:
-                    pass
-                for conn in active_connections[:]:
-                    try:
-                        await conn.send_text(payload)
-                    except:
-                        # silent ignore; pruning will happen on disconnect
-                        pass
-                last_state_hash = state_hash
-        # Reduced frequency: 10s (was 3s). Only sends on change.
-        await asyncio.sleep(10)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    task = asyncio.create_task(broadcast_loop())
-    yield
-    task.cancel()
-
-app = FastAPI(lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 active_connections = []
 bot_state = {}
@@ -60,29 +26,19 @@ bot_state = {}
 # --- ENHANCED PnL TRACKER ---
 class DailyPnLTracker:
     def __init__(self):
-        # realized_pnl for current day
         self.realized_pnl = 0.0
         self.last_reset_date = datetime.now().date()
-        # history keyed by ISO date string "YYYY-MM-DD"
-        self.history = {}  # e.g. {"2026-01-12": 123.45, ...}
-        # cumulative realized since tracker started
+        self.history = {}
         self.total_realized = 0.0
-        # track processed closed-deal tickets to avoid duplicates
         self.processed_ticket_ids = set()
 
     def _ensure_today(self):
         today = datetime.now().date()
         if today > self.last_reset_date:
-            # rotate/reset per-day bookkeeping
             self.last_reset_date = today
             self.realized_pnl = 0.0
 
     def add_closed_trade(self, pnl: float, when: datetime = None, ticket: str = None):
-        """
-        Record a closed trade profit. 'when' can be specified (datetime), otherwise now.
-        If ticket is provided, skip if already processed.
-        """
-        # dedupe by ticket if provided
         if ticket:
             try:
                 if ticket in self.processed_ticket_ids:
@@ -94,7 +50,6 @@ class DailyPnLTracker:
         if when is None:
             when = datetime.now()
         d = when.date()
-        # ensure daily reset for tracker
         self._ensure_today()
         ds = d.isoformat()
         self.history[ds] = self.history.get(ds, 0.0) + float(pnl)
@@ -103,14 +58,11 @@ class DailyPnLTracker:
         self.total_realized += float(pnl)
 
     def get_daily(self):
-        # today's realized (from history/tracker) as float
         self._ensure_today()
         return float(self.realized_pnl)
 
     def get_weekly(self):
-        # sum realized for current ISO week (Mon-Sun) from history
         today = datetime.now().date()
-        # find Monday of current week
         start = today - timedelta(days=today.weekday())
         total = 0.0
         d = start
@@ -125,7 +77,44 @@ class DailyPnLTracker:
 
 pnl_tracker = DailyPnLTracker()
 
-# --- HTML CONTENT (updated to display Today / Week / Total P&L) ---
+# --- BROADCAST LOOP ---
+async def broadcast_loop():
+    last_state_hash = None
+    while True:
+        if active_connections and bot_state:
+            try:
+                # Sanitize JSON to avoid NaN issues; browser rejects NaN
+                state_json = json.dumps(bot_state, sort_keys=True, default=str).replace("NaN", "null")
+                state_hash = hashlib.sha256(state_json.encode()).hexdigest()
+                if state_hash != last_state_hash:
+                    payload = state_json
+                    try:
+                        print(f"📡 Broadcasting state update ({len(active_connections)} clients) size={len(payload)} bytes")
+                    except Exception:
+                        pass
+                    for conn in active_connections[:]:
+                        try:
+                            await conn.send_text(payload)
+                        except Exception:
+                            # per-connection exceptions ignored; websocket handler will remove dead connections
+                            pass
+                    last_state_hash = state_hash
+            except Exception as e:
+                print(f"⚠️ Broadcast serialization error: {e}")
+        await asyncio.sleep(3)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(broadcast_loop())
+    yield
+    task.cancel()
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+# ---------------------------------------------------------------------------
+# Keep the dashboard HTML/CSS content intact below (unchanged semantics/style)
+# ---------------------------------------------------------------------------
 html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -275,7 +264,6 @@ html_content = """
                         <i class="ph ph-robot" style="font-size:24px; margin-bottom:5px;"></i><br>AI Scanning...
                     </div>
 
-                    <!-- Positions summary footer: Open P&L + Today/Week/Total -->
                     <div class="pos-footer">
                         <div>
                             <div style="font-size:11px; color:var(--text-sub)">Open P&L</div>
@@ -342,13 +330,12 @@ html_content = """
                     const ws = new WebSocket((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws');
                     ws.onmessage = (event) => {
                         const data = JSON.parse(event.data);
+                        if (!data) return;
 
                         this.equity = data.equity || this.equity;
                         this.balance = data.balance || this.balance;
-                        // maintain backwards compat: if server still sends pnl_daily
                         this.pnl_daily = data.pnl_daily ?? this.pnl_daily;
 
-                        // new fields
                         this.pnl_today = data.pnl_today ?? this.pnl_today;
                         this.pnl_week = data.pnl_week ?? this.pnl_week;
                         this.pnl_total = data.pnl_total ?? this.pnl_total;
@@ -399,102 +386,96 @@ html_content = """
 """
 
 @app.get("/dashboard")
-async def dashboard(): return HTMLResponse(content=html_content)
+async def dashboard():
+    return HTMLResponse(content=html_content)
 
+# WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     active_connections.append(websocket)
+
     try:
-        # log client connection for easier debugging
+        client_info = f"{websocket.client}" if hasattr(websocket, "client") else "unknown"
         try:
-            client = websocket.client if hasattr(websocket, "client") else None
-            print("🔌 WS CONNECTED:", client)
-        except:
-            print("🔌 WS CONNECTED (unknown client)")
+            print("🔌 WS CONNECTED:", client_info)
+        except Exception:
+            pass
+
+        # Send initial state immediately
         if bot_state:
-            await websocket.send_json(bot_state)
+            try:
+                safe_json = json.dumps(bot_state, default=str).replace("NaN", "null")
+                await websocket.send_text(safe_json)
+                try:
+                    eq = bot_state.get("equity", 0.0)
+                    bal = bot_state.get("balance", 0.0)
+                    chart_len = len(bot_state.get("chart_data", []) or [])
+                    print(f"📤 Sent initial state: Equity=${float(eq):,.2f} Balance=${float(bal):,.2f} ChartCandles={chart_len}")
+                except Exception:
+                    pass
+            except Exception as e:
+                print("❌ Error sending initial state:", e)
+
+        # Keep connection alive: don't require client to send messages
         while True:
-            # client pings can be ignored; keep connection alive
-            await websocket.receive_text()
+            try:
+                _ = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+            except asyncio.TimeoutError:
+                continue
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                print(f"❌ WS receive error: {e}")
+                break
+
     except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"❌ WS Exception: {e}")
+    finally:
         try:
-            client = websocket.client if hasattr(websocket, "client") else None
-            print("🔌 WS DISCONNECTED:", client)
-        except:
-            print("🔌 WS DISCONNECTED")
-        if websocket in active_connections: active_connections.remove(websocket)
+            if websocket in active_connections:
+                active_connections.remove(websocket)
+        except Exception:
+            pass
+        try:
+            print("🔌 WS DISCONNECTED:", client_info)
+        except Exception:
+            pass
 
-# --- BOT UPDATE INTERFACE (DATA RECEIVER) ---
+# Core state ingestion used by webhook
 def update_bot_state_v2(bot_instance, analysis_data):
-    """Called by main.py. Reads FORCE-FED data and updates enhanced PnL fields.
-
-    Expected:
-      - bot_instance may contain:
-          - equity, balance, last_price, open_positions (list), closed_trades (list)
-      - analysis_data may contain pdh/pdl/zones/market_structure etc.
-    This function:
-      - aggregates open PnL from open_positions (best-effort)
-      - ingests any closed_trades list and feeds the local pnl_tracker
-      - populates bot_state with pnl_today, pnl_week, pnl_total, open_pnl (floating)
-    """
     global bot_state, pnl_tracker
 
     def get_val(obj, key, default=0.0):
-        if hasattr(obj, key): return getattr(obj, key)
-        if isinstance(obj, dict): return obj.get(key, default)
+        if hasattr(obj, key):
+            return getattr(obj, key)
+        if isinstance(obj, dict):
+            return obj.get(key, default)
         return default
 
-    # ---- Debug-entry: show caller & payload shape ----
-    try:
-        is_dict = isinstance(bot_instance, dict)
-        open_positions_raw = bot_instance.get("open_positions", None) if is_dict else getattr(bot_instance, "open_positions", None)
-        closed_trades_raw = bot_instance.get("closed_trades", None) if is_dict else getattr(bot_instance, "closed_trades", None)
-        ops_len = len(open_positions_raw) if open_positions_raw else 0
-        cls_len = len(closed_trades_raw) if closed_trades_raw else 0
-    except Exception:
-        ops_len = cls_len = 0
-        open_positions_raw = closed_trades_raw = None
-
-    # Disabled noisy entry log
-    # print("🔔 update_bot_state_v2 called | type:", "dict" if is_dict else type(bot_instance), f"| open_positions={ops_len} closed_trades={cls_len}")
-
-    # sample profits for quick inspection (commented out to reduce noise)
-    try:
-        if open_positions_raw:
-            sample = []
-            for p in (open_positions_raw[:3] if hasattr(open_positions_raw, "__len__") else []):
-                sample.append(get_val(p, "profit", get_val(p, "pnl", "<missing>")))
-            # print("  sample position profits:", sample)
-    except Exception as e:
-        # keep the inspect error log (small) for diagnostics
-        print("  sample inspect error:", e)
-    # short traceback to find caller (commented out to reduce noise)
-    try:
-        tb = "".join(traceback.format_stack(limit=6)[:-1])
-        # print("  caller stack (short):\n", tb)
-    except Exception:
-        pass
-
-    # ---- helper: robust profit parser ----
     def parse_profit(x):
-        if x is None: return 0.0
+        if x is None:
+            return 0.0
         try:
-            if isinstance(x, (int, float)) and not math.isnan(x): return float(x)
-            s = str(x).strip()
-            # remove typical currency/format chars
-            for ch in ("$", "€", ","):
-                s = s.replace(ch, "")
-            s = s.replace("(", "-").replace(")", "")
-            return float(s)
+            if isinstance(x, (int, float)):
+                val = float(x)
+            else:
+                s = str(x).strip()
+                for ch in ("$", "€", ","):
+                    s = s.replace(ch, "")
+                s = s.replace("(", "-").replace(")", "")
+                val = float(s)
+            if math.isnan(val):
+                return 0.0
+            return val
         except Exception:
             return 0.0
 
-    # 1. READ FORCE-FED DATA
     equity = float(get_val(bot_instance, "equity", 0.0) or 0.0)
     balance = float(get_val(bot_instance, "balance", 0.0) or 0.0)
 
-    # 2. OPEN PNL & POSITIONS
     open_pnl = 0.0
     formatted_trades = []
 
@@ -503,13 +484,10 @@ def update_bot_state_v2(bot_instance, analysis_data):
         current_price = float(get_val(bot_instance, "last_price", 0.0) or 0.0)
 
         for p in positions:
-            # profit might be string/number; parse robustly
             profit_raw = get_val(p, "profit", None)
             if profit_raw is None:
                 profit_raw = get_val(p, "pnl", None)
             profit = parse_profit(profit_raw)
-
-            # Auto-calc if missing (fallback)
             entry = parse_profit(get_val(p, "price", get_val(p, "entry_price", 0.0)))
             lot = parse_profit(get_val(p, "lot_size", get_val(p, "volume", 0.0)))
             signal = get_val(p, "signal", get_val(p, "type", "N/A"))
@@ -520,7 +498,7 @@ def update_bot_state_v2(bot_instance, analysis_data):
                         profit = (current_price - entry) * lot * 100
                     else:
                         profit = (entry - current_price) * lot * 100
-                except:
+                except Exception:
                     profit = 0.0
 
             open_pnl += float(profit)
@@ -533,19 +511,12 @@ def update_bot_state_v2(bot_instance, analysis_data):
                 "tp": get_val(p, "tp", 0), "sl": get_val(p, "sl", 0)
             })
     except Exception as e:
-        # defensive: keep formatted_trades empty on failure
         print(f"⚠️ update_bot_state_v2 positions parsing error: {e}")
 
-    # debug-friendly closed trades ingestion with symbol filter and tiny-profit skip
     try:
         closed = get_val(bot_instance, "closed_trades", []) or []
-        if closed:
-            # print(f"ℹ️ Received {len(closed)} closed trades — sample: {repr(closed[:3])}")
-            pass
         today_sum = 0.0
-        processed_tickets_this_call = []
         for ct in closed:
-            # filter by symbol (only count XAUUSD by default)
             symbol = get_val(ct, "symbol", "") or get_val(ct, "instrument", "") or ""
             if symbol:
                 try:
@@ -554,13 +525,11 @@ def update_bot_state_v2(bot_instance, analysis_data):
                 except:
                     pass
 
-            # try many possible profit keys
             profit_raw = None
             for k in ("profit", "pnl", "profit_usd", "profit_usd_str", "deal_profit"):
                 profit_raw = get_val(ct, k, None)
                 if profit_raw is not None:
                     break
-            # fallback: maybe nested object (e.g., {'deal': {...}})
             if profit_raw is None and isinstance(ct, dict):
                 for v in ct.values():
                     if isinstance(v, (int, float)) and abs(v) > 0:
@@ -568,12 +537,9 @@ def update_bot_state_v2(bot_instance, analysis_data):
                         break
 
             profit = parse_profit(profit_raw)
-
-            # skip tiny/noise profits (commissions etc.)
             if abs(profit) < 0.01:
                 continue
 
-            # determine timestamp (optional) - robust detection
             when = None
             ts = get_val(ct, "time", None) or get_val(ct, "close_time", None) or get_val(ct, "timestamp", None)
             if ts:
@@ -583,12 +549,10 @@ def update_bot_state_v2(bot_instance, analysis_data):
                             when = datetime.fromisoformat(ts)
                         except:
                             try:
-                                # try common formats
                                 when = datetime.strptime(ts, "%Y.%m.%d %H:%M:%S")
                             except:
                                 when = None
                     elif isinstance(ts, (int, float)):
-                        # detect milliseconds vs seconds
                         if ts > 1e12:
                             when = datetime.fromtimestamp(float(ts) / 1000.0)
                         else:
@@ -596,73 +560,83 @@ def update_bot_state_v2(bot_instance, analysis_data):
                 except Exception:
                     when = None
 
-            # record into tracker (pass ticket for dedupe)
             try:
                 ticket_id = get_val(ct, "ticket", get_val(ct, "order", None) or get_val(ct, "id", None))
                 ticket_str = str(ticket_id) if ticket_id is not None else None
-                before_count = len(pnl_tracker.processed_ticket_ids)
                 pnl_tracker.add_closed_trade(float(profit or 0.0), when=when, ticket=ticket_str)
-                after_count = len(pnl_tracker.processed_ticket_ids)
-                # if processed, record locally for log
-                if ticket_str and (after_count > before_count):
-                    processed_tickets_this_call.append((ticket_str, float(profit or 0.0)))
             except Exception as e:
                 print(f"⚠️ pnl_tracker add error: {e}")
 
-            # if trade closed today, add to today_sum
             try:
                 if when is None or when.date() == datetime.now().date():
                     today_sum += float(profit or 0.0)
             except Exception:
                 today_sum += float(profit or 0.0)
 
-        # if tracker didn't have today data for some reason, ensure today is seeded
         if pnl_tracker.get_daily() == 0.0 and today_sum != 0.0:
-            # add a synthetic 'today' entry so get_daily returns a value
             today_key = datetime.now().date().isoformat()
             pnl_tracker.history[today_key] = pnl_tracker.history.get(today_key, 0.0) + today_sum
             pnl_tracker.realized_pnl += float(today_sum)
             pnl_tracker.total_realized += float(today_sum)
 
-        if processed_tickets_this_call:
-            total_added = sum(p for _, p in processed_tickets_this_call)
-            # print(f"✅ Closed trades processed: tickets={len(processed_tickets_this_call)} total_added={total_added:.2f} details={processed_tickets_this_call}")
-            pass
-        else:
-            # nothing new processed in this call (all were filtered or duplicates)
-            if closed:
-                # print("ℹ️ Closed trades received but none passed filters or all were duplicates.")
-                pass
     except Exception as e:
         print(f"⚠️ closed_trades ingestion error: {e}")
 
-    # 4. DEBUG LOG
-    # print(f"🔎 DASHBOARD DEBUG: Equity=${equity:.2f} | Balance=${balance:.2f} | Trades={len(formatted_trades)} | OpenPnL={open_pnl:.2f}")
+    try:
+        pdh_val = analysis_data.get("pdh") if isinstance(analysis_data, dict) else getattr(analysis_data, "pdh", None)
+        pdl_val = analysis_data.get("pdl") if isinstance(analysis_data, dict) else getattr(analysis_data, "pdl", None)
+        zones_val = analysis_data.get("zones", {}) if isinstance(analysis_data, dict) else getattr(analysis_data, "zones", {})
 
-    # 5. BUILD STATE (include today/week/total/open)
-    bot_state.update({
-        "equity": equity,
-        "balance": balance,
-        # compatibility: pnl_daily remains (today)
-        "pnl_daily": round(pnl_tracker.get_daily() + open_pnl, 2),
-        # Explicit fields requested
-        "pnl_today": round(pnl_tracker.get_daily() + open_pnl, 2),
-        "pnl_week": round(pnl_tracker.get_weekly() + open_pnl, 2),
-        "pnl_total": round(pnl_tracker.get_total() + open_pnl, 2),
-        "open_pnl": round(open_pnl, 2),
-        "price": get_val(bot_instance, "last_price", 0.0),
-        "market_structure": analysis_data.get("market_structure", {}).get("current_trend", "NEUTRAL") if isinstance(analysis_data, dict) else getattr(analysis_data, "market_structure", {}).get("current_trend", "NEUTRAL"),
-        "zone_strength": analysis_data.get("zone_strength", 0) if isinstance(analysis_data, dict) else getattr(analysis_data, "zone_strength", 0),
-        "session": get_val(bot_instance, "current_session", "ASIAN"),
-        "zone": analysis_data.get("current_zone", "EQ") if isinstance(analysis_data, dict) else getattr(analysis_data, "current_zone", "EQ"),
-        "trades": formatted_trades,
-        "chart_overlays": {
-            "levels": {"pdh": analysis_data.get("pdh") if isinstance(analysis_data, dict) else getattr(analysis_data, "pdh", None), "pdl": analysis_data.get("pdl") if isinstance(analysis_data, dict) else getattr(analysis_data, "pdl", None)},
-            "zones": {"equilibrium": analysis_data.get("zones", {}).get("equilibrium") if isinstance(analysis_data, dict) else getattr(analysis_data, "zones", {}).get("equilibrium")}
-        },
-        "news_event": {"title": "USD CPI Data (High Impact)", "time": "In 3h 45m"} if datetime.now().hour == 14 else {"title": "No major events scheduled", "time": "Market Calm"},
-        "chart_data": get_val(bot_instance, "chart_data", [])[-100:]
-    })
+        bot_state.update({
+            "equity": equity,
+            "balance": balance,
+            "pnl_daily": round(pnl_tracker.get_daily() + open_pnl, 2),
+            "pnl_today": round(pnl_tracker.get_daily() + open_pnl, 2),
+            "pnl_week": round(pnl_tracker.get_weekly() + open_pnl, 2),
+            "pnl_total": round(pnl_tracker.get_total() + open_pnl, 2),
+            "open_pnl": round(open_pnl, 2),
+            "price": get_val(bot_instance, "last_price", 0.0),
+            "market_structure": analysis_data.get("market_structure", {}).get("current_trend", "NEUTRAL") if isinstance(analysis_data, dict) else getattr(analysis_data, "market_structure", {}).get("current_trend", "NEUTRAL"),
+            "zone_strength": analysis_data.get("zone_strength", 0) if isinstance(analysis_data, dict) else getattr(analysis_data, "zone_strength", 0),
+            "session": get_val(bot_instance, "current_session", "ASIAN"),
+            "zone": analysis_data.get("current_zone", "EQ") if isinstance(analysis_data, dict) else getattr(analysis_data, "current_zone", "EQ"),
+            "trades": formatted_trades,
+            "chart_overlays": {
+                "levels": {"pdh": pdh_val, "pdl": pdl_val},
+                "zones": {"equilibrium": zones_val.get("equilibrium") if isinstance(zones_val, dict) else None}
+            },
+            "news_event": {"title": "No major events scheduled", "time": "Market Calm"},
+            "chart_data": get_val(bot_instance, "chart_data", [])[-100:]
+        })
+    except Exception as e:
+        print(f"⚠️ Error building bot_state: {e}")
+
+# POST /webhook: receives payload from bot
+@app.post("/webhook")
+async def webhook(payload: dict = Body(...)):
+    try:
+        if "bot_instance" in payload and "analysis_data" in payload:
+            bot_inst = payload["bot_instance"]
+            analysis = payload["analysis_data"]
+        elif "bot" in payload and "analysis" in payload:
+            bot_inst = payload["bot"]
+            analysis = payload["analysis"]
+        else:
+            bot_inst = {}
+            analysis = {}
+            for k in ("market_structure", "zone_strength", "current_zone", "pdh", "pdl", "zones"):
+                if k in payload:
+                    analysis[k] = payload[k]
+            for k, v in payload.items():
+                if k not in analysis:
+                    bot_inst[k] = v
+
+        # Update internal state and PnL tracker
+        update_bot_state_v2(bot_inst, analysis)
+        return {"status": "ok"}
+    except Exception as e:
+        traceback.print_exc()
+        return {"status": "error", "reason": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
