@@ -7,21 +7,22 @@ class MarketStructureDetector:
     """SMC-oriented Market Structure Engine (Inducement-first).
 
     Responsibilities:
-    - Detect classic 5-bar fractals (swing highs/lows)
-    - Identify internal pullbacks and label the first Inducement (IDM) candidate
-    - Confirm IDM via wick-based sweep detection within a look-forward window
-    - Determine structure confirmation (MSS/CHOCH/BOS) only after IDM is swept
+    - Detect classic 5-bar fractals (swing highs/lows) but only confirm them after the
+      subsequent two candles have fully closed (prevents repainting).
+    - Identify internal pullbacks and label the first Inducement (IDM) candidate.
+    - Confirm IDM via wick-based sweep detection using only already-closed bars.
+    - Determine structure confirmation (MSS/CHOCH/BOS) only after IDM is swept.
 
     Notes:
     - Deterministic and timeframe-agnostic. Accepts pandas.DataFrame with columns
       ['time','open','high','low','close'].
     - Does NOT log to stdout; functions return structured dicts and reason codes.
-    - Default sweep look-forward window = 12 bars (parameterizable).
+    - All sweep / confirmation logic inspects only bars that have already closed.
     """
 
     def __init__(self, df: pd.DataFrame):
         self.df = df.copy() if df is not None else pd.DataFrame()
-        # Default look-forward window for sweep detection
+        # legacy default removed for look-ahead; not used now but retained for compatibility
         self.default_look_forward = 12
 
     # ---------------------- Helpers / Defaults ----------------------
@@ -41,25 +42,62 @@ class MarketStructureDetector:
             'reason_code': 'INSUFFICIENT_DATA'
         }
 
+    def _last_closed_index(self) -> Optional[int]:
+        """Return the index (integer position) of the most-recent fully-closed candle.
+
+        We consider a candle fully closed if its 'close' is not NaN. This protects
+        against passing partially-formed bars (common in live dataframes).
+        Returns None if dataframe is empty or no closed bars are found.
+        """
+        if self.df is None or len(self.df) == 0:
+            return None
+        # iterate backwards until we find a row where 'close' is not NaN
+        for i in range(len(self.df) - 1, -1, -1):
+            try:
+                c = self.df.iloc[i]['close']
+            except Exception:
+                c = None
+            if pd.notna(c):
+                return int(i)
+        return None
+
     # ---------------------- Fractal Detection ----------------------
     def detect_fractals(self) -> Dict[str, List[Dict]]:
         """Detect classic 5-bar fractals.
 
-        Returns:
-            {'swing_highs': [{'bar': int, 'price': float}, ...],
-             'swing_lows': [{'bar': int, 'price': float}, ...]}
-
-        Uses 0-based integer bar indices (positions within self.df).
+        Confirm a fractal only when the two subsequent candles after the candidate have
+        fully closed (prevents repainting). Uses 0-based integer bar indices (positions
+        within self.df).
         """
         if self.df is None or len(self.df) < 5:
+            return {'swing_highs': [], 'swing_lows': []}
+
+        last_closed = self._last_closed_index()
+        if last_closed is None or last_closed < 2:
             return {'swing_highs': [], 'swing_lows': []}
 
         highs = self.df['high'].values
         lows = self.df['low'].values
         swing_highs = []
         swing_lows = []
-        # 5-bar fractal: i is a fractal if it's extreme compared to two bars on each side
-        for i in range(2, len(self.df) - 2):
+
+        # Ensure we only consider candidate bars i for which i-2..i+2 exist and
+        # the two subsequent bars (i+1 and i+2) have closed (non-NaN close).
+        # The maximum candidate index is last_closed - 2 (so i+2 <= last_closed).
+        max_candidate = last_closed - 2
+        # Range start is 2 (needs two bars to left)
+        for i in range(2, max_candidate + 1):
+            # confirm the two subsequent closes are present (additional safety)
+            try:
+                c1 = self.df.iloc[i + 1]['close']
+                c2 = self.df.iloc[i + 2]['close']
+            except Exception:
+                continue
+            if pd.isna(c1) or pd.isna(c2):
+                # do not confirm until subsequent two closes exist
+                continue
+
+            # 5-bar fractal: i is a fractal if it's extreme compared to two bars on each side
             if (
                 highs[i] > highs[i - 1]
                 and highs[i] > highs[i - 2]
@@ -166,29 +204,30 @@ class MarketStructureDetector:
         )
         return out
 
-    # ---------------------- Sweep Detection ----------------------
-    def is_wick_sweep(self, target_price: float, start_bar: int, look_forward: Optional[int] = None) -> Dict:
-        """Detect if any wick pierces beyond target_price in the forward window.
+    # ---------------------- Sweep Detection (no look-ahead) ----------------------
+    def is_wick_sweep(self, target_price: float, start_bar: int) -> Dict:
+        """Detect if any wick pierces beyond target_price among already-closed bars.
 
-        Args:
-            target_price: price to test for being swept
-            start_bar: bar index from which to begin looking (inclusive)
-            look_forward: number of bars to scan forward (if None uses default)
+        Scans only bars that have fully closed (up to last closed index). This eliminates
+        look-ahead bias from scanning hypothetical future bars.
 
         Returns:
             {'is_sweep': bool, 'sweep_bar_index': int|None, 'sweep_price': float|None, 'sweep_wick_type': 'upper'|'lower'|None}
         """
-        if look_forward is None:
-            look_forward = self.default_look_forward
         n = len(self.df)
         if start_bar is None or start_bar < 0 or start_bar >= n:
             return {'is_sweep': False, 'sweep_bar_index': None, 'sweep_price': None, 'sweep_wick_type': None}
 
-        end = min(n, start_bar + 1 + look_forward)
+        last_closed = self._last_closed_index()
+        if last_closed is None or last_closed <= start_bar:
+            # No later closed bars to inspect
+            return {'is_sweep': False, 'sweep_bar_index': None, 'sweep_price': None, 'sweep_wick_type': None}
+
         highs = self.df['high'].values
         lows = self.df['low'].values
 
-        for idx in range(start_bar + 1, end):
+        # Scan from the bar immediately after start_bar up to the most recent fully-closed bar
+        for idx in range(start_bar + 1, last_closed + 1):
             # Upper wick sweep: high > target_price
             if highs[idx] > target_price:
                 return {'is_sweep': True, 'sweep_bar_index': int(idx), 'sweep_price': float(highs[idx]), 'sweep_wick_type': 'upper'}
@@ -198,8 +237,8 @@ class MarketStructureDetector:
 
         return {'is_sweep': False, 'sweep_bar_index': None, 'sweep_price': None, 'sweep_wick_type': None}
 
-    def confirm_idm_sweep(self, idm_bar_index: int, idm_price: float, idm_type: str, look_forward: Optional[int] = None) -> Dict:
-        """Confirm whether the provided IDM candidate was swept.
+    def confirm_idm_sweep(self, idm_bar_index: int, idm_price: float, idm_type: str) -> Dict:
+        """Confirm whether the provided IDM candidate was swept using only already-closed bars.
 
         - For a 'bullish' idm (in an uptrend) the sweep is a lower wick that pierces idm_price.
         - For a 'bearish' idm (in a downtrend) the sweep is an upper wick that pierces idm_price.
@@ -211,9 +250,14 @@ class MarketStructureDetector:
             out['reason_code'] = 'NO_IDM_INDEX'
             return out
 
-        sweep = self.is_wick_sweep(target_price=idm_price, start_bar=idm_bar_index, look_forward=look_forward)
+        sweep = self.is_wick_sweep(target_price=idm_price, start_bar=idm_bar_index)
         if not sweep['is_sweep']:
-            out['reason_code'] = 'IDM_NOT_SWEPT'
+            # If no later closed bars were present, provide explicit code
+            last_closed = self._last_closed_index()
+            if last_closed is None or last_closed <= idm_bar_index:
+                out['reason_code'] = 'NO_LATER_CLOSED_BARS'
+            else:
+                out['reason_code'] = 'IDM_NOT_SWEPT'
             return out
 
         # Validate sweep direction matches expectation
@@ -229,12 +273,12 @@ class MarketStructureDetector:
         return out
 
     # ---------------------- Structure Confirmation After IDM ----------------------
-    def determine_structure_after_idm(self, idm_info: Dict, look_forward: Optional[int] = None) -> Dict:
+    def determine_structure_after_idm(self, idm_info: Dict) -> Dict:
         """After IDM sweep is confirmed, determine whether structure (MSS/CHOCH/BOS) is confirmed.
 
         Conservative approach used:
         - If idm_info['is_idm_swept'] is False -> not confirmed
-        - If swept: look forward from sweep bar and detect a Break Of Structure (BOS)
+        - If swept: look forward from sweep bar only among already-closed bars and detect a Break Of Structure (BOS)
           defined as a close beyond the last fractal extreme in the opposite direction.
         - If BOS occurs and fractal ordering indicates a CHOCH, label CHOCH else MSS.
 
@@ -248,11 +292,15 @@ class MarketStructureDetector:
         fractals = self.detect_fractals()
         swing_highs = fractals['swing_highs']
         swing_lows = fractals['swing_lows']
-        n = len(self.df)
 
         sweep_bar = idm_info.get('idm_sweep_bar_index')
         if sweep_bar is None:
             out['reason_code'] = 'NO_SWEEP_BAR'
+            return out
+
+        last_closed = self._last_closed_index()
+        if last_closed is None or last_closed <= sweep_bar:
+            out['reason_code'] = 'NO_LATER_CLOSED_BARS'
             return out
 
         # Determine target BOS level depending on IDM type
@@ -262,10 +310,9 @@ class MarketStructureDetector:
                 out['reason_code'] = 'NO_SWING_HIGHS'
                 return out
             last_high = swing_highs[-1]['price']
-            # Look forward after sweep bar for a close > last_high
-            end = min(n, sweep_bar + 1 + (look_forward or self.default_look_forward))
             closes = self.df['close'].values
-            for idx in range(sweep_bar + 1, end):
+            # scan from sweep_bar+1 to last_closed inclusive
+            for idx in range(sweep_bar + 1, last_closed + 1):
                 if closes[idx] > last_high:
                     # BOS bullish detected
                     out.update({'structure_confirmed': True, 'bos_or_sweep_occurred': True, 'bos_level': float(last_high)})
@@ -284,9 +331,8 @@ class MarketStructureDetector:
             out['reason_code'] = 'NO_SWING_LOWS'
             return out
         last_low = swing_lows[-1]['price']
-        end = min(n, sweep_bar + 1 + (look_forward or self.default_look_forward))
         closes = self.df['close'].values
-        for idx in range(sweep_bar + 1, end):
+        for idx in range(sweep_bar + 1, last_closed + 1):
             if closes[idx] < last_low:
                 out.update({'structure_confirmed': True, 'bos_or_sweep_occurred': True, 'bos_level': float(last_low)})
                 if len(swing_highs) >= 2 and swing_highs[-1]['price'] >= swing_highs[-2]['price']:
@@ -299,7 +345,7 @@ class MarketStructureDetector:
         return out
 
     # ---------------------- Consolidated API ----------------------
-    def get_idm_state(self, look_forward: Optional[int] = None) -> Dict:
+    def get_idm_state(self) -> Dict:
         """Primary method to be used by the permission gate (main state machine).
 
         Returns a dict with explicit fields required by the calling code:
@@ -307,6 +353,9 @@ class MarketStructureDetector:
         - is_idm_swept, idm_sweep_bar_index, idm_sweep_price
         - structure_confirmed, mss_or_choch, bos_or_sweep_occurred, bos_level
         - reason_code (one of the structured reason codes)
+
+        Note: This version does NOT accept a look_forward argument and only reads
+        already-closed bars to avoid look-ahead bias.
         """
         # Validate data sufficiency
         if self.df is None or len(self.df) < 5:
@@ -324,8 +373,8 @@ class MarketStructureDetector:
         idm_price = label['idm_price']
         idm_type = label['idm_type']
 
-        # Step 2: confirm IDM sweep (look-forward)
-        sweep_info = self.confirm_idm_sweep(idm_bar_index=idm_bar, idm_price=idm_price, idm_type=idm_type, look_forward=look_forward)
+        # Step 2: confirm IDM sweep (only among already-closed bars)
+        sweep_info = self.confirm_idm_sweep(idm_bar_index=idm_bar, idm_price=idm_price, idm_type=idm_type)
 
         out = {**label}
         out.update(sweep_info)
@@ -345,8 +394,8 @@ class MarketStructureDetector:
             'idm_sweep_bar_index': sweep_info.get('idm_sweep_bar_index'),
             'idm_type': idm_type,
         }
-         # day 5 for checking the integration working preopely for oeping mt5 or not 
-        structure_info = self.determine_structure_after_idm(idm_info, look_forward=look_forward)
+
+        structure_info = self.determine_structure_after_idm(idm_info)
 
         out.update(structure_info)
         return out
