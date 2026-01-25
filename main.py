@@ -72,6 +72,12 @@ def compute_atr_from_df(df: pd.DataFrame, period: int = 14) -> float:
 
 def is_trading_session():
     now = datetime.now(pytz.utc)
+    
+    # 🛑 NEW: Check if it's Saturday (5) or Sunday (6)
+    # This prevents the bot from thinking it's "New York Session" on a Sunday
+    if now.weekday() >= 5: 
+        return False, "WEEKEND_MARKET_CLOSED"
+
     t = now.hour + now.minute / 60.0
     if 8.0 <= t < 16.0:
         if 13.0 <= t < 16.0:
@@ -79,6 +85,8 @@ def is_trading_session():
         return True, "LONDON"
     if 16.0 <= t < 21.0:
         return True, "NY_SESSION"
+    
+    # If it's a weekday but outside trading hours (e.g., 22:00 UTC)
     return False, "ASIAN"
 
 def map_session_for_filter(session_name: str) -> str:
@@ -146,6 +154,8 @@ class XAUUSDTradingBot:
         self.risk_per_trade_percent = 0.5
         self.current_session = "UNKNOWN"
         self.dry_run = DRY_RUN
+        # Reaction logic: waiting for confirmation after HTF POI hit
+        self.waiting_for_confirmation = False
 
     # MT5 wrappers
     def mt5_initialize(self):
@@ -266,9 +276,58 @@ class XAUUSDTradingBot:
         is_active, session_name = is_trading_session()
         session_norm = map_session_for_filter(session_name)
         self.current_session = session_norm
+
+        # ==============================================================================
+        # NEW: WEEKEND/SLEEP HEARTBEAT
+        # If market is closed, update dashboard with balance/status BEFORE sleeping
+        # ==============================================================================
         if not is_active:
-            print(f"⏸️ Market session '{session_norm}' not active for trading — sleeping")
-            return
+            print(f"⏸️ Market session '{session_norm}' not active for trading — sending heartbeat and sleeping")
+            
+            # 1. Get Account Balance so Dashboard isn't $0.00
+            acct = self.mt5_get_account()
+            equity = 0.0
+            balance = 0.0
+            if acct:
+                try:
+                    equity = float(getattr(acct, 'equity', 0.0))
+                    balance = float(getattr(acct, 'balance', 0.0))
+                except Exception:
+                    pass
+            
+            # Apply your specific fallback if balance is read as 0
+            if equity == 0.0 and balance == 0.0:
+                equity = 77829.40
+                balance = 77829.40
+
+            # 2. Send "Sleep Mode" Data to Dashboard
+            # We send empty chart data and "CLOSED" status to keep the UI alive
+            bot_data = {
+                "equity": equity,
+                "balance": balance,
+                "last_price": 0,
+                "open_positions": self.open_positions,
+                "closed_trades": [],
+                "chart_data": [], 
+                "current_session": session_norm 
+            }
+            
+            analysis = {
+                "market_structure": {"current_trend": "MARKET CLOSED"},
+                "zone_strength": 0,
+                "current_zone": "CLOSED",
+                "pdh": 0,
+                "pdl": 0,
+                "zones": {}
+            }
+            
+            # 3. Send the webhook
+            send_to_dashboard(bot_data, analysis)
+            return  # <--- STOP HERE (Do not run analysis logic)
+
+        # ==============================================================================
+        # ACTIVE TRADING LOGIC (Your Original Code)
+        # ==============================================================================
 
         market_data, current_price = self.fetch_and_prepare()
         if market_data is None or current_price is None:
@@ -299,9 +358,14 @@ class XAUUSDTradingBot:
 
         try:
             ms_detector = MarketStructureDetector(market_data)
-            ms = ms_detector.get_market_structure_analysis()
+            # note: older code tried to call get_market_structure_analysis; keep compatibility but prefer get_idm_state
+            try:
+                ms = ms_detector.get_market_structure_analysis()
+            except Exception:
+                ms = {"current_trend": "NEUTRAL", "choch_detected": False, "bos_level": None}
         except Exception:
             ms = {"current_trend": "NEUTRAL", "choch_detected": False, "bos_level": None}
+            ms_detector = None
 
         try:
             latest_high = float(market_data['high'].max()) if 'high' in market_data.columns else price_for_zones
@@ -320,6 +384,7 @@ class XAUUSDTradingBot:
         except Exception:
             current_zone = "UNKNOWN"
             zone_strength = 0
+            zone_summary = {}
 
         try:
             vol_an = GoldVolumeAnalyzer(market_data)
@@ -343,11 +408,32 @@ class XAUUSDTradingBot:
         print(f"🏗 Market Structure: {ms.get('current_trend','NEUTRAL')} | BO S/CHOCH: {ms.get('choch_detected')}")
         print(f"📈 Volume spike: {volume_spike} (ratio {vol_spike:.2f} if available)")
 
+        # Reaction logic: detect HTF POI hit and set waiting_for_confirmation
         try:
-            smc_state = ms_detector.get_idm_state() if hasattr(ms_detector, 'get_idm_state') else {}
-            print(f"🌊 Liquidity Swept: {smc_state.get('liquidity_swept', False)}")
-            print(f"🪤 IDM Taken: {smc_state.get('idm_taken', False)}")
-            print(f"🧱 BOS Confirmed: {smc_state.get('bos_confirmed', False)}")
+            hit_poi = False
+            if zone_summary:
+                # ZoneCalculator implementations often expose a 'hit_poi' or similar flag in the summary.
+                hit_poi = bool(zone_summary.get('hit_poi') or zone_summary.get('price_hit_poi') or zone_summary.get('near_poi'))
+            # Fallback conservative heuristic: strong zone and price is in DISCOUNT/PREMIUM
+            if not hit_poi and zone_strength >= 30 and current_zone in ("DISCOUNT", "PREMIUM"):
+                # This is a conservative proxy for "price hit meaningful HTF POI"
+                hit_poi = True
+
+            if hit_poi and not self.waiting_for_confirmation:
+                self.waiting_for_confirmation = True
+                print("⏳ HTF POI hit — waiting for M5 CHoCH confirmation before entering trades")
+
+        except Exception:
+            pass
+
+        try:
+            smc_state = {}
+            if ms_detector is not None and hasattr(ms_detector, 'get_idm_state'):
+                smc_state = ms_detector.get_idm_state()
+            print(f"🌊 IDM present: {smc_state.get('is_idm_present', False)}")
+            print(f"🪤 IDM swept: {smc_state.get('is_idm_swept', False)}")
+            print(f"🧱 Structure confirmed: {smc_state.get('structure_confirmed', False)}")
+            print(f"   MSS/CHOCH: {smc_state.get('mss_or_choch', 'NONE')} | reason: {smc_state.get('reason_code')}")
         except Exception as e:
             print(f"⚠️ SMC state unavailable: {e}")
             smc_state = {}
@@ -355,37 +441,59 @@ class XAUUSDTradingBot:
         print("-" * 60)
 
         try:
-            idm_taken = smc_state.get('idm_taken', False)
-            liquidity_swept = smc_state.get('liquidity_swept', False)
-            bos_confirmed = smc_state.get('bos_confirmed', False)
+            # Determine whether we've seen a CHoCH on the timeframe used by the market-structure detector
+            mss_or_choch = smc_state.get('mss_or_choch', '') or ''
+            choch_detected = str(mss_or_choch).upper().startswith('CHOCH')
+
+            idm_taken = smc_state.get('is_idm_swept', False)
+            # prevent trading on a fractal/IDM that is still forming: enforce IDM bar is at least two bars older than last index
+            idm_bar_index = smc_state.get('idm_bar_index')
+            still_forming = False
+            try:
+                if idm_bar_index is not None and isinstance(idm_bar_index, int):
+                    last_closed_idx = ms_detector._last_closed_index() if ms_detector is not None else (len(market_data)-1)
+                    # require IDM bar to be at least two bars older than the most recent closed bar
+                    if last_closed_idx is None or idm_bar_index > (last_closed_idx - 2):
+                        still_forming = True
+                        print("⚠️ IDM/fractal still forming — deferring trade until fractal confirmed by two subsequent closes")
+            except Exception:
+                still_forming = False
+
+            bos_confirmed = smc_state.get('structure_confirmed', False)
+
+            # Reaction logic: only trade if waiting_for_confirmation and CHoCH detected (M5 CHoCH requirement)
+            # Additionally, ensure fractal/IDM isn't still forming
+            can_execute_ch_confirmation = (self.waiting_for_confirmation and choch_detected and not still_forming)
 
             if (mtf_conf.get("overall_bias") == "BULLISH" and
                 current_zone == "DISCOUNT" and
                 zone_strength >= 30 and
-                idm_taken == True):
+                idm_taken == True and
+                can_execute_ch_confirmation):
                 final_signal = "BUY"
-                reason = "Institutional Buy: Discount + Bullish + IDM Swept"
+                reason = "Institutional Buy: Discount + Bullish + IDM Swept + M5 CHoCH confirmation"
             elif (mtf_conf.get("overall_bias") == "BEARISH" and
                   current_zone == "PREMIUM" and
                   zone_strength >= 30 and
-                  idm_taken == True):
+                  idm_taken == True and
+                  can_execute_ch_confirmation):
                 final_signal = "SELL"
-                reason = "Institutional Sell: Premium + Bearish + IDM Swept"
-            elif zone_strength >= 70 and idm_taken == True:
+                reason = "Institutional Sell: Premium + Bearish + IDM Swept + M5 CHoCH confirmation"
+            elif zone_strength >= 70 and idm_taken == True and can_execute_ch_confirmation:
                 if current_zone == "DISCOUNT":
                     final_signal = "BUY"
-                    reason = "Strong Discount zone + IDM confirmed"
+                    reason = "Strong Discount zone + IDM confirmed + M5 CHoCH"
                 elif current_zone == "PREMIUM":
                     final_signal = "SELL"
-                    reason = "Strong Premium zone + IDM confirmed"
+                    reason = "Strong Premium zone + IDM confirmed + M5 CHoCH"
             else:
                 final_signal = "HOLD"
-                if not idm_taken:
-                    reason = "Waiting for Inducement (IDM) sweep"
-                elif current_zone == "PREMIUM" and mtf_conf.get("overall_bias") == "BULLISH":
-                    reason = "Price in Premium (expensive) - waiting for Discount pullback"
-                elif current_zone == "DISCOUNT" and mtf_conf.get("overall_bias") == "BEARISH":
-                    reason = "Price in Discount (cheap) - waiting for Premium rally"
+                if not self.waiting_for_confirmation:
+                    reason = "Waiting for HTF POI hit (no confirmation flag set)"
+                elif not choch_detected:
+                    reason = "Waiting for M5 CHoCH confirmation"
+                elif still_forming:
+                    reason = "Fractal/IDM still forming - need 2 confirmed closes after candidate"
                 elif zone_strength < 30:
                     reason = f"Zone too weak ({zone_strength:.0f}%) - need ≥30%"
                 else:
@@ -451,6 +559,8 @@ class XAUUSDTradingBot:
                 self.trade_log.append(log_entry)
                 self.save_trade_log()
                 print(f"✅ Tracked new position (ticket: {ticket})")
+                # Clear waiting flag after we commit a trade so we don't immediately re-enter
+                self.waiting_for_confirmation = False
             else:
                 print("❌ Order failed or rejected")
         else:
@@ -464,6 +574,8 @@ class XAUUSDTradingBot:
                 "zone_strength": zone_strength,
                 "mtf": mtf_conf,
                 "market_structure": ms,
+                "smc_state": smc_state,
+                "waiting_for_confirmation": self.waiting_for_confirmation,
                 "reason": reason
             })
             if len(self.trade_log) > 1000:
