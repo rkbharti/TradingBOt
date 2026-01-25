@@ -684,7 +684,7 @@ class LiquidityDetector:
                 "is_external": True,
                 "meta": {},
             }
-
+ # impprove liquidty code from detecting fake brekaout to true finding liquidity
         fr = self.detect_fractals()
         for h in fr.get("swing_highs", []):
             out["swing_highs"].append({"price": h["price"], "bar": h["bar"], "time": h["time"], "is_external": False, "meta": h.get("meta", {})})
