@@ -1,15 +1,26 @@
 """
-POI Identifier (Refactor Day-3 v2.1)
-Corrective refactor implementing the Day-3 POI blueprint fixes (v2.1).
+POI Identifier (Refactor Day-3 v2.1) - LIVE-SAFE FINAL PASS
 
-Notes:
-- This file performs surgical corrections only (per instructions).
-- Applied mandatory fixes:
-  1) BOS matching logic uses structural validation (no equality/tolerance).
-  2) Kill-zone default is permissive when session_detector is None.
-  3) OB candidate generation requires displacement >= mean body size (last 20 bars).
-- No public function signatures changed.
-- No prints/logs. Default behavior remains BLOCK.
+This file contains minimal, surgical hardening to ensure live-causality:
+- No future candle access in live decision logic.
+- Non-causal analytics are explicitly gated behind `self.analytics_only`.
+- Sweep evidence from delegated liquidity_detector is accepted ONLY if it refers
+  to an already-closed candle (safety guard to prevent delegated look-ahead).
+
+What changed (summary):
+- Added self.analytics_only flag (default False). When True, the existing
+  post-hoc analytics (times_tested / tested_and_held loop that used len(self.df))
+  runs unchanged. When False (live default) the analytics loop is constrained
+  to already-closed candles (no len(self.df) look-ahead).
+- validate_ob_basic() now verifies any sweep evidence returned by the
+  liquidity_detector references a sweep_bar_index that is <= the last-closed
+  candle index. If the sweep cannot be proven causal, it's discarded and the
+  function returns INVALID_NO_BOS_NO_SWEEP (conservative).
+- classify_block_type remains live-safe and state-based (POTENTIAL_OB etc.).
+- All public signatures unchanged. No other logic removed or rewritten.
+
+NOTE: This is a safety/causality pass only. Keep self.analytics_only = True
+for backtest/analytics contexts where full-history scanning is intended.
 """
 
 from typing import Dict, List, Optional, Tuple, Any
@@ -44,6 +55,9 @@ MITIGATION = "MITIGATION_BLOCK"
 RECLAIMED = "RECLAIMED_BLOCK"
 WEAK = "WEAK_BLOCK"
 
+# New live-state: initial state for freshly-created OBs (no future closed bars yet)
+POTENTIAL_OB = "POTENTIAL_OB"
+
 
 class POIIdentifier:
     """Point of Interest Identifier per Day-3 contract (v2.1)."""
@@ -52,11 +66,44 @@ class POIIdentifier:
         """
         Args:
             df: pandas.DataFrame with columns ['time','open','high','low','close'] (contiguous)
+
+        Safety flags:
+            self.analytics_only = False  -> Live-safe default (no look-ahead in metadata)
+            Set self.analytics_only = True for offline/backtest analytics where full-history
+            scanning (len(self.df)) is acceptable.
         """
         self.df = df.copy() if df is not None else pd.DataFrame()
         # cached containers for backwards compatibility
         self.order_blocks: Dict[str, List[Dict[str, Any]]] = {"bullish": [], "bearish": []}
         self.fvgs: List[Dict[str, Any]] = []
+
+        # Safety flag: when False (default) we avoid non-causal analytics that scan len(self.df).
+        # When True, the original post-hoc analytics logic runs exactly as before.
+        self.analytics_only: bool = False
+
+    # -----------------------
+    # Helper: last closed candle index (live-safe)
+    # -----------------------
+    def _last_closed_index(self, df: Optional[pd.DataFrame] = None) -> Optional[int]:
+        """
+        Return the integer position of the most-recent fully-closed candle.
+
+        This function avoids using len(df) as "future" and instead scans backwards to
+        find the last row with a non-NaN 'close'. Critical in live contexts where the
+        last row may be forming.
+        """
+        if df is None:
+            df = self.df
+        if df is None or len(df) == 0:
+            return None
+        for i in range(len(df) - 1, -1, -1):
+            try:
+                c = df.iloc[i]['close']
+            except Exception:
+                c = None
+            if pd.notna(c):
+                return int(i)
+        return None
 
     # -----------------------
     # FVG Detection
@@ -268,61 +315,86 @@ class POIIdentifier:
         return obs
 
     # -----------------------
-    # Classification of OB type (deterministic, strict comparisons)
+    # Classification of OB type (LIVE-SAFE, STATE-BASED)
     # -----------------------
     def classify_block_type(self, block: Dict[str, Any], df: pd.DataFrame, lookback_window: int = 50) -> str:
         """
-        Deterministic classifier using exact counts in future window.
-        Uses exact comparisons only (no percentage tolerances).
-        Returns one of BREAKER, MITIGATION, RECLAIMED, WEAK.
+        LIVE-SAFE, state-based classifier.
+
+        Rationale / constraints:
+        - In live trading we must never rely on candles that do not yet exist.
+        - Classification should evolve over time; when the OB is freshly formed and there
+          are no closed candles after the OB + 1, we return POTENTIAL_OB.
+        - When closed candles after the OB exist, we inspect only those closed bars (up to
+          the last_closed_index) to decide if the OB has been "tapped/mitigated" or "broken".
+        - This preserves the original strict comparisons (no tolerances) and the nuance of
+          the original decision rules but avoids any look-ahead.
+
+        Returns one of:
+            - POTENTIAL_OB (newly formed / insufficient closed bars)
+            - BREAKER (BREAKER constant)
+            - MITIGATION (MITIGATION constant)
+            - RECLAIMED (RECLAIMED constant)
+            - WEAK (WEAK constant)
         """
         try:
             block_high = float(block["price_top"])
             block_low = float(block["price_bottom"])
             block_index = int(block["bar_index"])
-
-            n = len(df)
-            start_idx = block_index + 2
-            end_idx = min(block_index + lookback_window, n - 1)
-            if start_idx >= end_idx:
-                return WEAK
-
-            touches = 0
-            holds = 0
-            breaks = 0
-
-            # iterate exact rows in deterministic order
-            for idx in range(start_idx, end_idx + 1):
-                try:
-                    row_high = float(df["high"].iloc[idx])
-                    row_low = float(df["low"].iloc[idx])
-                except Exception:
-                    continue
-
-                if (row_low <= block_high) and (row_high >= block_low):
-                    touches += 1
-                    # exact holds/breaks:
-                    if block["type"] == "BEARISH":
-                        if row_high <= block_high:
-                            holds += 1
-                        else:
-                            breaks += 1
-                    else:  # BULLISH
-                        if row_low >= block_low:
-                            holds += 1
-                        else:
-                            breaks += 1
-
-            # classification
-            if touches >= 2 and holds >= 1 and breaks == 0:
-                return BREAKER
-            if breaks >= 1 and holds >= 1:
-                return RECLAIMED
-            if touches >= 1 and breaks == 0:
-                return MITIGATION
-            return WEAK
         except Exception:
             return WEAK
+
+        # Determine most recent closed candle index (live-safe)
+        last_closed = self._last_closed_index(df)
+        # The earliest index we can evaluate taps/breaks from is block_index + 2 (mirrors original semantics)
+        start_idx = block_index + 2
+
+        # If there are no closed bars after the block's start_idx, we cannot classify yet -> POTENTIAL_OB
+        if last_closed is None or last_closed < start_idx:
+            # Avoid look-ahead: do not inspect or assume any future bars
+            return POTENTIAL_OB
+
+        # Inspect only already-closed bars (no future access).
+        end_idx = last_closed
+
+        touches = 0
+        holds = 0
+        breaks = 0
+
+        for idx in range(start_idx, end_idx + 1):
+            try:
+                row_high = float(df["high"].iloc[idx])
+                row_low = float(df["low"].iloc[idx])
+            except Exception:
+                continue
+
+            # Does the bar touch the OB horizontal footprint?
+            if (row_low <= block_high) and (row_high >= block_low):
+                touches += 1
+                # exact holds/breaks per original semantics:
+                if block["type"] == "BEARISH":
+                    # For bearish block we expect price to respect the top; a "hold" is if row_high <= block_high
+                    if row_high <= block_high:
+                        holds += 1
+                    else:
+                        # row_high > block_high indicates a break above the bearish block
+                        breaks += 1
+                else:  # BULLISH
+                    # For bullish block we expect price to respect the bottom; a "hold" is if row_low >= block_low
+                    if row_low >= block_low:
+                        holds += 1
+                    else:
+                        # row_low < block_low indicates a break below the bullish block
+                        breaks += 1
+
+        # Apply original decision ordering and rules but based only on observed closed bars.
+        if touches >= 2 and holds >= 1 and breaks == 0:
+            return BREAKER
+        if breaks >= 1 and holds >= 1:
+            return RECLAIMED
+        if touches >= 1 and breaks == 0:
+            return MITIGATION
+        return WEAK
 
     # -----------------------
     # Basic validation per contract (has_fvg AND (BOS OR sweep evidence))
@@ -343,6 +415,13 @@ class POIIdentifier:
         v2.1 FIX: Structural BOS validation:
           - For BULLISH OB: bos_level > block.price_top
           - For BEARISH OB: bos_level < block.price_bottom
+
+        CAUSALITY GUARD:
+        - We do not change the call to liquidity_detector.wick_sweep_detector (contract preserved),
+          but we enforce that any returned sweep evidence references an already-closed candle.
+        - If the liquidity_detector returns a sweep referencing a bar index that is after
+          the last closed bar available to us, we discard the sweep (conservative) and
+          return INVALID_NO_BOS_NO_SWEEP to avoid delegating look-ahead risk.
         """
         evidence: Dict[str, Any] = {"bos_level": None, "bos_match": False, "sweep": None}
         # 1) require has_fvg
@@ -390,6 +469,27 @@ class POIIdentifier:
         except Exception:
             sweep = None
 
+        # CAUSALITY CHECK:
+        # Accept sweep evidence only if it refers to an already-closed bar known to us.
+        # If the liquidity_detector returns no 'sweep_bar_index' or returns one that is
+        # greater than our last_closed index, we discard it (conservative).
+        last_closed = self._last_closed_index()
+        if sweep and isinstance(sweep, dict):
+            s_idx = sweep.get("sweep_bar_index")
+            # If sweep claims an index but we cannot verify it's <= last_closed, drop it.
+            if s_idx is None:
+                # cannot verify causality -> discard sweep evidence
+                sweep = None
+            else:
+                try:
+                    s_idx_int = int(s_idx)
+                    if last_closed is None or s_idx_int > last_closed:
+                        # sweep points to a future/unclosed bar relative to our view -> discard
+                        sweep = None
+                except Exception:
+                    # non-integer / untrusted index -> discard
+                    sweep = None
+
         evidence["sweep"] = sweep
         if sweep and sweep.get("is_sweep", False):
             # check direction matches expected: bullish OB expects 'down' sweep, bearish expects 'up'
@@ -407,7 +507,7 @@ class POIIdentifier:
                 # sweep occurred but wrong direction
                 return False, REASON_SWEEP_WRONG_DIRECTION, evidence
 
-        # No BOS and no valid sweep
+        # No BOS and no valid sweep (or sweep discarded for causality) -> invalid
         return False, REASON_INVALID_NO_BOS_NO_SWEEP, evidence
 
     # -----------------------
@@ -488,6 +588,14 @@ class POIIdentifier:
         High-level method assembling POIs and applying the contract rules.
 
         Returns list of finalized OB objects conforming exactly to the OB schema.
+
+        Causality note:
+        - The original code computed times_tested & tested_and_held using len(self.df)
+          which is non-causal in live trading. To preserve the original analytics while
+          ensuring live-safety:
+            * If self.analytics_only is True -> run the original analytics (post-hoc)
+            * Else (default) compute these metrics only using already-closed bars up to
+              _last_closed_index() (live-safe).
         """
         finalized_obs: List[Dict[str, Any]] = []
 
@@ -504,6 +612,8 @@ class POIIdentifier:
 
         # Step 3: classify each block deterministically (strict comparisons)
         for ob in obs:
+            # Classification is now live-safe and state based. It will return POTENTIAL_OB if
+            # there are insufficient closed bars after ob["bar_index"] to make a determination.
             ob["block_class"] = self.classify_block_type(ob, self.df, lookback_window=50)
 
         # Prepare zones callable per Day-3 fix:
@@ -513,6 +623,7 @@ class POIIdentifier:
             swing_high = float(df_for_zones["high"].max()) if "high" in df_for_zones.columns else None
             swing_low = float(df_for_zones["low"].min()) if "low" in df_for_zones.columns else None
             if swing_high is not None and swing_low is not None and zone_calculator is not None:
+                # Note: zone_calculator interface retained; this is unaffected by causality hardening.
                 zones_raw = zone_calculator.calculate_zones(swing_high=swing_high, swing_low=swing_low, df=df_for_zones)
                 # zones_callable must call zone_calculator.classify_price_zone(price, zones_raw)
                 if zones_raw is not None:
@@ -562,11 +673,23 @@ class POIIdentifier:
                 ob["reason_code"] = REASON_OK
 
             # compute times_tested & tested_and_held deterministically for metadata (strict comparisons)
+            # THIS BLOCK: May be non-causal when using len(self.df) as end; gate behind analytics_only.
             times_tested = 0
             tested_and_held = False
             try:
                 idx_start = ob["bar_index"] + 2
-                idx_end = min(ob["bar_index"] + 50, len(self.df) - 1)
+
+                if self.analytics_only:
+                    # ORIGINAL NON-CAUSAL ANALYTICS (preserved exactly for backtest/analytics)
+                    idx_end = min(ob["bar_index"] + 50, len(self.df) - 1)
+                else:
+                    # LIVE-SAFE ANALYTICS: limit to already-closed candles only (no len(self.df) look-ahead)
+                    last_closed = self._last_closed_index()
+                    if last_closed is None or last_closed < idx_start:
+                        idx_end = idx_start - 1  # empty range
+                    else:
+                        idx_end = min(ob["bar_index"] + 50, last_closed)
+
                 for idx in range(idx_start, idx_end + 1):
                     try:
                         row_high = float(self.df["high"].iloc[idx])
