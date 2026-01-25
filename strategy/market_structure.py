@@ -345,7 +345,7 @@ class MarketStructureDetector:
             'idm_sweep_bar_index': sweep_info.get('idm_sweep_bar_index'),
             'idm_type': idm_type,
         }
-
+         # day 5 for checking the integration working preopely for oeping mt5 or not 
         structure_info = self.determine_structure_after_idm(idm_info, look_forward=look_forward)
 
         out.update(structure_info)
