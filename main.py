@@ -9,6 +9,12 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pytz
 import requests
+import signal
+import sys
+from utils.observation_logger import ObservationLogger
+obs_logger = ObservationLogger()
+obs_logger.bot_started()
+
 
 # Local modules (must exist per your directory structure)
 from utils.mt5_connection import MT5Connection
@@ -17,6 +23,10 @@ from strategy.market_structure import MarketStructureDetector
 from strategy.smc_enhanced.zones import ZoneCalculator
 from strategy.idea_memory import IdeaMemory
 from utils.volume_analyzer_gold import GoldVolumeAnalyzer
+
+
+
+
 
 # Note: we no longer rely on direct in-process server imports.
 # Communication to the dashboard is done via webhook POST to the server.
@@ -135,6 +145,17 @@ def send_to_dashboard(bot_data: dict, analysis: dict, endpoint: str = "http://lo
     except Exception as e:
         print(f"   ❌ Dashboard unexpected error: {e}")
         return False
+
+
+def graceful_shutdown(signum=None, frame=None):
+    print("🛑 Graceful shutdown initiated")
+    try:
+        obs_logger.bot_stopped()
+    except Exception as e:
+        print(f"⚠️ Failed to log bot stop: {e}")
+    sys.exit(0)
+signal.signal(signal.SIGINT, graceful_shutdown)   # Ctrl+C
+signal.signal(signal.SIGTERM, graceful_shutdown)  # Kill / stop
 
 # ---------- Bot ----------
 
@@ -710,7 +731,12 @@ def main():
         print("\n🛑 Stopped by user")
     finally:
         bot.running = False
+        try:
+            obs_logger.bot_stopped()
+        except Exception:
+            pass
         bot.cleanup()
+
 
 if __name__ == "__main__":
     main()
