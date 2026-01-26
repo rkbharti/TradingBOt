@@ -2,8 +2,12 @@
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Lock
+
+
+
+
 
 class OBObservationLogger:
     def __init__(self, path="research/ob_observations.json"):
@@ -20,7 +24,7 @@ class OBObservationLogger:
 
     def log(self, payload: dict):
         payload = dict(payload)
-        payload["logged_at"] = datetime.utcnow().isoformat()
+        payload["logged_at"] = datetime.now(timezone.utc).isoformat()
 
         with self._lock:
             try:
@@ -33,3 +37,4 @@ class OBObservationLogger:
 
             with open(self.path, "w") as f:
                 json.dump(data, f, indent=2)
+    
