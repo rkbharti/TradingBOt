@@ -1,36 +1,58 @@
----
+# TradingBot Observation Log
 
-#--------------------------------------------------------------------------------------------#
+# rkbharti-tradingbot — SMC / Guardeer Methodology
+
+# --------------------------------------------------------------------------------------------
 
 ## 2026-01-25 — Observation Phase Initiated
+
+# --------------------------------------------------------------------------------------------
 
 ### Work Done
 
 - Initialized research and observation workflow
-- Verified live-safe POI logic and causality guards
-- Started unattended overnight run for data collection
+- Audited POI logic for live causality and removed look-ahead bias
+- Verified Order Block (OB) identification fixes
+- Started unattended overnight run for baseline data collection
 
 ### Bot Status
 
 - Mode: DRY_RUN
-- Bot running through NY session close
-- Observation logging active
+- Session Coverage: NY session into market close
+- Observation logging: ENABLED
 
 ### Notes
 
 - Bot intentionally left running overnight
-- Full stop-time and execution summary will be recorded on shutdown
+- No execution logic modified during observation phase
+- Shutdown summary to be captured automatically on graceful stop
 
-#-------------------------------------------------------------------------------------------------#
+# --------------------------------------------------------------------------------------------
 
-## 2026-01-26 — Observation Phase Initiated
+## 2026-01-26 — Observation Phase (Day 2)
 
-# 09:27pm - Bot running for overnight
+# --------------------------------------------------------------------------------------------
 
-## DAY-2
+### Status (09:27 PM IST)
 
-- As i leave the bot for continuous running without stopping it manually to cehck the crash
-- we will add the log data for the whole day for MONDAY trading exluding asia session
+- Bot running continuously
+- No manual restarts or interruptions
+- Monitoring stability and crash-resilience
+
+### Focus for the Day
+
+- Collect full MONDAY trading data (London + NY sessions)
+- Asian session intentionally excluded from execution
+- Observe:
+  - Which Order Blocks are formed
+  - Which OBs are tapped but ignored
+  - Which OBs lead to confirmation states
+
+### Notes
+
+- Bot left running without manual intervention
+- Primary goal: collect clean behavioral evidence, not profitability
+- No strategy or execution changes introduced today
 
 ### End of Day
 
