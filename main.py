@@ -582,6 +582,25 @@ class XAUUSDTradingBot:
                 print(f"✅ Tracked new position (ticket: {ticket})")
                 # Clear waiting flag after we commit a trade so we don't immediately re-enter
                 self.waiting_for_confirmation = False
+
+                # OBSERVATION ONLY: Passive logging of trade entry
+                if obs_logger:
+                    try:
+                        obs_logger.log_event({
+                            "event_type": "TRADE_OPEN",
+                            "ticket": ticket,
+                            "signal": final_signal,
+                            "entry_price": entry_price,
+                            "stop_loss": sl,
+                            "take_profit": tp,
+                            "lot_size": lot,
+                            "reason": reason,
+                            "session": self.current_session,
+                            "market_structure": ms,
+                            "mtf_bias": mtf_conf.get('overall_bias')
+                        })
+                    except Exception:
+                        pass
             else:
                 print("❌ Order failed or rejected")
         else:
@@ -602,6 +621,24 @@ class XAUUSDTradingBot:
             if len(self.trade_log) > 1000:
                 self.trade_log = self.trade_log[-1000:]
             self.save_trade_log()
+
+        # OBSERVATION ONLY: Log analysis state regardless of trade action
+        if obs_logger:
+            try:
+                obs_logger.log_event({
+                    "event_type": "ANALYSIS_STATE",
+                    "timestamp": datetime.now().isoformat(),
+                    "price": bid,
+                    "current_zone": current_zone,
+                    "zone_strength": zone_strength,
+                    "mtf_bias": mtf_conf.get("overall_bias", "NEUTRAL"),
+                    "final_signal": final_signal,
+                    "reason": reason,
+                    "waiting_for_confirmation": self.waiting_for_confirmation,
+                    "smc_state": smc_state
+                })
+            except Exception:
+                pass
 
         # ===== Dashboard webhook update (always try; fail silently) =====
         try:
