@@ -218,12 +218,26 @@ class POIIdentifier:
 
             # Apply tightened candidate generation with displacement filter:
 
-            # Bearish candidate: curr_close < curr_open AND next_low < curr_low AND body_size >= mean_body_size
-            if (curr_close < curr_open) and (next_low < curr_low) and (abs(curr_close - curr_open) >= mean_body_size):
+            # NOTE (CRITICAL FIX):
+            # The previous implementation incorrectly treated momentum candles as the OB origin.
+            # Per canonical definition we must mark the LAST OPPOSING (origin) candle as the OB:
+            # - Bullish OB: the last BEARISH candle immediately BEFORE an impulsive bullish move.
+            # - Bearish OB: the last BULLISH candle immediately BEFORE an impulsive bearish move.
+            #
+            # Therefore we flip the polarity checks below while keeping the displacement/body-size
+            # filter unchanged (body_size is still computed from 'curr' for determinism).
+            #
+            # The bar_index remains the index of the opposing/origin candle (curr), NOT the momentum candle.
+
+            # Bullish candidate (corrected):
+            # - curr is BEARISH (opposing candle)
+            # - next candle shows upward displacement (next_high > curr_high)
+            # - body_size filter unchanged (abs(curr body) >= mean_body_size)
+            if (curr_close < curr_open) and (next_high > curr_high) and (abs(curr_close - curr_open) >= mean_body_size):
                 ob = {
-                    "id": f"OB:{bar_index}:BEARISH",
-                    "type": "BEARISH",
-                    "bar_index": int(bar_index),
+                    "id": f"OB:{bar_index}:BULLISH",
+                    "type": "BULLISH",
+                    "bar_index": int(bar_index),  # index of the opposing (bearish) candle by design
                     "time": pd.to_datetime(curr["time"]) if "time" in curr else None,
                     "price_top": float(curr_high),
                     "price_bottom": float(curr_low),
@@ -251,12 +265,15 @@ class POIIdentifier:
                 }
                 ob_candidates.append(ob)
 
-            # Bullish candidate: curr_close > curr_open AND next_high > curr_high AND body_size >= mean_body_size
-            if (curr_close > curr_open) and (next_high > curr_high) and (abs(curr_close - curr_open) >= mean_body_size):
+            # Bearish candidate (corrected):
+            # - curr is BULLISH (opposing candle)
+            # - next candle shows downward displacement (next_low < curr_low)
+            # - body_size filter unchanged (abs(curr body) >= mean_body_size)
+            if (curr_close > curr_open) and (next_low < curr_low) and (abs(curr_close - curr_open) >= mean_body_size):
                 ob = {
-                    "id": f"OB:{bar_index}:BULLISH",
-                    "type": "BULLISH",
-                    "bar_index": int(bar_index),
+                    "id": f"OB:{bar_index}:BEARISH",
+                    "type": "BEARISH",
+                    "bar_index": int(bar_index),  # index of the opposing (bullish) candle by design
                     "time": pd.to_datetime(curr["time"]) if "time" in curr else None,
                     "price_top": float(curr_high),
                     "price_bottom": float(curr_low),
