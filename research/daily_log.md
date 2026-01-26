@@ -31,3 +31,7 @@
 
 - As i leave the bot for continuous running without stopping it manually to cehck the crash
 - we will add the log data for the whole day for MONDAY trading exluding asia session
+
+### End of Day
+
+- Bot continues running without manual intervention
