@@ -27,6 +27,17 @@ from typing import Dict, List, Optional, Tuple, Any
 import pandas as pd
 import numpy as np
 
+# OBSERVATION ONLY: Import Logger
+# UPDATED: Points to 'utils' package to resolve Pylance error
+try:
+    from utils.observation_logger import ObservationLogger
+except ImportError:
+    try:
+        # Fallback: Attempt direct import if running from a different context
+        from utils.observation_logger import ObservationLogger
+    except ImportError:
+        ObservationLogger = None
+
 # Canonical reason codes (must match the contract)
 REASON_OK = "OK"
 REASON_INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
@@ -80,6 +91,14 @@ class POIIdentifier:
         # Safety flag: when False (default) we avoid non-causal analytics that scan len(self.df).
         # When True, the original post-hoc analytics logic runs exactly as before.
         self.analytics_only: bool = False
+
+        # OBSERVATION ONLY: Initialize Logger
+        self.logger = None
+        if ObservationLogger:
+            try:
+                self.logger = ObservationLogger()
+            except Exception:
+                pass
 
     # -----------------------
     # Helper: last closed candle index (live-safe)
@@ -759,6 +778,35 @@ class POIIdentifier:
             }
 
             finalized_obs.append(canonical_ob)
+
+        # OBSERVATION ONLY: Passive logging of finalized POIs
+        # Captures valid POIs to determine what the system "saw" immediately after calculation.
+        # This does not affect trading logic or return values.
+        if self.logger:
+            try:
+                # We filter for POIs that passed the basic validity check to reduce noise,
+                # even if they were later blocked by permission gates.
+                relevant_pois = [p for p in finalized_obs if p.get("is_valid_basic")]
+                if relevant_pois:
+                    self.logger.log_event({
+                        "event_type": "POI_FINALIZED",
+                        "total_candidates": len(finalized_obs),
+                        "valid_candidates": len(relevant_pois),
+                        "pois": [
+                            {
+                                "id": p.get("id"),
+                                "type": p.get("type"),
+                                "price_top": p.get("price_top"),
+                                "price_bottom": p.get("price_bottom"),
+                                "permission_to_trade": p.get("permission_to_trade"),
+                                "reason_code": p.get("reason_code"),
+                                "times_tested": p.get("times_tested"),
+                                "time": str(p.get("time"))
+                            } for p in relevant_pois
+                        ]
+                    })
+            except Exception:
+                pass # Fail silently to ensure production safety
 
         # store finalized order_blocks in legacy container grouped by polarity
         self.order_blocks = {
