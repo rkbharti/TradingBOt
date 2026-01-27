@@ -15,6 +15,15 @@ from utils.observation_logger import ObservationLogger
 obs_logger = ObservationLogger()
 obs_logger.bot_started()
 
+# OBSERVATION ONLY — passive OB logger
+from utils.ob_observation_logger import OBObservationLogger
+ob_obs_logger = OBObservationLogger()
+# OBSERVATION ONLY — sanity check log
+try:
+    ob_obs_logger.log({"event": "LOGGER_INIT", "timestamp": datetime.now().isoformat()})
+except Exception as e:
+    print(f"⚠️ OBObservationLogger error: {e}")
+
 
 # Local modules (must exist per your directory structure)
 from utils.mt5_connection import MT5Connection
@@ -601,6 +610,26 @@ class XAUUSDTradingBot:
                         })
                     except Exception:
                         pass
+                
+                # OBSERVATION ONLY: Passive logging of trade entry (NEW)
+                if ob_obs_logger:
+                    try:
+                        # Fixed method name to .log
+                        ob_obs_logger.log({
+                            "event_type": "TRADE_OPEN",
+                            "ticket": ticket,
+                            "signal": final_signal,
+                            "entry_price": entry_price,
+                            "stop_loss": sl,
+                            "take_profit": tp,
+                            "lot_size": lot,
+                            "reason": reason,
+                            "session": self.current_session,
+                            "market_structure": ms,
+                            "mtf_bias": mtf_conf.get('overall_bias')
+                        })
+                    except Exception:
+                        pass
             else:
                 print("❌ Order failed or rejected")
         else:
@@ -626,6 +655,25 @@ class XAUUSDTradingBot:
         if obs_logger:
             try:
                 obs_logger.log_event({
+                    "event_type": "ANALYSIS_STATE",
+                    "timestamp": datetime.now().isoformat(),
+                    "price": bid,
+                    "current_zone": current_zone,
+                    "zone_strength": zone_strength,
+                    "mtf_bias": mtf_conf.get("overall_bias", "NEUTRAL"),
+                    "final_signal": final_signal,
+                    "reason": reason,
+                    "waiting_for_confirmation": self.waiting_for_confirmation,
+                    "smc_state": smc_state
+                })
+            except Exception:
+                pass
+                
+        # OBSERVATION ONLY: Passive logging of analysis (NEW)
+        if ob_obs_logger:
+            try:
+                # Fixed method name to .log
+                ob_obs_logger.log({
                     "event_type": "ANALYSIS_STATE",
                     "timestamp": datetime.now().isoformat(),
                     "price": bid,
