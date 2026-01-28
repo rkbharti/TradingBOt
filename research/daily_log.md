@@ -86,3 +86,47 @@
 - **Atomic Commits:** Split changes into two logical commits:
   1. The Tool (Observation Logger)
   2. The Integration (Wiring into Main)
+
+# --------------------------------------------------------------------------------------------
+
+## 2026-01-28 — Observation Phase (Day 4) — Validation & Signal Integrity
+
+# --------------------------------------------------------------------------------------------
+
+### Work Done
+
+- **Observation Validation:** Actively verified that `OBObservationLogger` is capturing data during live market conditions.
+- **Runtime Stability Check:** Confirmed the bot remains stable during continuous execution with no crashes, freezes, or memory leaks.
+- **Dashboard Consistency Review:** Identified that manually opened trades (via mobile MT5) are not currently reflected on the web dashboard.
+- **Gap Identification:** Confirmed that the bot only tracks internally generated positions and ignores externally opened (manual) trades by design.
+
+### Key Findings
+
+- Order Block observation logging is **functional and safe**:
+  - Logging does not interfere with the trading loop.
+  - Logger failures are safely isolated via `try/except`.
+- The absence of manual trades on the dashboard is **expected behavior**, not a bug.
+  - Manual trades are not yet part of the bot’s observation model.
+- The bot correctly enters **Stalking Mode** (Waiting for Confirmation) in PREMIUM zones without premature execution.
+
+### Focus for the Day
+
+- Validate that observation logs:
+  - Accurately record analysis states.
+  - Provide enough context to later classify OBs as Decision / Extreme / Trap.
+- Maintain zero changes to execution logic.
+- Continue uninterrupted data collection across London and NY sessions.
+
+### Notes
+
+- No strategy, risk, or execution logic was modified.
+- Manual trade advisory mode identified as a **future enhancement**, not part of the current observation phase.
+- Primary goal remains **behavioral evidence collection**, not trade outcomes.
+
+### End of Day
+
+- Bot continues running unattended.
+- Observation layer confirmed production-safe.
+- Ready to proceed toward higher-level SMC behavioral analysis after Week 1 completes.
+
+# --------------------------------------------------------------------------------------------
