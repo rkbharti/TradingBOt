@@ -1,8 +1,8 @@
 # TradingBOt
+
 ##TradingBOt is a safety-first, demo-only automated XAUUSD trading system
 focused on discipline, structure, and professional risk management.
 <img width="1919" height="932" alt="image" src="https://github.com/user-attachments/assets/7bb468c2-c469-41fa-bab3-568f406d466c" />
-
 
 ## XAUUSD Smart Money Concepts (SMC) Trading Bot for MT5
 
@@ -246,33 +246,33 @@ text
 
 Directory structure:
 └── rkbharti-tradingbot/
-    ├── README.md
-    ├── requirements.txt
-    ├── server.py
-    ├── main.py
-    ├── strategy/
-    │   ├── backtester.py
-    │   ├── idea_memory.py
-    │   ├── market_structure.py
-    │   ├── multi_timeframe_fractal.py
-    │   ├── smc_strategy.py
-    │   ├── stoploss_calc.py
-    │   ├── timeframe_hierarchy.py
-    │   └── smc_enhanced/
-    │       ├── __init__.py
-    │       ├── bias.py
-    │       ├── inducement.py
-    │       ├── liquidity.py
-    │       ├── narrative.py
-    │       ├── poi.py
-    │       ├── session_detector.py
-    │       ├── volume_analyzer.py
-    │       └── zones.py
-    └── utils/
-        ├── mt5_connection.py
-        ├── smart_exits.py
-        ├── volume_analyzer_gold.py
-        └── xauusd_filter.py
+├── README.md
+├── requirements.txt
+├── server.py
+├── main.py
+├── strategy/
+│ ├── backtester.py
+│ ├── idea_memory.py
+│ ├── market_structure.py
+│ ├── multi_timeframe_fractal.py
+│ ├── smc_strategy.py
+│ ├── stoploss_calc.py
+│ ├── timeframe_hierarchy.py
+│ └── smc_enhanced/
+│ ├── **init**.py
+│ ├── bias.py
+│ ├── inducement.py
+│ ├── liquidity.py
+│ ├── narrative.py
+│ ├── poi.py
+│ ├── session_detector.py
+│ ├── volume_analyzer.py
+│ └── zones.py
+└── utils/
+├── mt5_connection.py
+├── smart_exits.py
+├── volume_analyzer_gold.py
+└── xauusd_filter.py
 
 ---
 
@@ -355,6 +355,7 @@ Contributions welcome! Please:
 ## 📝 License
 
 This project is for educational purposes. Use at your own risk.
+“Manual trades are currently not observed or advised by the bot.”
 
 ---
 
