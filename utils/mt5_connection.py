@@ -150,7 +150,22 @@ class MT5Connection:
     # -------------------------------------------------
     # ORDER EXECUTION
     # -------------------------------------------------
+    
+    def get_open_positions(self):
+        """
+        Read-only access to all open MT5 positions.
+        Used for manual-trade observation.
+        """
+        try:
+            import MetaTrader5 as mt5
+            positions = mt5.positions_get()
+            return positions if positions is not None else []
+        except Exception as e:
+            print(f"❌ MT5 get_open_positions error: {e}")
+            return []
 
+
+    
     def place_order(self, signal, lot_size, stop_loss, take_profit):
         symbol = self.symbol
         symbol_info = mt5.symbol_info(symbol)

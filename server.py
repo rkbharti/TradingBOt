@@ -480,7 +480,17 @@ def update_bot_state_v2(bot_instance, analysis_data):
     formatted_trades = []
 
     try:
-        positions = get_val(bot_instance, "open_positions", []) or []
+        # === FIX: COMBINE BOT + MANUAL POSITIONS ===
+        bot_pos = get_val(bot_instance, "open_positions", []) or []
+        man_pos = get_val(bot_instance, "manual_positions", []) or []
+        
+        # Ensure they are lists before concatenating
+        if not isinstance(bot_pos, list): bot_pos = []
+        if not isinstance(man_pos, list): man_pos = []
+        
+        # Combine lists so dashboard sees ALL active trades
+        positions = bot_pos + man_pos
+
         current_price = float(get_val(bot_instance, "last_price", 0.0) or 0.0)
 
         for p in positions:
@@ -492,6 +502,7 @@ def update_bot_state_v2(bot_instance, analysis_data):
             lot = parse_profit(get_val(p, "lot_size", get_val(p, "volume", 0.0)))
             signal = get_val(p, "signal", get_val(p, "type", "N/A"))
 
+            # Auto-calculate PnL if missing (common for manual trades via API)
             if (profit == 0.0) and (current_price > 0 and entry > 0 and lot > 0):
                 try:
                     if str(signal).upper() == "BUY":

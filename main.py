@@ -32,6 +32,7 @@ from strategy.market_structure import MarketStructureDetector
 from strategy.smc_enhanced.zones import ZoneCalculator
 from strategy.idea_memory import IdeaMemory
 from utils.volume_analyzer_gold import GoldVolumeAnalyzer
+from strategy.smc_enhanced.liquidity import LiquidityDetector
 
 
 # Note: we no longer rely on direct in-process server imports.
@@ -774,13 +775,63 @@ class XAUUSDTradingBot:
         if final_signal in ("BUY", "SELL"):
             entry_price = ask if final_signal == "BUY" else bid
             pip = 0.01
-            sl_distance = max(atr * 2, 35 * pip)
+            # FIX 3.2: Liquidity-based targeting (replace ATR retail logic)
+            try:
+                liquidity_detector = LiquidityDetector(market_data)
+                liquidity_levels = liquidity_detector.detect_liquidity(lookback=100)
+            except Exception as e:
+                print(f"⚠️  Liquidity detection failed: {e}, falling back to ATR")
+                liquidity_levels = []
             if final_signal == "BUY":
-                sl = entry_price - sl_distance
-                tp = entry_price + (atr * 3)
+                # SL: Below last swing low (structural invalidation)
+                swing_lows = ms.get("swing_lows", [])
+                if swing_lows and len(swing_lows) > 0:
+                    # Use the lowest of last 3 swing lows for conservative SL
+                    recent_lows = swing_lows[-3:] if len(swing_lows) >= 3 else swing_lows
+                    structural_low = min([sw["price"] for sw in recent_lows])
+                    sl = structural_low - (5 * pip)  # Small buffer below structure
+                    print(f"📍 SL at structural low: {sl:.2f}")
+                else:
+                    sl = entry_price - max(atr * 2, 35 * pip)  # Fallback to ATR
+                    print(f"⚠️  No swing lows, using ATR SL: {sl:.2f}")
+                # TP: Next buy-side liquidity above entry (institutions target liquidity pools)
+                buy_side_liquidity = [
+                    lvl for lvl in liquidity_levels 
+                    if lvl["price"] > entry_price and lvl["type"] in ["SWING_HIGH", "EQUAL_HIGHS"]
+                ]
+                if buy_side_liquidity:
+                    nearest_liq = min(buy_side_liquidity, key=lambda x: x["price"])
+                    tp = nearest_liq["price"]
+                    print(f"🎯 TP at liquidity pool: {tp:.2f} ({nearest_liq['type']})")
+                else:
+                    tp = entry_price + (atr * 3)  # Fallback to ATR
+                    print(f"⚠️  No liquidity above, using ATR TP: {tp:.2f}")
+            elif final_signal == "SELL":
+                # SL: Above last swing high (structural invalidation)
+                swing_highs = ms.get("swing_highs", [])
+                if swing_highs and len(swing_highs) > 0:
+                    recent_highs = swing_highs[-3:] if len(swing_highs) >= 3 else swing_highs
+                    structural_high = max([sw["price"] for sw in recent_highs])
+                    sl = structural_high + (5 * pip)
+                    print(f"📍 SL at structural high: {sl:.2f}")
+                else:
+                    sl = entry_price + max(atr * 2, 35 * pip)  # Fallback to ATR
+                    print(f"⚠️  No swing highs, using ATR SL: {sl:.2f}")
+                # TP: Next sell-side liquidity below entry
+                sell_side_liquidity = [
+                    lvl for lvl in liquidity_levels 
+                    if lvl["price"] < entry_price and lvl["type"] in ["SWING_LOW", "EQUAL_LOWS"]
+                ]
+                if sell_side_liquidity:
+                    nearest_liq = max(sell_side_liquidity, key=lambda x: x["price"])
+                    tp = nearest_liq["price"]
+                    print(f"🎯 TP at liquidity pool: {tp:.2f} ({nearest_liq['type']})")
+                else:
+                    tp = entry_price - (atr * 3)  # Fallback to ATR
+                    print(f"⚠️  No liquidity below, using ATR TP: {tp:.2f}")
             else:
-                sl = entry_price + sl_distance
-                tp = entry_price - (atr * 3)
+                # For HOLD signals, no TP/SL needed
+                pass
 
             acct = self.mt5_get_account()
             lot = 0.01
