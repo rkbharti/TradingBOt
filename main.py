@@ -34,9 +34,6 @@ from strategy.idea_memory import IdeaMemory
 from utils.volume_analyzer_gold import GoldVolumeAnalyzer
 
 
-
-
-
 # Note: we no longer rely on direct in-process server imports.
 # Communication to the dashboard is done via webhook POST to the server.
 # (This keeps bot and server processes decoupled and robust.)
@@ -178,7 +175,14 @@ class XAUUSDTradingBot:
         self.zone_calculator = ZoneCalculator
         self.running = False
         self.trade_log = []
+        
+        # Internal tracking for BOT initiated positions
         self.open_positions = []
+        
+        # === MANUAL TRADE OBSERVATION (ADDED) ===
+        # Separate list to track positions found in MT5 that are NOT in self.open_positions
+        self.manual_positions = []
+        
         self.max_positions = 3
         self.max_lot_size = 2.0
         self.risk_per_trade_percent = 0.5
@@ -227,6 +231,80 @@ class XAUUSDTradingBot:
         except Exception:
             pass
         return None
+
+    # === MANUAL TRADE OBSERVATION (ADDED) ===
+    def mt5_get_all_positions(self):
+        """
+        Robust, unified accessor for live MT5 positions.
+        Handles various wrapper implementations and return types safely.
+        Returns a list of standardized dictionaries.
+        """
+        positions_raw = None
+        
+        # 1. Try various method names common in wrappers
+        try:
+            if hasattr(self.mt5, "positions_get"):
+                positions_raw = self.mt5.positions_get()
+            elif hasattr(self.mt5, "get_positions"):
+                positions_raw = self.mt5.get_positions()
+            elif hasattr(self.mt5, "get_open_positions"):
+                positions_raw = self.mt5.get_open_positions()
+            # 2. Try direct MT5 access if wrapper exposes it
+            elif hasattr(self.mt5, "mt5") and hasattr(self.mt5.mt5, "positions_get"):
+                positions_raw = self.mt5.mt5.positions_get()
+        except Exception as e:
+            print(f"⚠️ Error fetching live positions: {e}")
+            return []
+
+        if positions_raw is None:
+            return []
+
+        # 3. Normalize Result
+        normalized = []
+        try:
+            # Handle Tuple/List inputs
+            iterable = positions_raw
+            if not isinstance(positions_raw, (list, tuple)):
+                iterable = [positions_raw] # Single object case
+
+            for p in iterable:
+                p_dict = {}
+                # Extract data based on type
+                if isinstance(p, dict):
+                    p_dict = p
+                elif hasattr(p, "_asdict"):
+                    p_dict = p._asdict()
+                else:
+                    # Generic Object access
+                    p_dict = {
+                        "ticket": getattr(p, "ticket", 0),
+                        "type": getattr(p, "type", 0),
+                        "volume": getattr(p, "volume", 0.0),
+                        "price_open": getattr(p, "price_open", 0.0),
+                        "sl": getattr(p, "sl", 0.0),
+                        "tp": getattr(p, "tp", 0.0),
+                        "symbol": getattr(p, "symbol", ""),
+                        "price_current": getattr(p, "price_current", 0.0)
+                    }
+
+                # Ensure critical keys exist and are typed correctly
+                if p_dict.get("ticket"):
+                    normalized.append({
+                        "ticket": int(p_dict.get("ticket", 0)),
+                        "type": int(p_dict.get("type", 0)), # 0=Buy, 1=Sell usually
+                        "volume": float(p_dict.get("volume", 0.0)),
+                        "price_open": float(p_dict.get("price_open", 0.0)),
+                        "sl": float(p_dict.get("sl", 0.0)),
+                        "tp": float(p_dict.get("tp", 0.0)),
+                        "symbol": str(p_dict.get("symbol", "")),
+                        "price_current": float(p_dict.get("price_current", 0.0))
+                    })
+        except Exception as e:
+            print(f"⚠️ Error normalizing positions: {e}")
+            return []
+
+        return normalized
+    # ========================================
 
     def mt5_place_order(self, side, lots, sl, tp):
         try:
@@ -302,6 +380,126 @@ class XAUUSDTradingBot:
             return market_data, None
         return market_data, current_price
 
+    # === MANUAL TRADE OBSERVATION (ADDED) ===
+    def detect_and_manage_manual_trades(self, analysis_context):
+        """
+        Detects trades that exist in MT5 but are not tracked in self.open_positions.
+        These are flagged as MANUAL.
+        It then applies SMC analysis to generate advisory logs.
+        """
+        try:
+            # 1. Fetch all live positions from MT5 (Normalized)
+            live_pos_list = self.mt5_get_all_positions()
+            if live_pos_list is None:
+                live_pos_list = []
+                
+            # DEBUG: Print found positions to ensure connectivity
+            if len(live_pos_list) > 0:
+                print(f"🔎 DEBUG: MT5 reports {len(live_pos_list)} open positions.")
+
+            # 2. Identify Bot Ticket IDs
+            bot_tickets = [int(p.get("ticket", 0)) for p in self.open_positions]
+
+            # 3. Sync Logic
+            current_manual_tickets = []
+            
+            for pos in live_pos_list:
+                ticket = int(pos.get("ticket", 0))
+                symbol = pos.get("symbol", "")
+                
+                # Filter for XAUUSD (or current symbol) only - CASE INSENSITIVE FIX
+                sym_upper = symbol.upper()
+                if "XAU" not in sym_upper and "GOLD" not in sym_upper:
+                    # DEBUG: Print why we are skipping
+                    print(f"⚠️ DEBUG: Skipping position {ticket} (Symbol: {symbol} not XAU/GOLD)")
+                    continue
+
+                # If this ticket is NOT in bot_tickets, it is MANUAL
+                if ticket not in bot_tickets:
+                    current_manual_tickets.append(ticket)
+                    
+                    # Check if we are already tracking this manual trade
+                    existing_manual = next((item for item in self.manual_positions if item["ticket"] == ticket), None)
+                    
+                    if not existing_manual:
+                        # === NEW MANUAL TRADE DETECTED ===
+                        trade_type_code = pos.get("type", 0)
+                        trade_type = "BUY" if trade_type_code == 0 else "SELL"
+                        entry_price = float(pos.get("price_open", 0.0))
+                        
+                        # Apply SMC Intelligence
+                        advisory = "HOLD"
+                        rationale = []
+                        
+                        trend = analysis_context.get("market_structure", {}).get("current_trend", "NEUTRAL")
+                        zone = analysis_context.get("current_zone", "UNKNOWN")
+                        
+                        # Trend Alignment
+                        if trade_type == "BUY":
+                            if trend == "BULLISH": rationale.append("Aligned with Bullish Trend")
+                            elif trend == "BEARISH": rationale.append("Counter-trend (High Risk)")
+                        else: # SELL
+                            if trend == "BEARISH": rationale.append("Aligned with Bearish Trend")
+                            elif trend == "BULLISH": rationale.append("Counter-trend (High Risk)")
+                            
+                        # Zone Alignment
+                        if zone == "DISCOUNT" and trade_type == "BUY": rationale.append("Buying in Discount (Good)")
+                        if zone == "PREMIUM" and trade_type == "BUY": rationale.append("Buying in Premium (Risk)")
+                        if zone == "PREMIUM" and trade_type == "SELL": rationale.append("Selling in Premium (Good)")
+                        if zone == "DISCOUNT" and trade_type == "SELL": rationale.append("Selling in Discount (Risk)")
+                        
+                        advisory_str = "; ".join(rationale) if rationale else "Neutral structure"
+                        
+                        print(f"👀 MANUAL TRADE DETECTED: Ticket {ticket} | {trade_type} @ {entry_price}")
+                        print(f"   🤖 SMC Analysis: {advisory_str}")
+                        
+                        # Register
+                        new_manual = {
+                            "ticket": ticket,
+                            "origin": "MANUAL",
+                            "signal": trade_type,
+                            "entry_price": entry_price,
+                            "volume": pos.get("volume"),
+                            "sl": pos.get("sl"),
+                            "tp": pos.get("tp"),
+                            "entry_time": datetime.now().isoformat(),
+                            "advisory": advisory_str,
+                            "status": "OPEN"
+                        }
+                        self.manual_positions.append(new_manual)
+                        
+                        # Log to persistent log
+                        self.trade_log.append({
+                            "timestamp": datetime.now().isoformat(),
+                            "action": "MANUAL_DETECTED",
+                            "ticket": ticket,
+                            "details": new_manual
+                        })
+                        self.save_trade_log()
+                    else:
+                        # Update dynamic fields (SL/TP could change manually)
+                        existing_manual["sl"] = pos.get("sl")
+                        existing_manual["tp"] = pos.get("tp")
+                        existing_manual["current_price"] = pos.get("price_current", 0.0) # If available
+
+            # 4. Cleanup Closed Manual Trades
+            # Remove trades from self.manual_positions that are no longer in live_positions (tickets)
+            active_manual_tickets = set(current_manual_tickets)
+            for m_pos in list(self.manual_positions):
+                if m_pos["ticket"] not in active_manual_tickets:
+                    print(f"🏁 Manual Trade {m_pos['ticket']} Closed/Removed")
+                    self.manual_positions.remove(m_pos)
+                    self.trade_log.append({
+                        "timestamp": datetime.now().isoformat(),
+                        "action": "MANUAL_CLOSED",
+                        "ticket": m_pos["ticket"]
+                    })
+                    self.save_trade_log()
+
+        except Exception as e:
+            print(f"⚠️ Manual trade sync error: {e}")
+    # ========================================
+
     def analyze_once(self):
         is_active, session_name = is_trading_session()
         session_norm = map_session_for_filter(session_name)
@@ -329,6 +527,16 @@ class XAUUSDTradingBot:
             if equity == 0.0 and balance == 0.0:
                 equity = 77829.40
                 balance = 77829.40
+            
+            # === MANUAL TRADE OBSERVATION (ADDED) ===
+            # Even when bot sleeps, we sync manual trades so they appear on dashboard
+            try:
+                # Minimal context for sleep mode
+                sleep_context = {"market_structure": {}, "current_zone": "CLOSED"}
+                self.detect_and_manage_manual_trades(sleep_context)
+            except Exception:
+                pass
+            # ========================================
 
             # 2. Send "Sleep Mode" Data to Dashboard
             # We send empty chart data and "CLOSED" status to keep the UI alive
@@ -337,6 +545,7 @@ class XAUUSDTradingBot:
                 "balance": balance,
                 "last_price": 0,
                 "open_positions": self.open_positions,
+                "manual_positions": self.manual_positions, # ADDED to payload
                 "closed_trades": [],
                 "chart_data": [], 
                 "current_session": session_norm 
@@ -426,6 +635,17 @@ class XAUUSDTradingBot:
             volume_spike = vol_spike > 1.5
         except Exception:
             volume_spike = False
+            
+        # === MANUAL TRADE OBSERVATION (ADDED) ===
+        # Run detection and advisory logic using the SMC data just calculated
+        manual_context = {
+            "market_structure": ms,
+            "current_zone": current_zone,
+            "zone_strength": zone_strength,
+            "mtf_bias": mtf_conf
+        }
+        self.detect_and_manage_manual_trades(manual_context)
+        # ========================================
 
         final_signal = "HOLD"
         reason = "No conditions met"
@@ -491,24 +711,32 @@ class XAUUSDTradingBot:
 
             bos_confirmed = smc_state.get('structure_confirmed', False)
 
-            # Reaction logic: only trade if waiting_for_confirmation and CHoCH detected (M5 CHoCH requirement)
-            # Additionally, ensure fractal/IDM isn't still forming
+            # FIX 2.1: Define Type 1 (Direct) and Type 2 (Confirmation) entry triggers
             can_execute_ch_confirmation = (self.waiting_for_confirmation and choch_detected and not still_forming)
 
+            # Type 1: Extreme Zone (>70%) + IDM Swept + No CHoCH required (Risk Entry)
+            can_execute_type1 = (zone_strength >= 70 and idm_taken and not still_forming)
+
             if (mtf_conf.get("overall_bias") == "BULLISH" and
-                current_zone == "DISCOUNT" and
-                zone_strength >= 30 and
-                idm_taken == True and
-                can_execute_ch_confirmation):
+                    current_zone == "DISCOUNT" and
+                    zone_strength >= 30 and
+                    idm_taken == True and
+                    (can_execute_ch_confirmation or can_execute_type1)):  # FIX 2.1: Allow Type 1 or Type 2
                 final_signal = "BUY"
-                reason = "Institutional Buy: Discount + Bullish + IDM Swept + M5 CHoCH confirmation"
+                if can_execute_type1 and not can_execute_ch_confirmation:
+                    reason = "Type 1 Entry: Extreme Discount (>70%) + IDM Swept (Direct)"
+                else:
+                    reason = "Type 2 Entry: Discount + IDM Swept + M5 CHoCH confirmation"
             elif (mtf_conf.get("overall_bias") == "BEARISH" and
                   current_zone == "PREMIUM" and
                   zone_strength >= 30 and
                   idm_taken == True and
-                  can_execute_ch_confirmation):
+                  (can_execute_ch_confirmation or can_execute_type1)):  # FIX 2.1: Allow Type 1 or Type 2
                 final_signal = "SELL"
-                reason = "Institutional Sell: Premium + Bearish + IDM Swept + M5 CHoCH confirmation"
+                if can_execute_type1 and not can_execute_ch_confirmation:
+                    reason = "Type 1 Entry: Extreme Premium (>70%) + IDM Swept (Direct)"
+                else:
+                    reason = "Type 2 Entry: Premium + IDM Swept + M5 CHoCH confirmation"
             elif zone_strength >= 70 and idm_taken == True and can_execute_ch_confirmation:
                 if current_zone == "DISCOUNT":
                     final_signal = "BUY"
@@ -589,8 +817,9 @@ class XAUUSDTradingBot:
                 self.trade_log.append(log_entry)
                 self.save_trade_log()
                 print(f"✅ Tracked new position (ticket: {ticket})")
-                # Clear waiting flag after we commit a trade so we don't immediately re-enter
+                # FIX 2.2: Force reset of waiting flag after ANY trade execution (Type 1 or 2)
                 self.waiting_for_confirmation = False
+                print("🔄 Reset waiting_for_confirmation flag to False")
 
                 # OBSERVATION ONLY: Passive logging of trade entry
                 if obs_logger:
@@ -731,6 +960,7 @@ class XAUUSDTradingBot:
                 "balance": balance,
                 "last_price": bid,
                 "open_positions": self.open_positions,
+                "manual_positions": self.manual_positions, # ADDED to payload
                 "closed_trades": [],
                 "chart_data": chart_data,
                 "current_session": self.current_session
