@@ -83,8 +83,8 @@ class MarketStructureDetector:
 
         # Ensure we only consider candidate bars i for which i-2..i+2 exist and
         # the two subsequent bars (i+1 and i+2) have closed (non-NaN close).
-        # The maximum candidate index is last_closed - 2 (so i+2 <= last_closed).
-        max_candidate = last_closed - 2
+        # FIX 1.3: Reduce lag - allow fractal confirmation 1 candle earlier
+        max_candidate = last_closed - 1
         # Range start is 2 (needs two bars to left)
         for i in range(2, max_candidate + 1):
             # confirm the two subsequent closes are present (additional safety)
@@ -205,7 +205,7 @@ class MarketStructureDetector:
         return out
 
     # ---------------------- Sweep Detection (no look-ahead) ----------------------
-    def is_wick_sweep(self, target_price: float, start_bar: int) -> Dict:
+    def is_wick_sweep(self, target_price: float, start_bar: int, scan_type: str = None) -> Dict:
         """Detect if any wick pierces beyond target_price among already-closed bars.
 
         Scans only bars that have fully closed (up to last closed index). This eliminates
@@ -228,12 +228,23 @@ class MarketStructureDetector:
 
         # Scan from the bar immediately after start_bar up to the most recent fully-closed bar
         for idx in range(start_bar + 1, last_closed + 1):
-            # Upper wick sweep: high > target_price
-            if highs[idx] > target_price:
-                return {'is_sweep': True, 'sweep_bar_index': int(idx), 'sweep_price': float(highs[idx]), 'sweep_wick_type': 'upper'}
-            # Lower wick sweep: low < target_price
-            if lows[idx] < target_price:
-                return {'is_sweep': True, 'sweep_bar_index': int(idx), 'sweep_price': float(lows[idx]), 'sweep_wick_type': 'lower'}
+            # FIX 1.1 CORRECTED: For bullish IDM, ONLY check lower wicks (ignore upper)
+            if scan_type == 'bullish':
+                if lows[idx] < target_price:
+                    return {'is_sweep': True, 'sweep_bar_index': int(idx), 'sweep_price': float(lows[idx]), 'sweep_wick_type': 'lower'}
+                # Do NOT check highs[idx] - continue to next bar
+                continue
+            elif scan_type == 'bearish':
+                if highs[idx] > target_price:
+                    return {'is_sweep': True, 'sweep_bar_index': int(idx), 'sweep_price': float(highs[idx]), 'sweep_wick_type': 'upper'}
+                # Do NOT check lows[idx] - continue to next bar
+                continue
+            else:
+                # Default behavior (no scan_type specified) - check both
+                if highs[idx] > target_price:
+                    return {'is_sweep': True, 'sweep_bar_index': int(idx), 'sweep_price': float(highs[idx]), 'sweep_wick_type': 'upper'}
+                if lows[idx] < target_price:
+                    return {'is_sweep': True, 'sweep_bar_index': int(idx), 'sweep_price': float(lows[idx]), 'sweep_wick_type': 'lower'}
 
         return {'is_sweep': False, 'sweep_bar_index': None, 'sweep_price': None, 'sweep_wick_type': None}
 
@@ -250,7 +261,7 @@ class MarketStructureDetector:
             out['reason_code'] = 'NO_IDM_INDEX'
             return out
 
-        sweep = self.is_wick_sweep(target_price=idm_price, start_bar=idm_bar_index)
+        sweep = self.is_wick_sweep(target_price=idm_price, start_bar=idm_bar_index, scan_type=idm_type)
         if not sweep['is_sweep']:
             # If no later closed bars were present, provide explicit code
             last_closed = self._last_closed_index()
