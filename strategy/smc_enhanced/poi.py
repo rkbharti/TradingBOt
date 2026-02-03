@@ -1,3 +1,4 @@
+# strategy/smc_enhanced/poi.py
 """
 POI Identifier (Refactor Day-3 v2.1) - LIVE-SAFE FINAL PASS
 
@@ -678,28 +679,68 @@ class POIIdentifier:
         except Exception:
             zones_callable = lambda price: None
 
-        # Step 4: For each OB, perform basic validation and permission gating
+        # Step 4: PRE-VALIDATION PASS (Fix 3.1: Identify all valid candidates first)
         for ob in obs:
-            # basic validation using liquidity & market structure detectors
             is_valid_basic, basic_reason, evidence = self.validate_ob_basic(
                 ob, liquidity_detector, market_structure_detector, look_forward=look_forward, bos_match_tolerance=1e-8
             )
             ob["is_valid_basic"] = bool(is_valid_basic)
-            ob["is_valid_poi"] = bool(is_valid_basic)
-            # attach evidence
             ob["sweep_evidence"] = evidence.get("sweep")
             ob["bos_level"] = evidence.get("bos_level")
             if evidence.get("bos_match"):
                 ob["caused_bos"] = True
-                ob["bos_level"] = evidence.get("bos_level")
-
             ob["reason_code"] = basic_reason
 
-            # now run permission gate (zones_callable per Day-3 requirement)
+        # FIX 3.1: HIERARCHY LOGIC - Tag Decision/Extreme/Trap
+        # Sort valid OBs by price to identify extremes
+        valid_bullish = sorted(
+            [o for o in obs if o["type"] == "BULLISH" and o["is_valid_basic"]], 
+            key=lambda x: x["price_top"], 
+            reverse=True  # Descending: highest price first (closest to current price in uptrend)
+        )
+        valid_bearish = sorted(
+            [o for o in obs if o["type"] == "BEARISH" and o["is_valid_basic"]], 
+            key=lambda x: x["price_bottom"]  # Ascending: lowest price first (closest to current price in downtrend)
+        )
+
+        decision_ids = set()
+        extreme_ids = set()
+
+        if valid_bullish:
+            decision_ids.add(valid_bullish[0]["id"])  # Highest price = Decision (closest)
+            extreme_ids.add(valid_bullish[-1]["id"])   # Lowest price = Extreme (furthest)
+        if valid_bearish:
+            decision_ids.add(valid_bearish[0]["id"])   # Lowest price = Decision (closest)
+            extreme_ids.add(valid_bearish[-1]["id"])    # Highest price = Extreme (furthest)
+
+        # Step 5: FINALIZATION PASS - Apply hierarchy tags and permission gate
+        for ob in obs:
+            # Apply hierarchy classification
+            if ob["is_valid_basic"]:
+                if ob["id"] in extreme_ids:
+                    ob["block_class"] = "EXTREME"
+                elif ob["id"] in decision_ids:
+                    ob["block_class"] = "DECISION"
+                else:
+                    ob["block_class"] = "TRAP"  # Middle OBs are Smart Money Traps
+            else:
+                ob["block_class"] = "INVALID"
+
+            # Set is_valid_poi based on validation
+            ob["is_valid_poi"] = bool(ob["is_valid_basic"])
+
+            # Run permission gate
             perm, perm_reason, perm_details = self.evaluate_permission(
                 ob, zones_callable, session_detector=session_detector, require_kill_zone=True
             )
+
+            # FIX 3.1: Block TRAP OBs from trading
+            if ob.get("block_class") == "TRAP":
+                perm = False
+                perm_reason = "SMART_MONEY_TRAP_MIDDLE_OB"
+            
             ob["permission_to_trade"] = bool(perm)
+
             # if permission_to_trade False and basic_reason was OK/VALID then set reason accordingly
             if not ob["permission_to_trade"]:
                 # if basic invalid reason, keep it; else override with permission reason
