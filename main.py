@@ -1,5 +1,5 @@
 # main.py
-DRY_RUN = True
+DRY_RUN = False
 
 import os
 import time
@@ -761,7 +761,7 @@ class XAUUSDTradingBot:
             final_signal = "HOLD"
             reason = f"Error evaluating signals: {e}"
 
-        max_allowed_spread = 0.5
+        max_allowed_spread = 3.0
         if spread is None:
             spread = 0.0
         if spread > max_allowed_spread:
