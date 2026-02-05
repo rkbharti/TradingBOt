@@ -31,7 +31,6 @@ from strategy.multi_timeframe_fractal import MultiTimeframeFractal
 from strategy.market_structure import MarketStructureDetector
 from strategy.smc_enhanced.zones import ZoneCalculator
 from strategy.idea_memory import IdeaMemory
-from utils.volume_analyzer_gold import GoldVolumeAnalyzer
 from strategy.smc_enhanced.liquidity import LiquidityDetector
 
 
@@ -625,17 +624,7 @@ class XAUUSDTradingBot:
             current_zone = "UNKNOWN"
             zone_strength = 0
             zone_summary = {}
-
-        try:
-            vol_an = GoldVolumeAnalyzer(market_data)
-            self.volume_analyzer = vol_an
-            recent = market_data.tail(20)
-            avg_vol = float(recent['tick_volume'].iloc[:-1].mean()) if len(recent) > 1 else 0.0
-            last_vol = float(recent['tick_volume'].iloc[-1]) if len(recent) >= 1 else 0.0
-            vol_spike = (last_vol / avg_vol) if avg_vol > 0 else 1.0
-            volume_spike = vol_spike > 1.5
-        except Exception:
-            volume_spike = False
+            
             
         # === MANUAL TRADE OBSERVATION (ADDED) ===
         # Run detection and advisory logic using the SMC data just calculated
