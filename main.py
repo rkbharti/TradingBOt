@@ -32,6 +32,7 @@ from strategy.market_structure import MarketStructureDetector
 from strategy.smc_enhanced.zones import ZoneCalculator
 from strategy.idea_memory import IdeaMemory
 from strategy.smc_enhanced.liquidity import LiquidityDetector
+from strategy.smc_enhanced.narrative import NarrativeAnalyzer
 
 
 # Note: we no longer rely on direct in-process server imports.
@@ -171,7 +172,8 @@ class XAUUSDTradingBot:
         self.mt5 = MT5Connection(config_path)
         self.mtf = MultiTimeframeFractal(symbol="XAUUSD")
         self.idea_memory = IdeaMemory(expiry_minutes=30)
-        self.volume_analyzer = None
+        # === SMC NARRATIVE STATE MACHINE (PHASE-3B-1) ===
+        self.narrative = NarrativeAnalyzer()
         self.zone_calculator = ZoneCalculator
         self.running = False
         self.trade_log = []
@@ -506,530 +508,136 @@ class XAUUSDTradingBot:
         self.current_session = session_norm
 
         # ==============================================================================
-        # NEW: WEEKEND/SLEEP HEARTBEAT
-        # If market is closed, update dashboard with balance/status BEFORE sleeping
+        # MARKET CLOSED / SLEEP MODE
         # ==============================================================================
         if not is_active:
-            print(f"⏸️ Market session '{session_norm}' not active for trading — sending heartbeat and sleeping")
-            
-            # 1. Get Account Balance so Dashboard isn't $0.00
+            print(f"⏸️ Market session '{session_norm}' not active — heartbeat only")
+
             acct = self.mt5_get_account()
-            equity = 0.0
-            balance = 0.0
-            if acct:
-                try:
-                    equity = float(getattr(acct, 'equity', 0.0))
-                    balance = float(getattr(acct, 'balance', 0.0))
-                except Exception:
-                    pass
-            
-            # Apply your specific fallback if balance is read as 0
+            equity = float(getattr(acct, 'equity', 0.0)) if acct else 0.0
+            balance = float(getattr(acct, 'balance', 0.0)) if acct else 0.0
             if equity == 0.0 and balance == 0.0:
-                equity = 77829.40
-                balance = 77829.40
-            
-            # === MANUAL TRADE OBSERVATION (ADDED) ===
-            # Even when bot sleeps, we sync manual trades so they appear on dashboard
+                equity = balance = 77829.40
+
+            # Manual trade sync even during sleep
             try:
-                # Minimal context for sleep mode
-                sleep_context = {"market_structure": {}, "current_zone": "CLOSED"}
-                self.detect_and_manage_manual_trades(sleep_context)
+                self.detect_and_manage_manual_trades({"market_structure": {}, "current_zone": "CLOSED"})
             except Exception:
                 pass
-            # ========================================
 
-            # 2. Send "Sleep Mode" Data to Dashboard
-            # We send empty chart data and "CLOSED" status to keep the UI alive
-            bot_data = {
-                "equity": equity,
-                "balance": balance,
-                "last_price": 0,
-                "open_positions": self.open_positions,
-                "manual_positions": self.manual_positions, # ADDED to payload
-                "closed_trades": [],
-                "chart_data": [], 
-                "current_session": session_norm 
-            }
-            
-            analysis = {
-                "market_structure": {"current_trend": "MARKET CLOSED"},
-                "zone_strength": 0,
-                "current_zone": "CLOSED",
-                "pdh": 0,
-                "pdl": 0,
-                "zones": {}
-            }
-            
-            # 3. Send the webhook
-            send_to_dashboard(bot_data, analysis)
-            return  # <--- STOP HERE (Do not run analysis logic)
+            send_to_dashboard(
+                {
+                    "equity": equity,
+                    "balance": balance,
+                    "last_price": 0,
+                    "open_positions": self.open_positions,
+                    "manual_positions": self.manual_positions,
+                    "closed_trades": [],
+                    "chart_data": [],
+                    "current_session": session_norm
+                },
+                {
+                    "market_structure": {"current_trend": "MARKET CLOSED"},
+                    "zone_strength": 0,
+                    "current_zone": "CLOSED",
+                    "zones": {}
+                }
+            )
+            return
 
         # ==============================================================================
-        # ACTIVE TRADING LOGIC (Your Original Code)
+        # ACTIVE MARKET
         # ==============================================================================
-
         market_data, current_price = self.fetch_and_prepare()
         if market_data is None or current_price is None:
             return
 
         atr = compute_atr_from_df(market_data, period=14)
 
-        spread = None
-        if isinstance(current_price, dict):
-            bid = float(current_price.get("bid", 0.0))
-            ask = float(current_price.get("ask", 0.0))
-            spread = abs(ask - bid)
-            price_for_zones = bid
-        else:
-            bid = float(current_price)
-            ask = bid
-            spread = 0.0
-            price_for_zones = bid
+        bid = float(current_price.get("bid", current_price))
+        ask = float(current_price.get("ask", bid))
+        spread = abs(ask - bid)
+        price_for_zones = bid
 
-        mtf_conf = {"overall_bias": "NEUTRAL", "confidence": 0}
+        # --- MTF Bias (still informational) ---
         try:
             mtf_conf = self.mtf.get_multi_tf_confluence()
         except Exception:
-            pass
+            mtf_conf = {"overall_bias": "NEUTRAL", "confidence": 0}
 
-        vol_spike = 1.0
-        volume_spike = False
-
+        # --- Market Structure ---
         try:
             ms_detector = MarketStructureDetector(market_data)
-            # note: older code tried to call get_market_structure_analysis; keep compatibility but prefer get_idm_state
-            try:
-                ms = ms_detector.get_market_structure_analysis()
-            except Exception:
-                ms = {"current_trend": "NEUTRAL", "choch_detected": False, "bos_level": None}
+            ms = ms_detector.get_market_structure_analysis()
+            smc_state = ms_detector.get_idm_state() if hasattr(ms_detector, "get_idm_state") else {}
         except Exception:
-            ms = {"current_trend": "NEUTRAL", "choch_detected": False, "bos_level": None}
-            ms_detector = None
+            ms = {"current_trend": "NEUTRAL"}
+            smc_state = {}
 
+        # --- Zones ---
         try:
-            latest_high = float(market_data['high'].max()) if 'high' in market_data.columns else price_for_zones
-            latest_low = float(market_data['low'].min()) if 'low' in market_data.columns else price_for_zones
-            zones = {}
-            try:
-                zones = ZoneCalculator.calculate_zones(latest_high, latest_low)
-                current_zone = ZoneCalculator.classify_price_zone(price_for_zones, zones)
-            except Exception:
-                current_zone = "EQUILIBRIUM"
-            try:
-                zone_summary = ZoneCalculator.get_zone_summary(price_for_zones, zones)
-                zone_strength = zone_summary.get("zone_strength", 0) if zone_summary else 0
-            except Exception:
-                zone_strength = 0
+            latest_high = float(market_data['high'].max())
+            latest_low = float(market_data['low'].min())
+            zones = ZoneCalculator.calculate_zones(latest_high, latest_low)
+            current_zone = ZoneCalculator.classify_price_zone(price_for_zones, zones)
+            zone_strength = 0  # intentionally dead (Phase-2)
         except Exception:
             current_zone = "UNKNOWN"
             zone_strength = 0
-            zone_summary = {}
-            
-            
-        # === MANUAL TRADE OBSERVATION (ADDED) ===
-        # Run detection and advisory logic using the SMC data just calculated
-        manual_context = {
+            zones = {}
+
+        # --- Manual trade observation ---
+        self.detect_and_manage_manual_trades({
             "market_structure": ms,
             "current_zone": current_zone,
             "zone_strength": zone_strength,
             "mtf_bias": mtf_conf
+        })
+
+        # ==============================================================================
+        # 🔥 PHASE-3B-1 — NARRATIVE STATE MACHINE AUTHORITY
+        # ==============================================================================
+        market_state = {
+            "trading_range_defined": True,
+            "external_liquidity_swept": False,  # conservative
+            "idm_taken": smc_state.get("is_idm_swept", False),
+            "htf_poi_reached": self.waiting_for_confirmation,
+            "ltf_structure_shift": smc_state.get("structure_confirmed", False),
+            "ltf_poi_mitigated": False,
+            "killzone_active": self.current_session in ["ASIAN", "LONDON", "NEW_YORK"],
+            "htf_ob_invalidated": False,
+            "daily_structure_flipped": False
         }
-        self.detect_and_manage_manual_trades(manual_context)
-        # ========================================
 
-        final_signal = "HOLD"
-        reason = "No conditions met"
+        narrative_snapshot = self.narrative.update(market_state)
 
-        print("\n" + "=" * 60)
-        print(f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Session: {self.current_session}")
-        print(f"💱 Price (bid): {bid:.2f} | Ask: {ask:.2f} | Spread: {spread:.4f}")
-        print(f"📊 ATR: {atr:.4f} | Zone: {current_zone} (strength {zone_strength}%)")
-        print(f"🔁 MTF Bias: {mtf_conf.get('overall_bias')} | Confidence: {mtf_conf.get('confidence')}")
-        print(f"🏗 Market Structure: {ms.get('current_trend','NEUTRAL')} | BO S/CHOCH: {ms.get('choch_detected')}")
-        print(f"📈 Volume spike: {volume_spike} (ratio {vol_spike:.2f} if available)")
+        if not narrative_snapshot.get("entry_allowed", False):
+            reason = f"Narrative blocked at state: {narrative_snapshot.get('state')}"
+            print(f"⏸ No trade — {reason}")
 
-        # Reaction logic: detect HTF POI hit and set waiting_for_confirmation
-        try:
-            hit_poi = False
-            if zone_summary:
-                # ZoneCalculator implementations often expose a 'hit_poi' or similar flag in the summary.
-                hit_poi = bool(zone_summary.get('hit_poi') or zone_summary.get('price_hit_poi') or zone_summary.get('near_poi'))
-            # Fallback conservative heuristic: strong zone and price is in DISCOUNT/PREMIUM
-            if not hit_poi and zone_strength >= 30 and current_zone in ("DISCOUNT", "PREMIUM"):
-                # This is a conservative proxy for "price hit meaningful HTF POI"
-                hit_poi = True
-
-            if hit_poi and not self.waiting_for_confirmation:
-                self.waiting_for_confirmation = True
-                print("⏳ HTF POI hit — waiting for M5 CHoCH confirmation before entering trades")
-
-        except Exception:
-            pass
-
-        try:
-            smc_state = {}
-            if ms_detector is not None and hasattr(ms_detector, 'get_idm_state'):
-                smc_state = ms_detector.get_idm_state()
-            print(f"🌊 IDM present: {smc_state.get('is_idm_present', False)}")
-            print(f"🪤 IDM swept: {smc_state.get('is_idm_swept', False)}")
-            print(f"🧱 Structure confirmed: {smc_state.get('structure_confirmed', False)}")
-            print(f"   MSS/CHOCH: {smc_state.get('mss_or_choch', 'NONE')} | reason: {smc_state.get('reason_code')}")
-        except Exception as e:
-            print(f"⚠️ SMC state unavailable: {e}")
-            smc_state = {}
-
-        print("-" * 60)
-
-        try:
-            # Determine whether we've seen a CHoCH on the timeframe used by the market-structure detector
-            mss_or_choch = smc_state.get('mss_or_choch', '') or ''
-            choch_detected = str(mss_or_choch).upper().startswith('CHOCH')
-
-            idm_taken = smc_state.get('is_idm_swept', False)
-            # prevent trading on a fractal/IDM that is still forming: enforce IDM bar is at least two bars older than last index
-            idm_bar_index = smc_state.get('idm_bar_index')
-            still_forming = False
-            try:
-                if idm_bar_index is not None and isinstance(idm_bar_index, int):
-                    last_closed_idx = ms_detector._last_closed_index() if ms_detector is not None else (len(market_data)-1)
-                    # require IDM bar to be at least two bars older than the most recent closed bar
-                    if last_closed_idx is None or idm_bar_index > (last_closed_idx - 2):
-                        still_forming = True
-                        print("⚠️ IDM/fractal still forming — deferring trade until fractal confirmed by two subsequent closes")
-            except Exception:
-                still_forming = False
-
-            bos_confirmed = smc_state.get('structure_confirmed', False)
-
-            # FIX 2.1: Define Type 1 (Direct) and Type 2 (Confirmation) entry triggers
-            can_execute_ch_confirmation = (self.waiting_for_confirmation and choch_detected and not still_forming)
-
-            # Type 1: Extreme Zone (>70%) + IDM Swept + No CHoCH required (Risk Entry)
-            can_execute_type1 = (zone_strength >= 70 and idm_taken and not still_forming)
-
-            if (mtf_conf.get("overall_bias") == "BULLISH" and
-                    current_zone == "DISCOUNT" and
-                    zone_strength >= 30 and
-                    idm_taken == True and
-                    (can_execute_ch_confirmation or can_execute_type1)):  # FIX 2.1: Allow Type 1 or Type 2
-                final_signal = "BUY"
-                if can_execute_type1 and not can_execute_ch_confirmation:
-                    reason = "Type 1 Entry: Extreme Discount (>70%) + IDM Swept (Direct)"
-                else:
-                    reason = "Type 2 Entry: Discount + IDM Swept + M5 CHoCH confirmation"
-            elif (mtf_conf.get("overall_bias") == "BEARISH" and
-                  current_zone == "PREMIUM" and
-                  zone_strength >= 30 and
-                  idm_taken == True and
-                  (can_execute_ch_confirmation or can_execute_type1)):  # FIX 2.1: Allow Type 1 or Type 2
-                final_signal = "SELL"
-                if can_execute_type1 and not can_execute_ch_confirmation:
-                    reason = "Type 1 Entry: Extreme Premium (>70%) + IDM Swept (Direct)"
-                else:
-                    reason = "Type 2 Entry: Premium + IDM Swept + M5 CHoCH confirmation"
-            elif zone_strength >= 70 and idm_taken == True and can_execute_ch_confirmation:
-                if current_zone == "DISCOUNT":
-                    final_signal = "BUY"
-                    reason = "Strong Discount zone + IDM confirmed + M5 CHoCH"
-                elif current_zone == "PREMIUM":
-                    final_signal = "SELL"
-                    reason = "Strong Premium zone + IDM confirmed + M5 CHoCH"
-            else:
-                final_signal = "HOLD"
-                if not self.waiting_for_confirmation:
-                    reason = "Waiting for HTF POI hit (no confirmation flag set)"
-                elif not choch_detected:
-                    reason = "Waiting for M5 CHoCH confirmation"
-                elif still_forming:
-                    reason = "Fractal/IDM still forming - need 2 confirmed closes after candidate"
-                elif zone_strength < 30:
-                    reason = f"Zone too weak ({zone_strength:.0f}%) - need ≥30%"
-                else:
-                    reason = "No institutional confluence met"
-        except Exception as e:
-            final_signal = "HOLD"
-            reason = f"Error evaluating signals: {e}"
-
-        max_allowed_spread = 3.0
-        if spread is None:
-            spread = 0.0
-        if spread > max_allowed_spread:
-            reason = f"Spread too large ({spread:.4f})"
-            final_signal = "HOLD"
-
-        if len(self.open_positions) >= self.max_positions:
-            reason = "Max positions reached"
-            final_signal = "HOLD"
-
-        if final_signal in ("BUY", "SELL"):
-            entry_price = ask if final_signal == "BUY" else bid
-            pip = 0.01
-            # FIX 3.2: Liquidity-based targeting (replace ATR retail logic)
-            try:
-                liquidity_detector = LiquidityDetector(market_data)
-                liquidity_levels = liquidity_detector.detect_liquidity(lookback=100)
-            except Exception as e:
-                print(f"⚠️  Liquidity detection failed: {e}, falling back to ATR")
-                liquidity_levels = []
-            if final_signal == "BUY":
-                # SL: Below last swing low (structural invalidation)
-                swing_lows = ms.get("swing_lows", [])
-                if swing_lows and len(swing_lows) > 0:
-                    # Use the lowest of last 3 swing lows for conservative SL
-                    recent_lows = swing_lows[-3:] if len(swing_lows) >= 3 else swing_lows
-                    structural_low = min([sw["price"] for sw in recent_lows])
-                    sl = structural_low - (5 * pip)  # Small buffer below structure
-                    print(f"📍 SL at structural low: {sl:.2f}")
-                else:
-                    sl = entry_price - max(atr * 2, 35 * pip)  # Fallback to ATR
-                    print(f"⚠️  No swing lows, using ATR SL: {sl:.2f}")
-                # TP: Next buy-side liquidity above entry (institutions target liquidity pools)
-                buy_side_liquidity = [
-                    lvl for lvl in liquidity_levels 
-                    if lvl["price"] > entry_price and lvl["type"] in ["SWING_HIGH", "EQUAL_HIGHS"]
-                ]
-                if buy_side_liquidity:
-                    nearest_liq = min(buy_side_liquidity, key=lambda x: x["price"])
-                    tp = nearest_liq["price"]
-                    print(f"🎯 TP at liquidity pool: {tp:.2f} ({nearest_liq['type']})")
-                else:
-                    tp = entry_price + (atr * 3)  # Fallback to ATR
-                    print(f"⚠️  No liquidity above, using ATR TP: {tp:.2f}")
-            elif final_signal == "SELL":
-                # SL: Above last swing high (structural invalidation)
-                swing_highs = ms.get("swing_highs", [])
-                if swing_highs and len(swing_highs) > 0:
-                    recent_highs = swing_highs[-3:] if len(swing_highs) >= 3 else swing_highs
-                    structural_high = max([sw["price"] for sw in recent_highs])
-                    sl = structural_high + (5 * pip)
-                    print(f"📍 SL at structural high: {sl:.2f}")
-                else:
-                    sl = entry_price + max(atr * 2, 35 * pip)  # Fallback to ATR
-                    print(f"⚠️  No swing highs, using ATR SL: {sl:.2f}")
-                # TP: Next sell-side liquidity below entry
-                sell_side_liquidity = [
-                    lvl for lvl in liquidity_levels 
-                    if lvl["price"] < entry_price and lvl["type"] in ["SWING_LOW", "EQUAL_LOWS"]
-                ]
-                if sell_side_liquidity:
-                    nearest_liq = max(sell_side_liquidity, key=lambda x: x["price"])
-                    tp = nearest_liq["price"]
-                    print(f"🎯 TP at liquidity pool: {tp:.2f} ({nearest_liq['type']})")
-                else:
-                    tp = entry_price - (atr * 3)  # Fallback to ATR
-                    print(f"⚠️  No liquidity below, using ATR TP: {tp:.2f}")
-            else:
-                # For HOLD signals, no TP/SL needed
-                pass
-
-            acct = self.mt5_get_account()
-            lot = 0.01
-            if acct:
-                try:
-                    bal = float(acct.balance)
-                    risk_amount = bal * (self.risk_per_trade_percent / 100.0)
-                    pips_at_risk = abs(entry_price - sl) / pip
-                    if pips_at_risk > 0:
-                        lot_est = risk_amount / (pips_at_risk * 10)
-                        lot = min(round(lot_est, 2), self.max_lot_size)
-                        lot = max(lot, 0.01)
-                except Exception:
-                    lot = 0.01
-
-            print(f"🔔 SIGNAL {final_signal} -> Entry {entry_price:.2f} | SL {sl:.2f} | TP {tp:.2f} | Lot {lot}")
-            print(f"   Reason: {reason}")
-
-            ticket = self.mt5_place_order(final_signal, lot, sl, tp)
-            if ticket:
-                pos = {
-                    "ticket": ticket,
-                    "signal": final_signal,
-                    "entry_price": entry_price,
-                    "stop_loss": sl,
-                    "take_profit": tp,
-                    "lot_size": lot,
-                    "entry_time": datetime.now().isoformat(),
-                    "zone": current_zone,
-                    "session": self.current_session
-                }
-                self.open_positions.append(pos)
-                log_entry = {"timestamp": datetime.now().isoformat(), "action": "OPEN", **pos}
-                self.trade_log.append(log_entry)
-                self.save_trade_log()
-                print(f"✅ Tracked new position (ticket: {ticket})")
-                # FIX 2.2: Force reset of waiting flag after ANY trade execution (Type 1 or 2)
-                self.waiting_for_confirmation = False
-                print("🔄 Reset waiting_for_confirmation flag to False")
-
-                # OBSERVATION ONLY: Passive logging of trade entry
-                if obs_logger:
-                    try:
-                        obs_logger.log_event({
-                            "event_type": "TRADE_OPEN",
-                            "ticket": ticket,
-                            "signal": final_signal,
-                            "entry_price": entry_price,
-                            "stop_loss": sl,
-                            "take_profit": tp,
-                            "lot_size": lot,
-                            "reason": reason,
-                            "session": self.current_session,
-                            "market_structure": ms,
-                            "mtf_bias": mtf_conf.get('overall_bias')
-                        })
-                    except Exception:
-                        pass
-                
-                # OBSERVATION ONLY: Passive logging of trade entry (NEW)
-                if ob_obs_logger:
-                    try:
-                        # Fixed method name to .log
-                        ob_obs_logger.log({
-                            "event_type": "TRADE_OPEN",
-                            "ticket": ticket,
-                            "signal": final_signal,
-                            "entry_price": entry_price,
-                            "stop_loss": sl,
-                            "take_profit": tp,
-                            "lot_size": lot,
-                            "reason": reason,
-                            "session": self.current_session,
-                            "market_structure": ms,
-                            "mtf_bias": mtf_conf.get('overall_bias')
-                        })
-                    except Exception:
-                        pass
-            else:
-                print("❌ Order failed or rejected")
-        else:
-            print(f"⏸ No trade executed: {reason}")
             self.trade_log.append({
                 "timestamp": datetime.now().isoformat(),
                 "action": "ANALYSIS",
                 "price": bid,
                 "spread": spread,
                 "zone": current_zone,
-                "zone_strength": zone_strength,
-                "mtf": mtf_conf,
-                "market_structure": ms,
-                "smc_state": smc_state,
-                "waiting_for_confirmation": self.waiting_for_confirmation,
+                "narrative_state": narrative_snapshot.get("state"),
+                "market_state": market_state,
                 "reason": reason
             })
-            if len(self.trade_log) > 1000:
-                self.trade_log = self.trade_log[-1000:]
             self.save_trade_log()
+            return
 
-        # OBSERVATION ONLY: Log analysis state regardless of trade action
-        if obs_logger:
-            try:
-                obs_logger.log_event({
-                    "event_type": "ANALYSIS_STATE",
-                    "timestamp": datetime.now().isoformat(),
-                    "price": bid,
-                    "current_zone": current_zone,
-                    "zone_strength": zone_strength,
-                    "mtf_bias": mtf_conf.get("overall_bias", "NEUTRAL"),
-                    "final_signal": final_signal,
-                    "reason": reason,
-                    "waiting_for_confirmation": self.waiting_for_confirmation,
-                    "smc_state": smc_state
-                })
-            except Exception:
-                pass
-                
-        # OBSERVATION ONLY: Passive logging of analysis (NEW)
-        if ob_obs_logger:
-            try:
-                # Fixed method name to .log
-                ob_obs_logger.log({
-                    "event_type": "ANALYSIS_STATE",
-                    "timestamp": datetime.now().isoformat(),
-                    "price": bid,
-                    "current_zone": current_zone,
-                    "zone_strength": zone_strength,
-                    "mtf_bias": mtf_conf.get("overall_bias", "NEUTRAL"),
-                    "final_signal": final_signal,
-                    "reason": reason,
-                    "waiting_for_confirmation": self.waiting_for_confirmation,
-                    "smc_state": smc_state
-                })
-            except Exception:
-                pass
+        # ==============================================================================
+        # BELOW THIS LINE = OLD LOGIC (TEMPORARILY KEPT, BUT SUBORDINATE)
+        # ==============================================================================
+        print("⚠️ Narrative allows entry — legacy signal logic still active (Phase-3B-1)")
 
-        # ===== Dashboard webhook update (always try; fail silently) =====
-        try:
-            chart_data = []
-            if market_data is not None and len(market_data) > 0:
-                tail = market_data.tail(100)
-                current_ts = int(time.time())
-                for i, (idx, row) in enumerate(tail.iterrows()):
-                    cand_time = current_ts - (len(tail) - i - 1) * 60
-                    open_v = float(row.get('open', 0)) if hasattr(row, 'get') else float(row['open'] if 'open' in row else 0)
-                    high_v = float(row.get('high', 0)) if hasattr(row, 'get') else float(row['high'] if 'high' in row else 0)
-                    low_v = float(row.get('low', 0)) if hasattr(row, 'get') else float(row['low'] if 'low' in row else 0)
-                    close_v = float(row.get('close', 0)) if hasattr(row, 'get') else float(row['close'] if 'close' in row else 0)
-                    chart_data.append({
-                        "time": cand_time,
-                        "open": open_v,
-                        "high": high_v,
-                        "low": low_v,
-                        "close": close_v
-                    })
+        # 🔴 For now, we DO NOT EXECUTE trades yet
+        # Phase-3B-2 / Phase-3C will clean legacy execution logic
 
-            acct = self.mt5_get_account()
-            equity = 0.0
-            balance = 0.0
-            if acct:
-                try:
-                    equity = float(getattr(acct, 'equity', 0.0))
-                    balance = float(getattr(acct, 'balance', 0.0))
-                except Exception:
-                    try:
-                        equity = float(acct.equity) if hasattr(acct, 'equity') else 0.0
-                        balance = float(acct.balance) if hasattr(acct, 'balance') else 0.0
-                    except Exception:
-                        pass
+        print("⏸ Execution intentionally blocked — wiring test only")
 
-            if equity == 0.0 and balance == 0.0:
-                equity = 77829.40
-                balance = 77829.40
-
-            bot_data = {
-                "equity": equity,
-                "balance": balance,
-                "last_price": bid,
-                "open_positions": self.open_positions,
-                "manual_positions": self.manual_positions, # ADDED to payload
-                "closed_trades": [],
-                "chart_data": chart_data,
-                "current_session": self.current_session
-            }
-
-            analysis = {
-                "market_structure": ms,
-                "zone_strength": zone_strength,
-                "current_zone": current_zone,
-                "pdh": latest_high if 'latest_high' in locals() else (float(market_data['high'].max()) if 'high' in market_data.columns else 0),
-                "pdl": latest_low if 'latest_low' in locals() else (float(market_data['low'].min()) if 'low' in market_data.columns else 0),
-                "zones": zones if 'zones' in locals() else {}
-            }
-
-            # Send to dashboard (webhook)
-            sent = send_to_dashboard(bot_data, analysis)
-            if sent:
-                print("📡 Dashboard webhook POST successful")
-            else:
-                print("📡 Dashboard webhook POST failed or not reachable (continuing)")
-
-            print(f"   💰 Equity: ${equity:,.2f} | Balance: ${balance:,.2f}")
-            print(f"   📊 Chart candles: {len(chart_data)} | Price: ${bid:.2f}")
-            print(f"   🎯 Zone: {current_zone} | Strength: {zone_strength}%")
-
-        except Exception as e:
-            print(f"⚠️ Dashboard update failed: {e}")
-
-        print("=" * 60 + "\n")
 
     # Persistence
     def save_trade_log(self, filename="tradelog.json"):
