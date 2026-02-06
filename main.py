@@ -570,11 +570,30 @@ class XAUUSDTradingBot:
         # --- Market Structure ---
         try:
             ms_detector = MarketStructureDetector(market_data)
-            ms = ms_detector.get_market_structure_analysis()
-            smc_state = ms_detector.get_idm_state() if hasattr(ms_detector, "get_idm_state") else {}
-        except Exception:
+            smc_state = ms_detector.get_idm_state()
+
+            if not isinstance(smc_state, dict):
+                smc_state = {}
+
+            # derive simple trend from structure state
+            if smc_state.get("idm_type") == "bullish":
+                ms = {"current_trend": "BULLISH"}
+            elif smc_state.get("idm_type") == "bearish":
+                ms = {"current_trend": "BEARISH"}
+            else:
+                ms = {"current_trend": "NEUTRAL"}
+
+        except Exception as e:
+            print("❌ Market structure error:", e)
             ms = {"current_trend": "NEUTRAL"}
             smc_state = {}
+
+        # Debug structure state
+        print("🧠 SMC STATE:")
+        print("   idm_present:", smc_state.get("is_idm_present"))
+        print("   idm_swept:", smc_state.get("is_idm_swept"))
+        print("   structure_confirmed:", smc_state.get("structure_confirmed"))
+        print("   reason:", smc_state.get("reason_code"))
 
         # --- Zones ---
         try:
@@ -596,22 +615,48 @@ class XAUUSDTradingBot:
             "mtf_bias": mtf_conf
         })
 
+        # --- External Liquidity Detection (PDH/PDL sweep) ---
+        external_sweep = False
+        try:
+            liquidity_detector = LiquidityDetector(market_data)
+            liq_result = liquidity_detector.check_liquidity_grab(current_price=bid)
+
+            pdh_grab = liq_result.get("pdh_grabbed", False)
+            pdl_grab = liq_result.get("pdl_grabbed", False)
+
+            external_sweep = pdh_grab or pdl_grab
+
+            print("🌊 Liquidity:",
+                f"PDH_grab={pdh_grab}",
+                f"PDL_grab={pdl_grab}",
+                f"external_sweep={external_sweep}")
+
+        except Exception as e:
+            print(f"⚠️ Liquidity detection error: {e}")
+            external_sweep = False
+
         # ==============================================================================
         # 🔥 PHASE-3B-1 — NARRATIVE STATE MACHINE AUTHORITY
         # ==============================================================================
         market_state = {
             "trading_range_defined": True,
-            "external_liquidity_swept": False,  # conservative
+            "external_liquidity_swept": external_sweep,
             "idm_taken": smc_state.get("is_idm_swept", False),
             "htf_poi_reached": self.waiting_for_confirmation,
             "ltf_structure_shift": smc_state.get("structure_confirmed", False),
             "ltf_poi_mitigated": False,
-            "killzone_active": self.current_session in ["ASIAN", "LONDON", "NEW_YORK"],
+            "killzone_active": self.current_session in ["LONDON", "NEW_YORK", "OVERLAP"],
             "htf_ob_invalidated": False,
             "daily_structure_flipped": False
         }
 
         narrative_snapshot = self.narrative.update(market_state)
+
+        print("🔍 Narrative Debug:",
+            f"ext_sweep={market_state['external_liquidity_swept']}",
+            f"idm={market_state['idm_taken']}",
+            f"shift={market_state['ltf_structure_shift']}",
+            f"state={narrative_snapshot.get('state')}")
 
         if not narrative_snapshot.get("entry_allowed", False):
             reason = f"Narrative blocked at state: {narrative_snapshot.get('state')}"
@@ -634,11 +679,8 @@ class XAUUSDTradingBot:
         # BELOW THIS LINE = OLD LOGIC (TEMPORARILY KEPT, BUT SUBORDINATE)
         # ==============================================================================
         print("⚠️ Narrative allows entry — legacy signal logic still active (Phase-3B-1)")
-
-        # 🔴 For now, we DO NOT EXECUTE trades yet
-        # Phase-3B-2 / Phase-3C will clean legacy execution logic
-
         print("⏸ Execution intentionally blocked — wiring test only")
+
 
 
     # Persistence
