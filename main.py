@@ -641,14 +641,27 @@ class XAUUSDTradingBot:
         market_state = {
             "trading_range_defined": True,
             "external_liquidity_swept": external_sweep,
+
+            # informational only (no longer part of state sequence)
             "idm_taken": smc_state.get("is_idm_swept", False),
-            "htf_poi_reached": self.waiting_for_confirmation,
-            "ltf_structure_shift": smc_state.get("structure_confirmed", False),
+
+            # HTF POI reached logic (temporary proxy)
+            "htf_poi_reached": external_sweep,
+
+            # LTF structure shift = IDM sweep + structure confirmation
+            "ltf_structure_shift": (
+                smc_state.get("is_idm_swept", False)
+                and smc_state.get("structure_confirmed", False)
+            ),
+
             "ltf_poi_mitigated": False,
             "killzone_active": self.current_session in ["LONDON", "NEW_YORK", "OVERLAP"],
             "htf_ob_invalidated": False,
             "daily_structure_flipped": False
         }
+
+
+
 
         narrative_snapshot = self.narrative.update(market_state)
 
