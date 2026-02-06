@@ -856,3 +856,159 @@ class POIIdentifier:
         }
 
         return finalized_obs
+    
+    def detect_ltf_pois(shift_start: int, shift_end: int, direction: str, df: pd.DataFrame) -> dict:
+        """
+        Deterministic LTF POI detection based on mechanical SMC rules.
+
+        Args:
+            shift_start: index of structural origin (HL or LH)
+            shift_end: index where structure break occurred
+            direction: "bullish" or "bearish"
+            df: dataframe with open, high, low, close
+
+        Returns:
+            {
+                "extreme_poi": dict or None,
+                "idm_poi": dict or None,
+                "median_pois": list,
+                "idm_index": int or None
+            }
+        """
+
+        if df is None or len(df) < 3:
+            return {
+                "extreme_poi": None,
+                "idm_poi": None,
+                "median_pois": [],
+                "idm_index": None
+            }
+
+        # ------------------------------------
+        # Step 1: isolate structural leg
+        # ------------------------------------
+        leg_df = df.iloc[shift_start:shift_end+1].copy()
+        leg_df = leg_df.reset_index(drop=True)
+
+        if len(leg_df) < 3:
+            return {
+                "extreme_poi": None,
+                "idm_poi": None,
+                "median_pois": [],
+                "idm_index": None
+            }
+
+        # ------------------------------------
+        # Step 2: detect valid pullbacks
+        # ------------------------------------
+        idm_index = None
+
+        for i in range(1, len(leg_df)):
+            prev = leg_df.iloc[i-1]
+            curr = leg_df.iloc[i]
+
+            # inside bar filter
+            if curr["high"] <= prev["high"] and curr["low"] >= prev["low"]:
+                continue
+
+            if direction == "bullish":
+                if curr["low"] < prev["low"]:
+                    idm_index = i
+                    break
+
+            elif direction == "bearish":
+                if curr["high"] > prev["high"]:
+                    idm_index = i
+                    break
+
+        if idm_index is None:
+            return {
+                "extreme_poi": None,
+                "idm_poi": None,
+                "median_pois": [],
+                "idm_index": None
+            }
+
+        idm_price = (
+            leg_df.iloc[idm_index]["low"]
+            if direction == "bullish"
+            else leg_df.iloc[idm_index]["high"]
+        )
+
+        # ------------------------------------
+        # Step 3: detect OB candidates
+        # ------------------------------------
+        pois = []
+
+        for i in range(1, len(leg_df)-1):
+            prev = leg_df.iloc[i-1]
+            curr = leg_df.iloc[i]
+            nxt = leg_df.iloc[i+1]
+
+            # inside bar grouping
+            if curr["high"] <= prev["high"] and curr["low"] >= prev["low"]:
+                continue
+
+            is_ob = False
+
+            if direction == "bullish":
+                if curr["close"] < curr["open"] and nxt["high"] > curr["high"]:
+                    is_ob = True
+
+            elif direction == "bearish":
+                if curr["close"] > curr["open"] and nxt["low"] < curr["low"]:
+                    is_ob = True
+
+            if not is_ob:
+                continue
+
+            top = curr["high"]
+            bottom = curr["low"]
+            mt = (top + bottom) / 2
+
+            pois.append({
+                "index": i,
+                "top": float(top),
+                "bottom": float(bottom),
+                "mt": float(mt)
+            })
+
+        if not pois:
+            return {
+                "extreme_poi": None,
+                "idm_poi": None,
+                "median_pois": [],
+                "idm_index": idm_index
+            }
+
+        # ------------------------------------
+        # Step 4: classify POIs
+        # ------------------------------------
+        extreme_poi = None
+        idm_poi = None
+        median_pois = []
+
+        # extreme = closest to shift_start
+        extreme_poi = min(pois, key=lambda x: x["index"])
+
+        for p in pois:
+            if direction == "bullish":
+                if p["bottom"] < idm_price:
+                    idm_poi = p
+                    break
+            else:
+                if p["top"] > idm_price:
+                    idm_poi = p
+                    break
+
+        if idm_poi:
+            for p in pois:
+                if p != extreme_poi and p != idm_poi:
+                    median_pois.append(p)
+
+        return {
+            "extreme_poi": extreme_poi,
+            "idm_poi": idm_poi,
+            "median_pois": median_pois,
+            "idm_index": idm_index
+        }
