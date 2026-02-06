@@ -4,17 +4,12 @@ class BiasAnalyzer:
     """
     Institutional-style bias engine.
 
-    Purpose:
-    Determine higher timeframe directional bias
-    based on structure and liquidity.
+    Determines HTF directional bias based on
+    confirmed structure and draw-on-liquidity.
 
     No scoring.
-    No probability stacking.
-    No signal fusion.
-
-    Only:
-    - HTF structure direction
-    - Draw on liquidity
+    No probability.
+    No signal stacking.
     """
 
     def __init__(self):
@@ -58,17 +53,25 @@ class BiasAnalyzer:
     # -------------------------------------------------
     def _get_structure_bias(self, market_structure: dict):
         """
-        Determine bias from HTF structure.
+        Determine bias from confirmed structure.
         """
 
-        trend = market_structure.get("current_trend", "NEUTRAL")
-
-        if trend == "BULLISH":
-            return "BULLISH"
-        elif trend == "BEARISH":
-            return "BEARISH"
-        else:
+        if not market_structure:
             return "NEUTRAL"
+
+        # Only trust confirmed structure
+        if not market_structure.get("structure_confirmed", False):
+            return "NEUTRAL"
+
+        mss = market_structure.get("mss_or_choch", "")
+
+        if "BULLISH" in mss:
+            return "BULLISH"
+
+        if "BEARISH" in mss:
+            return "BEARISH"
+
+        return "NEUTRAL"
 
     # -------------------------------------------------
     # Liquidity target
@@ -85,11 +88,9 @@ class BiasAnalyzer:
         sell_side = liquidity_map.get("sell_side", [])
 
         if bias == "BULLISH" and buy_side:
-            # nearest buy-side liquidity above
             return min(buy_side)
 
         if bias == "BEARISH" and sell_side:
-            # nearest sell-side liquidity below
             return max(sell_side)
 
         return None
