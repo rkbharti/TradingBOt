@@ -857,7 +857,7 @@ class POIIdentifier:
 
         return finalized_obs
     
-    def detect_ltf_pois(shift_start: int, shift_end: int, direction: str, df: pd.DataFrame) -> dict:
+    def detect_ltf_pois(self, shift_start: int, shift_end: int, direction: str, df: pd.DataFrame) -> dict:
         """
         Deterministic LTF POI detection based on mechanical SMC rules.
 

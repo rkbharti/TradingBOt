@@ -33,6 +33,8 @@ from strategy.smc_enhanced.zones import ZoneCalculator
 from strategy.idea_memory import IdeaMemory
 from strategy.smc_enhanced.liquidity import LiquidityDetector
 from strategy.smc_enhanced.narrative import NarrativeAnalyzer
+from strategy.smc_enhanced.poi import POIIdentifier
+
 
 
 # Note: we no longer rely on direct in-process server imports.
@@ -175,6 +177,9 @@ class XAUUSDTradingBot:
         # === SMC NARRATIVE STATE MACHINE (PHASE-3B-1) ===
         self.narrative = NarrativeAnalyzer()
         self.zone_calculator = ZoneCalculator
+        self.zone_calculator = ZoneCalculator
+        self.poi_identifier = None   # initialized later with fresh data
+
         self.running = False
         self.trade_log = []
         
@@ -634,6 +639,52 @@ class XAUUSDTradingBot:
         except Exception as e:
             print(f"⚠️ Liquidity detection error: {e}")
             external_sweep = False
+            
+        # -------------------------------------------------
+        # Phase-5B: LTF POI detection and mitigation check
+        # -------------------------------------------------
+        ltf_poi_mitigated = False
+
+        try:
+            # Fetch fresh M5 data from MTF engine
+            df = self.mtf.fetch_data("M5")
+
+            if df is not None and len(df) > 20:
+                shift_end = len(df) - 1
+                shift_start = max(0, shift_end - 20)
+
+                direction = "bullish" if smc_state.get("idm_type") == "bullish" else "bearish"
+
+                # Initialize POIIdentifier with current dataframe
+                self.poi_identifier = POIIdentifier(df)
+
+                poi_result = self.poi_identifier.detect_ltf_pois(
+                    shift_start=shift_start,
+                    shift_end=shift_end,
+                    direction=direction,
+                    df=df
+                )
+
+
+                extreme = poi_result.get("extreme_poi")
+                idm_poi = poi_result.get("idm_poi")
+
+                current_price = float(df["close"].iloc[-1])
+
+                # Check mitigation
+                for poi in [extreme, idm_poi]:
+                    if poi is None:
+                        continue
+
+                    if poi["bottom"] <= current_price <= poi["top"]:
+                        ltf_poi_mitigated = True
+                        break
+
+        except Exception as e:
+            print(f"⚠️ LTF POI check failed: {e}")
+
+
+
 
         # ==============================================================================
         # 🔥 PHASE-3B-1 — NARRATIVE STATE MACHINE AUTHORITY
@@ -654,7 +705,7 @@ class XAUUSDTradingBot:
                 and smc_state.get("structure_confirmed", False)
             ),
 
-            "ltf_poi_mitigated": False,
+            "ltf_poi_mitigated": ltf_poi_mitigated,
             "killzone_active": self.current_session in ["LONDON", "NEW_YORK", "OVERLAP"],
             "htf_ob_invalidated": False,
             "daily_structure_flipped": False
