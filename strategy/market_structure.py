@@ -145,6 +145,7 @@ class MarketStructureDetector:
             "mss_or_choch": "NONE",
             "bos_or_sweep_occurred": False,
             "bos_level": None,
+            "bos_bar_index": None,   # NEW FIELD
             "reason_code": "NO_STRUCTURE_BREAK",
         }
 
@@ -158,6 +159,9 @@ class MarketStructureDetector:
         for i in range(sweep_bar + 1, len(self.df)):
             bar = self.df.iloc[i]
 
+            # ------------------------------
+            # Bullish structure confirmation
+            # ------------------------------
             if idm_type == "bullish":
                 if bar["close"] > ref_high:
                     out.update(
@@ -166,11 +170,15 @@ class MarketStructureDetector:
                             "mss_or_choch": "MSS_BULLISH",
                             "bos_or_sweep_occurred": True,
                             "bos_level": float(ref_high),
+                            "bos_bar_index": int(i),   # CRITICAL ADD
                             "reason_code": "STRUCTURE_CONFIRMED",
                         }
                     )
                     return out
 
+            # ------------------------------
+            # Bearish structure confirmation
+            # ------------------------------
             elif idm_type == "bearish":
                 if bar["close"] < ref_low:
                     out.update(
@@ -179,6 +187,7 @@ class MarketStructureDetector:
                             "mss_or_choch": "MSS_BEARISH",
                             "bos_or_sweep_occurred": True,
                             "bos_level": float(ref_low),
+                            "bos_bar_index": int(i),   # CRITICAL ADD
                             "reason_code": "STRUCTURE_CONFIRMED",
                         }
                     )
@@ -186,17 +195,25 @@ class MarketStructureDetector:
 
         return out
 
+
     # ------------------------------------------------------------------
     # Main public API
     # ------------------------------------------------------------------
     def get_idm_state(self) -> Dict:
+        """
+        Consolidated IDM → Sweep → Structure state.
+        Adds CHOCH bar index for POI hierarchy logic.
+        """
+
         if self.df is None or len(self.df) < 3:
             return self._default_analysis()
 
         # Step 1: detect IDM
         idm = self.detect_idm()
         if not idm["is_idm_present"]:
-            return idm
+            out = {**idm}
+            out["choch_bar_index"] = None
+            return out
 
         # Step 2: sweep
         sweep = self.confirm_idm_sweep(
@@ -212,6 +229,7 @@ class MarketStructureDetector:
             out["mss_or_choch"] = "NONE"
             out["bos_or_sweep_occurred"] = False
             out["bos_level"] = None
+            out["choch_bar_index"] = None
             return out
 
         # Step 3: structure
@@ -221,4 +239,14 @@ class MarketStructureDetector:
         )
 
         out.update(structure)
+
+        # -------------------------------------------------
+        # NEW: CHOCH BAR EXTRACTION
+        # -------------------------------------------------
+        # If structure is CHOCH, use the BOS bar as CHOCH origin
+        if structure.get("structure_confirmed") and structure.get("mss_or_choch", "").startswith("CHOCH"):
+            out["choch_bar_index"] = structure.get("bos_bar_index")
+        else:
+            out["choch_bar_index"] = None
+
         return out
