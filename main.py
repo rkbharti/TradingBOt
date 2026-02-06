@@ -506,6 +506,8 @@ class XAUUSDTradingBot:
         is_active, session_name = is_trading_session()
         session_norm = map_session_for_filter(session_name)
         self.current_session = session_norm
+        print(f"\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Session: {self.current_session}")
+
 
         # ==============================================================================
         # MARKET CLOSED / SLEEP MODE

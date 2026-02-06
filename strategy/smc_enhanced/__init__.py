@@ -5,14 +5,14 @@ Implements Guardeer's complete 10-video SMC methodology
 
 from .liquidity import LiquidityDetector
 from .poi import POIIdentifier
-from .bias import BiasDetector
+from .bias import BiasAnalyzer
 from .zones import ZoneCalculator
 from .narrative import NarrativeAnalyzer
 
 __all__ = [
     'LiquidityDetector',
     'POIIdentifier',
-    'BiasDetector',
+    "BiasAnalyzer",
     'ZoneCalculator',
     'NarrativeAnalyzer'
 ]
