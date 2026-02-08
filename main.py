@@ -732,12 +732,9 @@ class XAUUSDTradingBot:
             })
             self.save_trade_log()
             return
+        
+        print("🚀 Narrative allows entry — proceeding to execution logic")
 
-        # ==============================================================================
-        # BELOW THIS LINE = OLD LOGIC (TEMPORARILY KEPT, BUT SUBORDINATE)
-        # ==============================================================================
-        print("⚠️ Narrative allows entry — legacy signal logic still active (Phase-3B-1)")
-        print("⏸ Execution intentionally blocked — wiring test only")
 
 
 
