@@ -1,5 +1,5 @@
 # main.py
-DRY_RUN = False
+DRY_RUN = True
 
 import os
 import time
@@ -129,25 +129,71 @@ def send_to_dashboard(bot_data: dict, analysis: dict, endpoint: str = "http://lo
     - Safe: catches exceptions and returns False on failure.
     - Replaces NaN values in serializable data by converting via json.dumps -> replace.
     """
+
+    # --------------------------------------------------
+    # PHASE-7A: POI VISUAL OVERLAY FEED
+    # --------------------------------------------------
+    poi_overlays = []
+    print("DEBUG overlays:", poi_overlays)
+
+
     try:
+        ltf_pois = analysis.get("ltf_pois")
+
+        if ltf_pois:
+            if ltf_pois.get("extreme_poi"):
+                poi_overlays.append({
+                    "type": "extreme",
+                    "top": ltf_pois["extreme_poi"]["top"],
+                    "bottom": ltf_pois["extreme_poi"]["bottom"]
+                })
+
+            if ltf_pois.get("idm_poi"):
+                poi_overlays.append({
+                    "type": "idm",
+                    "top": ltf_pois["idm_poi"]["top"],
+                    "bottom": ltf_pois["idm_poi"]["bottom"]
+                })
+
+            for mp in ltf_pois.get("median_pois", []):
+                poi_overlays.append({
+                    "type": "median",
+                    "top": mp["top"],
+                    "bottom": mp["bottom"]
+                })
+
+    except Exception as e:
+        print(f"⚠️ POI overlay build failed: {e}")
+
+    try:
+        # attach overlays into analysis_data
+        analysis_with_overlays = analysis.copy()
+
+        analysis_with_overlays["chart_overlays"] = {
+            "poi_zones": poi_overlays
+        }
+
         payload = {
             "bot_instance": bot_data,
-            "analysis_data": analysis
+            "analysis_data": analysis_with_overlays
         }
-        # Attempt to serialize and replace NaN tokens to protect browser parsing
+
+        # Attempt to serialize and replace NaN tokens
         try:
             json_payload = json.dumps(payload, default=str)
             if "NaN" in json_payload:
                 json_payload = json_payload.replace("NaN", "null")
             resp = requests.post(endpoint, data=json_payload, headers={"Content-Type": "application/json"}, timeout=timeout)
         except TypeError:
-            # fallback: send as json (requests will handle serialization)
+            # fallback
             resp = requests.post(endpoint, json=payload, timeout=timeout)
+
         if resp.status_code == 200:
             return True
         else:
             print(f"   ⚠️ Dashboard POST returned status {resp.status_code}")
             return False
+
     except requests.exceptions.RequestException as e:
         print(f"   ⚠️ Dashboard POST failed: {e}")
         return False
@@ -163,8 +209,11 @@ def graceful_shutdown(signum=None, frame=None):
     except Exception as e:
         print(f"⚠️ Failed to log bot stop: {e}")
     sys.exit(0)
+
+
 signal.signal(signal.SIGINT, graceful_shutdown)   # Ctrl+C
 signal.signal(signal.SIGTERM, graceful_shutdown)  # Kill / stop
+
 
 # ---------- Bot ----------
 

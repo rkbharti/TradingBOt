@@ -616,6 +616,11 @@ def update_bot_state_v2(bot_instance, analysis_data):
                 "levels": {"pdh": pdh_val, "pdl": pdl_val},
                 "zones": {"equilibrium": zones_val.get("equilibrium") if isinstance(zones_val, dict) else None}
             },
+            "poi_zones": [
+                { "type": "extreme", "top": ..., "bottom": ... },
+                { "type": "idm", "top": ..., "bottom": ... }
+            ],
+
             "news_event": {"title": "No major events scheduled", "time": "Market Calm"},
             "chart_data": get_val(bot_instance, "chart_data", [])[-100:]
         })
@@ -641,7 +646,7 @@ async def webhook(payload: dict = Body(...)):
             for k, v in payload.items():
                 if k not in analysis:
                     bot_inst[k] = v
-
+            
         # Update internal state and PnL tracker
         update_bot_state_v2(bot_inst, analysis)
         return {"status": "ok"}
