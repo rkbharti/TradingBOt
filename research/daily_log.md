@@ -258,3 +258,102 @@
    - TP/SL source (Liquidity vs ATR fallback).
 3. Backtest Jan 25–30 data with new logic to compare against the zero-trade baseline.
 4. After validation, prepare competition-ready configuration (0.01 lots, drawdown guards, session limits).
+
+---
+
+---
+
+## 2026-02-07 — PHASE 5 Completion: Narrative Alignment & LTF POI Integration
+
+### Work Done
+
+#### Fix 5.1 — Narrative State Machine Alignment
+
+- Refactored `narrative.py` to match institutional sequence from Guardeer SMC videos.
+- Removed `IDM_TAKEN` as a blocking narrative state.
+- New mechanical sequence enforced:
+
+- Narrative now advances only on confirmed structure events.
+
+---
+
+#### Fix 5.2 — Deterministic LTF POI Detection
+
+- Implemented deterministic `detect_ltf_pois()` contract.
+- POI classification now strictly follows mechanical rules.
+
+POI types:
+
+- EXTREME POI → structural origin zone.
+- IDM POI → first valid unmitigated zone near inducement.
+- MEDIAN POIs → trap zones between extreme and IDM.
+
+Rules enforced:
+
+- OB must have adjacent FVG.
+- 50% mean threshold mitigation logic applied.
+- Body-close beyond MT invalidates POI.
+
+---
+
+#### Fix 5.3 — Main Loop Wiring & Error Resolution
+
+Resolved multiple integration issues during Phase-5:
+
+- Fixed missing attributes:
+  - `self.df`
+  - `self.data`
+  - `self.poi_identifier`
+- Corrected `fetch_data()` call signature.
+- Fixed incorrect argument passing to:
+  POIIdentifier.detect_ltf_pois()
+
+- Ensured narrative debug output reflects real state progression.
+
+---
+
+### Resulting Behavior
+
+Live output now shows:
+
+Narrative state: HTF_POI_REACHED
+No trade — Narrative blocked
+
+This confirms:
+
+- Bot no longer jumps into entries.
+- It waits for actual structure shift before allowing trades.
+- Narrative authority is now structurally correct.
+
+---
+
+### System Status (End of Phase-5)
+
+Core architecture now aligned with institutional sequence:
+
+1. HTF bias detection
+2. External liquidity sweep
+3. HTF POI reached
+4. LTF structure shift
+5. LTF POI mitigation
+6. Entry permission
+
+Bot behavior:
+
+- No premature entries.
+- Narrative gating working correctly.
+- POI detection integrated into structure logic.
+
+Mode:
+
+- DRY_RUN
+- Structural validation phase ongoing.
+
+---
+
+### Next Steps (Phase-6 Preview)
+
+1. Wire LTF POI mitigation into entry trigger.
+2. Connect narrative `ENTRY_ALLOWED` to execution logic.
+3. Add strict entry candle displacement rule.
+4. Validate first live trades in DRY_RUN.
