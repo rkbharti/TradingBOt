@@ -732,7 +732,6 @@ class XAUUSDTradingBot:
             })
             self.save_trade_log()
             return
-        
         print("🚀 Narrative allows entry — proceeding to execution logic")
 
 
