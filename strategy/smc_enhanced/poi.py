@@ -100,6 +100,36 @@ class POIIdentifier:
                 self.logger = ObservationLogger()
             except Exception:
                 pass
+        # -----------------------
+    # LTF POI Mitigation Check (Phase-6A)
+    # -----------------------
+    def is_poi_mitigated(self, poi: dict, df: pd.DataFrame) -> bool:
+        """
+        Check if price has tapped the POI zone.
+        Mechanical rule: any candle wick entering the zone = mitigated.
+        """
+
+        if poi is None or df is None or len(df) == 0:
+            return False
+
+        top = poi.get("price_top")
+        bottom = poi.get("price_bottom")
+
+        if top is None or bottom is None:
+            return False
+
+        # check last closed candle
+        last = df.iloc[-1]
+
+        candle_high = float(last["high"])
+        candle_low = float(last["low"])
+
+        # wick overlap check
+        if candle_low <= top and candle_high >= bottom:
+            return True
+
+        return False
+
 
     # -----------------------
     # Helper: last closed candle index (live-safe)
