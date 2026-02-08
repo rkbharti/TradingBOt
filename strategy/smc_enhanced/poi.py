@@ -129,6 +129,73 @@ class POIIdentifier:
             return True
 
         return False
+        # -----------------------
+    # LTF Displacement Check (Phase-6B)
+    # -----------------------
+    def is_displacement_after_poi(self, poi: dict, df: pd.DataFrame, direction: str) -> bool:
+        """
+        Checks for displacement after POI mitigation.
+        Mechanical rule:
+        - After POI tap, a strong candle must appear
+        - Candle body > average recent body
+        - Must create an FVG
+        """
+
+        if df is None or len(df) < 5:
+            return False
+
+        last_closed = self._last_closed_index(df)
+        if last_closed is None or last_closed < 4:
+            return False
+
+        # Use last 20 candles to calculate average body
+        lookback = min(20, last_closed)
+        bodies = abs(df["close"].iloc[last_closed-lookback:last_closed] -
+                     df["open"].iloc[last_closed-lookback:last_closed])
+
+        if len(bodies) == 0:
+            return False
+
+        avg_body = bodies.mean()
+
+        # Check last closed candle
+        i = last_closed
+
+        open_ = df["open"].iloc[i]
+        close_ = df["close"].iloc[i]
+        high_ = df["high"].iloc[i]
+        low_ = df["low"].iloc[i]
+
+        body_size = abs(close_ - open_)
+
+        # Directional check
+        if direction == "bullish" and close_ <= open_:
+            return False
+        if direction == "bearish" and close_ >= open_:
+            return False
+
+        # Body must be larger than average
+        if body_size < avg_body:
+            return False
+
+        # FVG check using 3-bar logic
+        if i < 2:
+            return False
+
+        c1_high = df["high"].iloc[i - 2]
+        c1_low = df["low"].iloc[i - 2]
+        c3_high = high_
+        c3_low = low_
+
+        bullish_fvg = c1_high < c3_low
+        bearish_fvg = c1_low > c3_high
+
+        if direction == "bullish" and bullish_fvg:
+            return True
+        if direction == "bearish" and bearish_fvg:
+            return True
+
+        return False
 
 
     # -----------------------

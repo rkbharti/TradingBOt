@@ -640,48 +640,45 @@ class XAUUSDTradingBot:
             print(f"⚠️ Liquidity detection error: {e}")
             external_sweep = False
             
-        # -------------------------------------------------
-        # Phase-5B: LTF POI detection and mitigation check
-        # -------------------------------------------------
-        ltf_poi_mitigated = False
+        # ======================================================================
+        # 🔥 PHASE-6 — LTF POI MITIGATION + DISPLACEMENT CHECK (FINAL SAFE)
+        # ======================================================================
+
+        poi_mitigated = False
+        displacement_confirmed = False
 
         try:
-            # Fetch fresh M5 data from MTF engine
-            df = self.mtf.fetch_data("M5")
+            # Fetch LTF data (M5)
+            ltf_df = self.mtf.fetch_data("M5")
 
-            if df is not None and len(df) > 20:
-                shift_end = len(df) - 1
-                shift_start = max(0, shift_end - 20)
+            if ltf_df is not None and len(ltf_df) > 10:
+                poi_identifier = POIIdentifier(ltf_df)
 
-                direction = "bullish" if smc_state.get("idm_type") == "bullish" else "bearish"
+                # Determine direction from structure
+                direction = "bullish" if smc_state.get("structure_confirmed") else "bearish"
 
-                # Initialize POIIdentifier with current dataframe
-                self.poi_identifier = POIIdentifier(df)
-
-                poi_result = self.poi_identifier.detect_ltf_pois(
-                    shift_start=shift_start,
-                    shift_end=shift_end,
+                # Detect POIs inside structure leg
+                pois = poi_identifier.detect_ltf_pois(
+                    shift_start=0,
+                    shift_end=len(ltf_df) - 1,
                     direction=direction,
-                    df=df
+                    df=ltf_df
                 )
 
+                extreme_poi = pois.get("extreme_poi")
 
-                extreme = poi_result.get("extreme_poi")
-                idm_poi = poi_result.get("idm_poi")
+                if extreme_poi:
+                    poi_mitigated = poi_identifier.is_poi_mitigated(extreme_poi, ltf_df)
 
-                current_price = float(df["close"].iloc[-1])
-
-                # Check mitigation
-                for poi in [extreme, idm_poi]:
-                    if poi is None:
-                        continue
-
-                    if poi["bottom"] <= current_price <= poi["top"]:
-                        ltf_poi_mitigated = True
-                        break
+                    if poi_mitigated:
+                        displacement_confirmed = poi_identifier.is_displacement_after_poi(
+                            extreme_poi,
+                            direction,
+                            ltf_df
+                        )
 
         except Exception as e:
-            print(f"⚠️ LTF POI check failed: {e}")
+            print(f"⚠️ Phase-6 POI logic failed: {e}")
 
 
 
@@ -693,26 +690,23 @@ class XAUUSDTradingBot:
             "trading_range_defined": True,
             "external_liquidity_swept": external_sweep,
 
-            # informational only (no longer part of state sequence)
+            # informational only
             "idm_taken": smc_state.get("is_idm_swept", False),
 
-            # HTF POI reached logic (temporary proxy)
+            # HTF POI proxy
             "htf_poi_reached": external_sweep,
 
-            # LTF structure shift = IDM sweep + structure confirmation
+            # LTF structure shift
             "ltf_structure_shift": (
                 smc_state.get("is_idm_swept", False)
                 and smc_state.get("structure_confirmed", False)
             ),
 
-            "ltf_poi_mitigated": ltf_poi_mitigated,
+            "ltf_poi_mitigated": poi_mitigated,
             "killzone_active": self.current_session in ["LONDON", "NEW_YORK", "OVERLAP"],
             "htf_ob_invalidated": False,
             "daily_structure_flipped": False
         }
-
-
-
 
         narrative_snapshot = self.narrative.update(market_state)
 
