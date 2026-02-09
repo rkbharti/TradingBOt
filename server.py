@@ -310,9 +310,16 @@ html_content = """
             crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
         });
         const series = chart.addCandlestickSeries({ upColor: '#30d158', downColor: '#ff453a', borderVisible: false, wickUpColor: '#30d158', wickDownColor: '#ff453a' });
+        
         let pdhLine = series.createPriceLine({ price: 0, color: '#8e8e93', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: 'PDH' });
         let pdlLine = series.createPriceLine({ price: 0, color: '#8e8e93', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: 'PDL' });
         let eqLine = series.createPriceLine({ price: 0, color: '#ffffff', lineWidth: 1, lineStyle: 3, axisLabelVisible: false, title: 'EQ' });
+
+        // Phase-7: Overlay lines storage
+        let overlayLines = [];
+
+        // Chart objects overlays storage
+        let chartObjectLines = [];
 
         function dashboardStore() {
             return {
@@ -320,8 +327,6 @@ html_content = """
                 structure: 'NEUTRAL', zone_strength: 0, zone: '--', session: '--',
                 news: { title: 'Scanning...', time: '--' },
                 trades: [], flipCapital: false,
-
-                // New PnL fields
                 pnl_today: 0, pnl_week: 0, pnl_total: 0, open_pnl: 0,
 
                 fmt(n) { return (n !== null && n !== undefined) ? '$' + Number(n).toLocaleString(undefined,{minimumFractionDigits:2}) : '$0.00' },
@@ -330,6 +335,10 @@ html_content = """
                     const ws = new WebSocket((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws');
                     ws.onmessage = (event) => {
                         const data = JSON.parse(event.data);
+                        console.log("FULL WS DATA:", data);
+                        console.log("CHART_OBJECTS:", data.chart_objects);
+                        console.log(JSON.stringify(data.chart_objects, null, 2));
+
                         if (!data) return;
 
                         this.equity = data.equity || this.equity;
@@ -356,6 +365,123 @@ html_content = """
                             if(ov.levels?.pdh) pdhLine.applyOptions({ price: ov.levels.pdh, axisLabelVisible: true });
                             if(ov.levels?.pdl) pdlLine.applyOptions({ price: ov.levels.pdl, axisLabelVisible: true });
                             if(ov.zones?.equilibrium) eqLine.applyOptions({ price: ov.zones.equilibrium, axisLabelVisible: true });
+                        }
+
+                        // Phase-7: Draw POI overlays as zone boundaries
+                        if (data.poi_overlays && Array.isArray(data.poi_overlays)) {
+                            // Clear existing
+                            overlayLines.forEach(l => series.removePriceLine(l));
+                            overlayLines = [];
+
+                            data.poi_overlays.forEach(zone => {
+                                let c = '#8e8e93'; // Median/Gray
+                                if (zone.type === 'extreme') c = '#ff453a'; // Red
+                                if (zone.type === 'idm') c = '#ffd60a'; // Yellow
+                                
+                                const lTop = series.createPriceLine({
+                                    price: zone.top, color: c, lineWidth: 1, lineStyle: 0,
+                                    axisLabelVisible: false, title: zone.type.toUpperCase()
+                                });
+                                const lBot = series.createPriceLine({
+                                    price: zone.bottom, color: c, lineWidth: 1, lineStyle: 2,
+                                    axisLabelVisible: false, title: ''
+                                });
+                                overlayLines.push(lTop, lBot);
+                            });
+                        }
+
+                        // === Draw chart_objects overlays ===
+                        if (data.chart_objects) {
+                            // Clear previous chart_objectLines
+                            chartObjectLines.forEach(l => series.removePriceLine(l));
+                            chartObjectLines = [];
+
+                            // Structure lines
+                            if (Array.isArray(data.chart_objects.structure_lines)) {
+                                data.chart_objects.structure_lines.forEach(line => {
+                                    if (line.top !== undefined && line.bottom !== undefined) {
+                                        let lineColor = "#8e8e93"; // gray
+                                        if (line.type === "msb") lineColor = "#0a84ff";
+                                        else if (line.type === "range") lineColor = "#ffd60a";
+                                        const lTop = series.createPriceLine({
+                                            price: line.top,
+                                            color: lineColor, lineWidth: 2, lineStyle: 0,
+                                            axisLabelVisible: true, title: "STRUCT_TOP"
+                                        });
+                                        const lBot = series.createPriceLine({
+                                            price: line.bottom,
+                                            color: lineColor, lineWidth: 2, lineStyle: 2,
+                                            axisLabelVisible: true, title: "STRUCT_BOT"
+                                        });
+                                        chartObjectLines.push(lTop, lBot);
+                                    } else if (line.price !== undefined) {
+                                        let lineColor = "#0a84ff";
+                                        const msbLine = series.createPriceLine({
+                                            price: line.price,
+                                            color: lineColor, lineWidth: 2, lineStyle: 1,
+                                            axisLabelVisible: true, title: "MSB"
+                                        });
+                                        chartObjectLines.push(msbLine);
+                                    }
+                                });
+                            }
+
+                            // Entry Zones
+                            if (Array.isArray(data.chart_objects.entry_zones)) {
+                                data.chart_objects.entry_zones.forEach(zone => {
+                                    if (zone.top !== undefined && zone.bottom !== undefined) {
+                                        let lineColor = "#30d158"; // green
+                                        const entryTop = series.createPriceLine({
+                                            price: zone.top,
+                                            color: lineColor, lineWidth: 1, lineStyle: 0,
+                                            axisLabelVisible: true, title: (zone.label || "ENTRY_TOP")
+                                        });
+                                        const entryBot = series.createPriceLine({
+                                            price: zone.bottom,
+                                            color: lineColor, lineWidth: 1, lineStyle: 2,
+                                            axisLabelVisible: true, title: (zone.label || "ENTRY_BOT")
+                                        });
+                                        chartObjectLines.push(entryTop, entryBot);
+                                    }
+                                });
+                            }
+
+                            // SL/TP Boxes
+                            if (Array.isArray(data.chart_objects.sl_tp_boxes)) {
+                                data.chart_objects.sl_tp_boxes.forEach(box => {
+                                    // If box has sl and tp, draw those
+                                    if (box.sl !== undefined && box.tp !== undefined) {
+                                        let slColor = "#ff453a"; // red
+                                        let tpColor = "#30d158"; // green
+                                        const slLine = series.createPriceLine({
+                                            price: box.sl,
+                                            color: slColor, lineWidth: 2, lineStyle: 1,
+                                            axisLabelVisible: true, title: "SL"
+                                        });
+                                        const tpLine = series.createPriceLine({
+                                            price: box.tp,
+                                            color: tpColor, lineWidth: 2, lineStyle: 1,
+                                            axisLabelVisible: true, title: "TP"
+                                        });
+                                        chartObjectLines.push(slLine, tpLine);
+                                    }
+                                    if (box.top !== undefined && box.bottom !== undefined) {
+                                        let boxColor = "#ffd60a";
+                                        if (box.type === "extreme_poi") boxColor = "#ff453a";
+                                        const topLine = series.createPriceLine({
+                                            price: box.top,
+                                            color: boxColor, lineWidth: 2, lineStyle: 0,
+                                            axisLabelVisible: true, title: "BOX_TOP"
+                                        });
+                                        const botLine = series.createPriceLine({
+                                            price: box.bottom,
+                                            color: boxColor, lineWidth: 2, lineStyle: 2,
+                                            axisLabelVisible: true, title: "BOX_BOT"
+                                        });
+                                        chartObjectLines.push(topLine, botLine);
+                                    }
+                                });
+                            }
                         }
                     };
                     ws.onclose = () => setTimeout(() => this.connect(), 3000);
@@ -597,6 +723,12 @@ def update_bot_state_v2(bot_instance, analysis_data):
         pdh_val = analysis_data.get("pdh") if isinstance(analysis_data, dict) else getattr(analysis_data, "pdh", None)
         pdl_val = analysis_data.get("pdl") if isinstance(analysis_data, dict) else getattr(analysis_data, "pdl", None)
         zones_val = analysis_data.get("zones", {}) if isinstance(analysis_data, dict) else getattr(analysis_data, "zones", {})
+        
+        # Phase-7: Extract POI overlays from incoming payload
+        poi_overlays = analysis_data.get("poi_overlays", []) if isinstance(analysis_data, dict) else getattr(analysis_data, "poi_overlays", [])
+
+        # Extract chart_objects from analysis_data
+        chart_objects = analysis_data.get("chart_objects", {})
 
         bot_state.update({
             "equity": equity,
@@ -616,11 +748,9 @@ def update_bot_state_v2(bot_instance, analysis_data):
                 "levels": {"pdh": pdh_val, "pdl": pdl_val},
                 "zones": {"equilibrium": zones_val.get("equilibrium") if isinstance(zones_val, dict) else None}
             },
-            "poi_zones": [
-                { "type": "extreme", "top": ..., "bottom": ... },
-                { "type": "idm", "top": ..., "bottom": ... }
-            ],
-
+            # Phase-7: Add to state
+            "poi_overlays": poi_overlays,
+            "chart_objects": chart_objects,  # <-- Added key for chart_objects
             "news_event": {"title": "No major events scheduled", "time": "Market Calm"},
             "chart_data": get_val(bot_instance, "chart_data", [])[-100:]
         })
@@ -640,7 +770,7 @@ async def webhook(payload: dict = Body(...)):
         else:
             bot_inst = {}
             analysis = {}
-            for k in ("market_structure", "zone_strength", "current_zone", "pdh", "pdl", "zones"):
+            for k in ("market_structure", "zone_strength", "current_zone", "pdh", "pdl", "zones", "poi_overlays"):
                 if k in payload:
                     analysis[k] = payload[k]
             for k, v in payload.items():
@@ -653,6 +783,6 @@ async def webhook(payload: dict = Body(...)):
     except Exception as e:
         traceback.print_exc()
         return {"status": "error", "reason": str(e)}
-   # adding the new feature for display dashboard issuue 
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
