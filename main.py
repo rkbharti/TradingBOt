@@ -34,8 +34,7 @@ from strategy.idea_memory import IdeaMemory
 from strategy.smc_enhanced.liquidity import LiquidityDetector
 from strategy.smc_enhanced.narrative import NarrativeAnalyzer
 from strategy.smc_enhanced.poi import POIIdentifier
-
-
+from strategy.chart_objects import build_chart_objects
 
 # Note: we no longer rely on direct in-process server imports.
 # Communication to the dashboard is done via webhook POST to the server.
@@ -91,10 +90,10 @@ def compute_atr_from_df(df: pd.DataFrame, period: int = 14) -> float:
 
 def is_trading_session():
     now = datetime.now(pytz.utc)
-    
-    # 🛑 NEW: Check if it's Saturday (5) or Sunday (6)
+
+    # 🛑 Check if it's Saturday (5) or Sunday (6)
     # This prevents the bot from thinking it's "New York Session" on a Sunday
-    if now.weekday() >= 5: 
+    if now.weekday() >= 5:
         return False, "WEEKEND_MARKET_CLOSED"
 
     t = now.hour + now.minute / 60.0
@@ -104,9 +103,10 @@ def is_trading_session():
         return True, "LONDON"
     if 16.0 <= t < 21.0:
         return True, "NY_SESSION"
-    
+
     # If it's a weekday but outside trading hours (e.g., 22:00 UTC)
-    return False, "ASIAN"
+    # We return True so analysis runs, but we filter execution in the main loop
+    return True, "ASIAN"
 
 def map_session_for_filter(session_name: str) -> str:
     if session_name is None:
@@ -135,7 +135,6 @@ def send_to_dashboard(bot_data: dict, analysis: dict, endpoint: str = "http://lo
     # --------------------------------------------------
     poi_overlays = []
     print("DEBUG overlays:", poi_overlays)
-
 
     try:
         ltf_pois = analysis.get("ltf_pois")
@@ -231,14 +230,14 @@ class XAUUSDTradingBot:
 
         self.running = False
         self.trade_log = []
-        
+
         # Internal tracking for BOT initiated positions
         self.open_positions = []
-        
+
         # === MANUAL TRADE OBSERVATION (ADDED) ===
         # Separate list to track positions found in MT5 that are NOT in self.open_positions
         self.manual_positions = []
-        
+
         self.max_positions = 3
         self.max_lot_size = 2.0
         self.risk_per_trade_percent = 0.5
@@ -296,7 +295,7 @@ class XAUUSDTradingBot:
         Returns a list of standardized dictionaries.
         """
         positions_raw = None
-        
+
         # 1. Try various method names common in wrappers
         try:
             if hasattr(self.mt5, "positions_get"):
@@ -448,7 +447,7 @@ class XAUUSDTradingBot:
             live_pos_list = self.mt5_get_all_positions()
             if live_pos_list is None:
                 live_pos_list = []
-                
+
             # DEBUG: Print found positions to ensure connectivity
             if len(live_pos_list) > 0:
                 print(f"🔎 DEBUG: MT5 reports {len(live_pos_list)} open positions.")
@@ -458,11 +457,11 @@ class XAUUSDTradingBot:
 
             # 3. Sync Logic
             current_manual_tickets = []
-            
+
             for pos in live_pos_list:
                 ticket = int(pos.get("ticket", 0))
                 symbol = pos.get("symbol", "")
-                
+
                 # Filter for XAUUSD (or current symbol) only - CASE INSENSITIVE FIX
                 sym_upper = symbol.upper()
                 if "XAU" not in sym_upper and "GOLD" not in sym_upper:
@@ -473,23 +472,23 @@ class XAUUSDTradingBot:
                 # If this ticket is NOT in bot_tickets, it is MANUAL
                 if ticket not in bot_tickets:
                     current_manual_tickets.append(ticket)
-                    
+
                     # Check if we are already tracking this manual trade
                     existing_manual = next((item for item in self.manual_positions if item["ticket"] == ticket), None)
-                    
+
                     if not existing_manual:
                         # === NEW MANUAL TRADE DETECTED ===
                         trade_type_code = pos.get("type", 0)
                         trade_type = "BUY" if trade_type_code == 0 else "SELL"
                         entry_price = float(pos.get("price_open", 0.0))
-                        
+
                         # Apply SMC Intelligence
                         advisory = "HOLD"
                         rationale = []
-                        
+
                         trend = analysis_context.get("market_structure", {}).get("current_trend", "NEUTRAL")
                         zone = analysis_context.get("current_zone", "UNKNOWN")
-                        
+
                         # Trend Alignment
                         if trade_type == "BUY":
                             if trend == "BULLISH": rationale.append("Aligned with Bullish Trend")
@@ -497,18 +496,18 @@ class XAUUSDTradingBot:
                         else: # SELL
                             if trend == "BEARISH": rationale.append("Aligned with Bearish Trend")
                             elif trend == "BULLISH": rationale.append("Counter-trend (High Risk)")
-                            
+
                         # Zone Alignment
                         if zone == "DISCOUNT" and trade_type == "BUY": rationale.append("Buying in Discount (Good)")
                         if zone == "PREMIUM" and trade_type == "BUY": rationale.append("Buying in Premium (Risk)")
                         if zone == "PREMIUM" and trade_type == "SELL": rationale.append("Selling in Premium (Good)")
                         if zone == "DISCOUNT" and trade_type == "SELL": rationale.append("Selling in Discount (Risk)")
-                        
+
                         advisory_str = "; ".join(rationale) if rationale else "Neutral structure"
-                        
+
                         print(f"👀 MANUAL TRADE DETECTED: Ticket {ticket} | {trade_type} @ {entry_price}")
                         print(f"   🤖 SMC Analysis: {advisory_str}")
-                        
+
                         # Register
                         new_manual = {
                             "ticket": ticket,
@@ -523,7 +522,7 @@ class XAUUSDTradingBot:
                             "status": "OPEN"
                         }
                         self.manual_positions.append(new_manual)
-                        
+
                         # Log to persistent log
                         self.trade_log.append({
                             "timestamp": datetime.now().isoformat(),
@@ -562,22 +561,32 @@ class XAUUSDTradingBot:
         self.current_session = session_norm
         print(f"\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Session: {self.current_session}")
 
-
-        # ==============================================================================
-        # MARKET CLOSED / SLEEP MODE
-        # ==============================================================================
+        # ============================================================================== 
+        # MARKET CLOSED (WEEKEND ONLY)
+        # ============================================================================== 
         if not is_active:
             print(f"⏸️ Market session '{session_norm}' not active — heartbeat only")
-
             acct = self.mt5_get_account()
             equity = float(getattr(acct, 'equity', 0.0)) if acct else 0.0
             balance = float(getattr(acct, 'balance', 0.0)) if acct else 0.0
-            if equity == 0.0 and balance == 0.0:
-                equity = balance = 77829.40
 
-            # Manual trade sync even during sleep
+            # Narrative state logging (even when market closed)
+            narrative_state = "MARKET_CLOSED"
+            entry_allowed = False
+            structure_state = {"current_trend": "MARKET CLOSED"}
+            bias = "NEUTRAL"
+            log_record = {
+                "time": datetime.now().isoformat(),
+                "narrative_state": narrative_state,
+                "entry_allowed": entry_allowed,
+                "structure_state": structure_state,
+                "bias": bias,
+                "reason": f"Market session '{session_norm}' not active"
+            }
+            self.trade_log.append(log_record)
+            self.save_trade_log()
             try:
-                self.detect_and_manage_manual_trades({"market_structure": {}, "current_zone": "CLOSED"})
+                obs_logger.log_event("narrative_state", log_record)
             except Exception:
                 pass
 
@@ -601,156 +610,115 @@ class XAUUSDTradingBot:
             )
             return
 
-        # ==============================================================================
-        # ACTIVE MARKET
-        # ==============================================================================
+        # ============================================================================== 
+        # ACTIVE MARKET (Analysis runs 24/5)
+        # ============================================================================== 
         market_data, current_price = self.fetch_and_prepare()
         if market_data is None or current_price is None:
             return
-
-        atr = compute_atr_from_df(market_data, period=14)
 
         bid = float(current_price.get("bid", current_price))
         ask = float(current_price.get("ask", bid))
         spread = abs(ask - bid)
         price_for_zones = bid
 
-        # --- MTF Bias (still informational) ---
+        # --- MTF Bias --- 
         try:
             mtf_conf = self.mtf.get_multi_tf_confluence()
         except Exception:
             mtf_conf = {"overall_bias": "NEUTRAL", "confidence": 0}
 
-        # --- Market Structure ---
+        # --- Market Structure --- 
         try:
             ms_detector = MarketStructureDetector(market_data)
             smc_state = ms_detector.get_idm_state()
+            if not isinstance(smc_state, dict): smc_state = {}
 
-            if not isinstance(smc_state, dict):
-                smc_state = {}
-
-            # derive simple trend from structure state
-            if smc_state.get("idm_type") == "bullish":
-                ms = {"current_trend": "BULLISH"}
-            elif smc_state.get("idm_type") == "bearish":
-                ms = {"current_trend": "BEARISH"}
-            else:
-                ms = {"current_trend": "NEUTRAL"}
-
+            if smc_state.get("idm_type") == "bullish": ms = {"current_trend": "BULLISH"}
+            elif smc_state.get("idm_type") == "bearish": ms = {"current_trend": "BEARISH"}
+            else: ms = {"current_trend": "NEUTRAL"}
         except Exception as e:
             print("❌ Market structure error:", e)
             ms = {"current_trend": "NEUTRAL"}
             smc_state = {}
 
-        # Debug structure state
-        print("🧠 SMC STATE:")
-        print("   idm_present:", smc_state.get("is_idm_present"))
-        print("   idm_swept:", smc_state.get("is_idm_swept"))
-        print("   structure_confirmed:", smc_state.get("structure_confirmed"))
-        print("   reason:", smc_state.get("reason_code"))
-
-        # --- Zones ---
+        # --- Zones --- 
         try:
             latest_high = float(market_data['high'].max())
             latest_low = float(market_data['low'].min())
             zones = ZoneCalculator.calculate_zones(latest_high, latest_low)
             current_zone = ZoneCalculator.classify_price_zone(price_for_zones, zones)
-            zone_strength = 0  # intentionally dead (Phase-2)
-        except Exception:
-            current_zone = "UNKNOWN"
             zone_strength = 0
-            zones = {}
+        except Exception:
+            current_zone = "UNKNOWN"; zone_strength = 0; zones = {}
 
-        # --- Manual trade observation ---
+        # --- Manual trade observation --- 
         self.detect_and_manage_manual_trades({
-            "market_structure": ms,
-            "current_zone": current_zone,
-            "zone_strength": zone_strength,
-            "mtf_bias": mtf_conf
+            "market_structure": ms, "current_zone": current_zone,
+            "zone_strength": zone_strength, "mtf_bias": mtf_conf
         })
 
-        # --- External Liquidity Detection (PDH/PDL sweep) ---
+        # --- Liquidity Detection --- 
         external_sweep = False
         try:
             liquidity_detector = LiquidityDetector(market_data)
             liq_result = liquidity_detector.check_liquidity_grab(current_price=bid)
-
-            pdh_grab = liq_result.get("pdh_grabbed", False)
-            pdl_grab = liq_result.get("pdl_grabbed", False)
-
-            external_sweep = pdh_grab or pdl_grab
-
-            print("🌊 Liquidity:",
-                f"PDH_grab={pdh_grab}",
-                f"PDL_grab={pdl_grab}",
-                f"external_sweep={external_sweep}")
-
+            external_sweep = liq_result.get("pdh_grabbed", False) or liq_result.get("pdl_grabbed", False)
         except Exception as e:
             print(f"⚠️ Liquidity detection error: {e}")
-            external_sweep = False
-            
-        # ======================================================================
-        # 🔥 PHASE-6 — LTF POI MITIGATION + DISPLACEMENT CHECK (FINAL SAFE)
-        # ======================================================================
 
+        # ======================================================================
+        # 🔥 PHASE-6/7 — LTF POI DETECTION & OVERLAYS
+        # ======================================================================
         poi_mitigated = False
         displacement_confirmed = False
+        ltf_pois = {} # <--- PHASE-7: Store for visual dashboard
 
         try:
-            # Fetch LTF data (M5)
             ltf_df = self.mtf.fetch_data("M5")
-
             if ltf_df is not None and len(ltf_df) > 10:
                 poi_identifier = POIIdentifier(ltf_df)
+                idm_type = smc_state.get("idm_type")
 
-                # Determine direction from structure
-                direction = "bullish" if smc_state.get("structure_confirmed") else "bearish"
+                if idm_type == "bullish":
+                    direction = "bullish"
+                elif idm_type == "bearish":
+                    direction = "bearish"
+                else:
+                    direction = None
 
-                # Detect POIs inside structure leg
-                pois = poi_identifier.detect_ltf_pois(
-                    shift_start=0,
-                    shift_end=len(ltf_df) - 1,
-                    direction=direction,
-                    df=ltf_df
-                )
+                if direction:
+                    shift_start = max(0, len(ltf_df) - 50)   # temporary safe window
+                    shift_end = len(ltf_df) - 1
 
-                extreme_poi = pois.get("extreme_poi")
+                    ltf_pois = poi_identifier.detect_ltf_pois(
+                        shift_start=shift_start,
+                        shift_end=shift_end,
+                        direction=direction,
+                        df=ltf_df
+                    )
+                else:
+                    ltf_pois = {}
 
+                extreme_poi = ltf_pois.get("extreme_poi")
                 if extreme_poi:
                     poi_mitigated = poi_identifier.is_poi_mitigated(extreme_poi, ltf_df)
-
                     if poi_mitigated:
                         displacement_confirmed = poi_identifier.is_displacement_after_poi(
-                            extreme_poi,
-                            direction,
-                            ltf_df
+                            extreme_poi, direction, ltf_df
                         )
-
         except Exception as e:
-            print(f"⚠️ Phase-6 POI logic failed: {e}")
+            print(f"⚠️ Phase-6/7 POI logic failed: {e}")
 
-
-
-
-        # ==============================================================================
-        # 🔥 PHASE-3B-1 — NARRATIVE STATE MACHINE AUTHORITY
-        # ==============================================================================
+        # ============================================================================== 
+        # 🔥 PHASE-3B-1 — NARRATIVE ENGINE
+        # ============================================================================== 
         market_state = {
             "trading_range_defined": True,
             "external_liquidity_swept": external_sweep,
-
-            # informational only
             "idm_taken": smc_state.get("is_idm_swept", False),
-
-            # HTF POI proxy
             "htf_poi_reached": external_sweep,
-
-            # LTF structure shift
-            "ltf_structure_shift": (
-                smc_state.get("is_idm_swept", False)
-                and smc_state.get("structure_confirmed", False)
-            ),
-
+            "ltf_structure_shift": (smc_state.get("is_idm_swept", False) and smc_state.get("structure_confirmed", False)),
             "ltf_poi_mitigated": poi_mitigated,
             "killzone_active": self.current_session in ["LONDON", "NEW_YORK", "OVERLAP"],
             "htf_ob_invalidated": False,
@@ -759,32 +727,98 @@ class XAUUSDTradingBot:
 
         narrative_snapshot = self.narrative.update(market_state)
 
-        print("🔍 Narrative Debug:",
-            f"ext_sweep={market_state['external_liquidity_swept']}",
-            f"idm={market_state['idm_taken']}",
-            f"shift={market_state['ltf_structure_shift']}",
-            f"state={narrative_snapshot.get('state')}")
+        # Narrative state logging (required: every cycle)
+        bias = None
+        try:
+            from strategy.smc_enhanced.bias import BiasAnalyzer
+            bias_analyzer = BiasAnalyzer()
+            bias_result = bias_analyzer.get_bias(smc_state)
+            bias = bias_result.get("bias", "NEUTRAL") if isinstance(bias_result, dict) else "NEUTRAL"
+        except Exception:
+            bias = "NEUTRAL"
 
+        log_record = {
+            "time": datetime.now().isoformat(),
+            "narrative_state": narrative_snapshot.get("state"),
+            "entry_allowed": narrative_snapshot.get("entry_allowed"),
+            "structure_state": smc_state,
+            "bias": bias,
+            "reason": narrative_snapshot.get("state") if not narrative_snapshot.get("entry_allowed") else "Entry permitted"
+        }
+        self.trade_log.append(log_record)
+        self.save_trade_log()
+        try:
+            obs_logger.log_event("narrative_state", log_record)
+        except Exception:
+            pass
+
+        # ====================================================================== 
+        # 📊 PHASE-7 — SEND TO DASHBOARD (ALWAYS)
+        # ====================================================================== 
+        acct = self.mt5_get_account()
+        dash_payload = {
+            "equity": float(getattr(acct, 'equity', 0.0)) if acct else 0.0,
+            "balance": float(getattr(acct, 'balance', 0.0)) if acct else 0.0,
+            "last_price": bid,
+            "open_positions": self.open_positions,
+            "manual_positions": self.manual_positions,
+            "closed_trades": [],
+            "chart_data": market_data.tail(100).to_dict(orient="records"),
+            "current_session": self.current_session
+        }
+
+        # === 🟦 Build chart objects module integration ===
+
+        # Debug: check what SMC engine is producing
+        print("SMC STATE:", smc_state)
+        print("LTF POIS:", ltf_pois)
+
+        chart_objects = build_chart_objects(
+            smc_state, zones, ltf_pois, bid
+        )
+
+        # Debug: check final chart objects
+        print("CHART OBJECTS:", chart_objects)
+
+        analysis_snapshot = {
+            # Core structure info
+            "market_structure": ms,
+            "zone_strength": zone_strength,
+            "current_zone": current_zone,
+
+            # HTF zones
+            "zones": zones,
+
+            # Daily levels
+            "pdh": float(market_data['high'].max()),
+            "pdl": float(market_data['low'].min()),
+
+            # LTF POIs (legacy overlay system)
+            "ltf_pois": ltf_pois,
+
+            # New unified chart objects
+            "chart_objects": chart_objects
+        }
+
+        # Send to dashboard
+        send_to_dashboard(dash_payload, analysis_snapshot)
+
+
+        # ============================================================================== 
+        # 🚀 EXECUTION GATE (Strict Session Rule)
+        # ============================================================================== 
         if not narrative_snapshot.get("entry_allowed", False):
-            reason = f"Narrative blocked at state: {narrative_snapshot.get('state')}"
-            print(f"⏸ No trade — {reason}")
-
-            self.trade_log.append({
-                "timestamp": datetime.now().isoformat(),
-                "action": "ANALYSIS",
-                "price": bid,
-                "spread": spread,
-                "zone": current_zone,
-                "narrative_state": narrative_snapshot.get("state"),
-                "market_state": market_state,
-                "reason": reason
-            })
-            self.save_trade_log()
+            print(f"⏸ No trade — Narrative: {narrative_snapshot.get('state')}")
             return
-        print("🚀 Narrative allows entry — proceeding to execution logic")
 
+        # Restrict execution to London/NY/Overlap
+        can_execute = self.current_session in ["LONDON", "NEW_YORK", "OVERLAP"]
 
-
+        if can_execute:
+            print(f"🚀 Execution triggered in {self.current_session}")
+            # [PASTE YOUR ORDER PLACEMENT CODE HERE]
+        else:
+            print(f"🛑 Entry Allowed by SMC, but BLOCKED by session: {self.current_session}")
 
     # Persistence
     def save_trade_log(self, filename="tradelog.json"):
