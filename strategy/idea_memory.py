@@ -13,7 +13,7 @@ class IdeaMemory:
         self.memory_file = memory_file
         self.short_term_memory = {}
         self.load_memory()  # <--- Loads previous state on startup
-
+        self.save_memory()
     def load_memory(self):
         """Load memory from file so we don't forget losses on restart"""
         if os.path.exists(self.memory_file):
@@ -57,9 +57,12 @@ class IdeaMemory:
 
     def _get_key(self, direction, zone, session):
         """Create a unique key for the trade setup"""
-        # E.g., "BUY_PREMIUM_LONDON"
-        # We purposely exclude 'zone_bucket' here to make the block safer (wider)
+        zone = str(zone).upper()
+        if zone not in ["PREMIUM", "DISCOUNT", "EQ", "POI"]:
+            zone = "EQ"
+
         return f"{direction}_{zone}_{session}"
+
 
     def mark_result(self, direction, zone, session, outcome):
         """
