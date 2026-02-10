@@ -36,6 +36,20 @@ class NarrativeAnalyzer:
         if market_state.get("daily_structure_flipped"):
             return self.reset("HTF bias reset")
 
+        # --- STRUCTURE ROLLBACK LOGIC ---
+
+        if self.state == NarrativeState.LTF_STRUCTURE_SHIFT:
+            if not market_state.get("ltf_structure_shift"):
+                self.state = NarrativeState.HTF_POI_REACHED
+
+        if self.state == NarrativeState.LTF_POI_MITIGATED:
+            if not market_state.get("ltf_poi_mitigated"):
+                self.state = NarrativeState.LTF_STRUCTURE_SHIFT
+
+        if self.state == NarrativeState.ENTRY_ALLOWED:
+            if not market_state.get("killzone_active"):
+                self.state = NarrativeState.LTF_POI_MITIGATED
+
         # --- MULTI-STEP STATE ADVANCEMENT ---
         state_changed = True
 
