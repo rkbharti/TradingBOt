@@ -24,7 +24,6 @@ try:
 except Exception as e:
     print(f"⚠️ OBObservationLogger error: {e}")
 
-
 # Local modules (must exist per your directory structure)
 from utils.mt5_connection import MT5Connection
 from strategy.multi_timeframe_fractal import MultiTimeframeFractal
@@ -35,6 +34,7 @@ from strategy.smc_enhanced.liquidity import LiquidityDetector
 from strategy.smc_enhanced.narrative import NarrativeAnalyzer
 from strategy.smc_enhanced.poi import POIIdentifier
 from strategy.chart_objects import build_chart_objects
+from utils.htf_memory import HTFMemory  # TASK 1 STEP 1
 
 # Note: we no longer rely on direct in-process server imports.
 # Communication to the dashboard is done via webhook POST to the server.
@@ -246,6 +246,9 @@ class XAUUSDTradingBot:
         # Reaction logic: waiting for confirmation after HTF POI hit
         self.waiting_for_confirmation = False
 
+        # TASK 1 STEP 2: Add HTFMemory
+        self.htf_memory = HTFMemory()
+
     # MT5 wrappers
     def mt5_initialize(self):
         try:
@@ -339,7 +342,8 @@ class XAUUSDTradingBot:
                         "sl": getattr(p, "sl", 0.0),
                         "tp": getattr(p, "tp", 0.0),
                         "symbol": getattr(p, "symbol", ""),
-                        "price_current": getattr(p, "price_current", 0.0)
+                        "price_current": getattr(p, "price_current", 0.0),
+                        "profit": getattr(p, "profit", 0.0)
                     }
 
                 # Ensure critical keys exist and are typed correctly
@@ -352,7 +356,8 @@ class XAUUSDTradingBot:
                         "sl": float(p_dict.get("sl", 0.0)),
                         "tp": float(p_dict.get("tp", 0.0)),
                         "symbol": str(p_dict.get("symbol", "")),
-                        "price_current": float(p_dict.get("price_current", 0.0))
+                        "price_current": float(p_dict.get("price_current", 0.0)),
+                        "profit": float(p_dict.get("profit", 0.0))
                     })
         except Exception as e:
             print(f"⚠️ Error normalizing positions: {e}")
@@ -469,6 +474,7 @@ class XAUUSDTradingBot:
                     print(f"⚠️ DEBUG: Skipping position {ticket} (Symbol: {symbol} not XAU/GOLD)")
                     continue
 
+                # TASK 2: Manual trade detection
                 # If this ticket is NOT in bot_tickets, it is MANUAL
                 if ticket not in bot_tickets:
                     current_manual_tickets.append(ticket)
@@ -519,7 +525,13 @@ class XAUUSDTradingBot:
                             "tp": pos.get("tp"),
                             "entry_time": datetime.now().isoformat(),
                             "advisory": advisory_str,
-                            "status": "OPEN"
+                            "status": "OPEN",
+                            "symbol": symbol,
+                            "type": trade_type_code,
+                            "profit": pos.get("profit", 0.0),
+                            "price_open": entry_price,
+                            "price_current": pos.get("price_current", 0.0),
+                            "source": "MANUAL"  # TASK 2 (Add 'source': 'MANUAL')
                         }
                         self.manual_positions.append(new_manual)
 
@@ -551,6 +563,14 @@ class XAUUSDTradingBot:
                     })
                     self.save_trade_log()
 
+            # TASK 2: Ensure manual trades are visible in open_positions
+            # This block guarantees that manual trades appear in the open_positions list and are passed to dashboard
+            manual_tickets_set = set([pm["ticket"] for pm in self.manual_positions])
+            for manual_pos in self.manual_positions:
+                # Check if not already injected in open_positions
+                if not any(op.get("ticket", 0) == manual_pos["ticket"] for op in self.open_positions):
+                    self.open_positions.append(manual_pos)
+
         except Exception as e:
             print(f"⚠️ Manual trade sync error: {e}")
     # ========================================
@@ -560,6 +580,10 @@ class XAUUSDTradingBot:
         session_norm = map_session_for_filter(session_name)
         self.current_session = session_norm
         print(f"\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Session: {self.current_session}")
+
+        # TASK 1 STEP 4: Print stored HTF bias on startup / first cycle
+        stored_bias = self.htf_memory.get("h4_bias", "NEUTRAL")
+        print("HTF MEMORY BIAS:", stored_bias)
 
         # ============================================================================== 
         # MARKET CLOSED (WEEKEND ONLY)
@@ -627,6 +651,15 @@ class XAUUSDTradingBot:
             mtf_conf = self.mtf.get_multi_tf_confluence()
         except Exception:
             mtf_conf = {"overall_bias": "NEUTRAL", "confidence": 0}
+
+        # --- H4 bias calculation (TASK 1 STEP 3) ---
+        try:
+            # Placeholder: Assume H4 bias is calculated here, e.g. from an H4 analysis module or similar logic.
+            h4_bias = mtf_conf.get("H4", {}).get("bias", "NEUTRAL")
+        except Exception:
+            h4_bias = "NEUTRAL"
+        print("H4 bias detected:", h4_bias) 
+        self.htf_memory.update("h4_bias", h4_bias)  # TASK 1 STEP 3
 
         # --- Market Structure --- 
         try:
@@ -718,12 +751,21 @@ class XAUUSDTradingBot:
             "external_liquidity_swept": external_sweep,
             "idm_taken": smc_state.get("is_idm_swept", False),
             "htf_poi_reached": external_sweep,
-            "ltf_structure_shift": (smc_state.get("is_idm_swept", False) and smc_state.get("structure_confirmed", False)),
+
+            # FIXED LINE
+            "ltf_structure_shift": smc_state.get("structure_confirmed", False),
+
             "ltf_poi_mitigated": poi_mitigated,
             "killzone_active": self.current_session in ["LONDON", "NEW_YORK", "OVERLAP"],
             "htf_ob_invalidated": False,
             "daily_structure_flipped": False
         }
+
+        
+        print("NARRATIVE CHECK:")
+        print("ltf_structure_shift:", market_state.get("ltf_structure_shift"))
+        print("ltf_poi_mitigated:", market_state.get("ltf_poi_mitigated"))
+        print("killzone_active:", market_state.get("killzone_active"))
 
         narrative_snapshot = self.narrative.update(market_state)
 
@@ -752,6 +794,10 @@ class XAUUSDTradingBot:
         except Exception:
             pass
 
+        # TASK 3: Narrative explanation print
+        narrative_state = narrative_snapshot.get("state", "UNKNOWN")
+        print(f"🧠 Market Narrative: {narrative_state} — structure context for this minute")
+
         # ====================================================================== 
         # 📊 PHASE-7 — SEND TO DASHBOARD (ALWAYS)
         # ====================================================================== 
@@ -763,7 +809,7 @@ class XAUUSDTradingBot:
             "open_positions": self.open_positions,
             "manual_positions": self.manual_positions,
             "closed_trades": [],
-            "chart_data": market_data.tail(100).to_dict(orient="records"),
+            "chart_data": market_data.tail(300).to_dict(orient="records"),
             "current_session": self.current_session
         }
 
@@ -802,7 +848,6 @@ class XAUUSDTradingBot:
 
         # Send to dashboard
         send_to_dashboard(dash_payload, analysis_snapshot)
-
 
         # ============================================================================== 
         # 🚀 EXECUTION GATE (Strict Session Rule)
