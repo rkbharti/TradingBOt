@@ -25,7 +25,7 @@ class MultiTimeframeFractal:
             'D1': mt5.TIMEFRAME_D1
         }
     
-    def fetch_data(self, timeframe_name: str, bars=100) -> pd.DataFrame:
+    def fetch_data(self, timeframe_name: str, bars=300) -> pd.DataFrame:
         """Fetch OHLC data for a specific timeframe"""
         try:
             tf = self.timeframes[timeframe_name]
@@ -57,13 +57,11 @@ class MultiTimeframeFractal:
         swing_lows = []
         
         for i in range(sensitivity, len(df) - sensitivity):
-            # Swing High
             is_high = all(df.iloc[i]['high'] >= df.iloc[j]['high'] 
                          for j in range(i - sensitivity, i + sensitivity + 1))
             if is_high:
                 swing_highs.append(i)
             
-            # Swing Low
             is_low = all(df.iloc[i]['low'] <= df.iloc[j]['low'] 
                         for j in range(i - sensitivity, i + sensitivity + 1))
             if is_low:
@@ -73,10 +71,6 @@ class MultiTimeframeFractal:
     
     
     def detect_bos(self, df: pd.DataFrame, swing_highs: list, swing_lows: list) -> dict:
-        """
-        Detect Break of Structure (BOS)
-        BOS = Price breaks most recent swing high/low
-        """
         result = {
             'bullish_bos': False,
             'bearish_bos': False,
@@ -89,7 +83,6 @@ class MultiTimeframeFractal:
         
         current_price = df.iloc[-1]['close']
         
-        # Bullish BOS (break above swing high)
         if swing_highs:
             most_recent_high = df.iloc[swing_highs[-1]]['high']
             if current_price > most_recent_high:
@@ -97,7 +90,6 @@ class MultiTimeframeFractal:
                 result['bos_price'] = most_recent_high
                 result['strength'] = 'STRONG'
         
-        # Bearish BOS (break below swing low)
         if swing_lows:
             most_recent_low = df.iloc[swing_lows[-1]]['low']
             if current_price < most_recent_low:
@@ -109,10 +101,6 @@ class MultiTimeframeFractal:
     
     
     def detect_choc(self, df: pd.DataFrame, swing_highs: list, swing_lows: list) -> dict:
-        """
-        Detect Change of Character (CHOC)
-        CHOC = Failure to make new high/low + reversal structure
-        """
         result = {
             'bullish_choc': False,
             'bearish_choc': False,
@@ -122,17 +110,14 @@ class MultiTimeframeFractal:
         if len(swing_highs) < 3 or len(swing_lows) < 3:
             return result
         
-        # Get last 3 swings
         last_3_highs = [df.iloc[i]['high'] for i in swing_highs[-3:]]
         last_3_lows = [df.iloc[i]['low'] for i in swing_lows[-3:]]
         
-        # Bullish CHOC: Lower lows stop + higher high forms
         if last_3_lows[0] > last_3_lows[1] > last_3_lows[2]:
             if last_3_highs[-1] > last_3_highs[-2]:
                 result['bullish_choc'] = True
                 result['description'] = 'Downtrend broken, higher high formed'
         
-        # Bearish CHOC: Higher highs stop + lower low forms
         if last_3_highs[0] < last_3_highs[1] < last_3_highs[2]:
             if last_3_lows[-1] < last_3_lows[-2]:
                 result['bearish_choc'] = True
@@ -142,10 +127,6 @@ class MultiTimeframeFractal:
     
     
     def detect_idm(self, df: pd.DataFrame) -> dict:
-        """
-        Detect Institutional Distribution/Manipulation (IDM)
-        IDM = Large wicks + small bodies
-        """
         result = {
             'idm_detected': False,
             'idm_type': 'NONE',
@@ -180,18 +161,18 @@ class MultiTimeframeFractal:
         return result
     
     
-    def analyze_timeframe(self, timeframe: str) -> dict:
+    def analyze_timeframe(self, timeframe: str, bars=300) -> dict:
         """Complete analysis for single timeframe"""
-        df = self.fetch_data(timeframe, bars=100)
+        df = self.fetch_data(timeframe, bars=bars)
         if df is None:
             return None
+        print(f"{timeframe} candles loaded:", len(df))
         
         swing_highs, swing_lows = self.detect_swing_points(df, sensitivity=3)
         bos = self.detect_bos(df, swing_highs, swing_lows)
         choc = self.detect_choc(df, swing_highs, swing_lows)
         idm = self.detect_idm(df)
         
-        # Determine bias
         bias_score = 0
         if bos['bullish_bos']:
             bias_score += 2
@@ -213,127 +194,3 @@ class MultiTimeframeFractal:
             'swing_highs': len(swing_highs),
             'swing_lows': len(swing_lows)
         }
-    
-    
-    def get_multi_tf_confluence(self) -> dict:
-        """
-        Analyze all timeframes and return confluence signal
-        
-        Returns:
-            {
-                'overall_bias': str,
-                'confidence': int (0-100),
-                'tf_signals': dict,
-                'recommendation': str
-            }
-        """
-        print("\n📊 MULTI-TIMEFRAME FRACTAL ANALYSIS (Guardeer Video 2)")
-        print("=" * 70)
-        
-        results = {}
-        for tf in ['D1', 'H4', 'H1', 'M15', 'M5']:
-            analysis = self.analyze_timeframe(tf)
-            if analysis:
-                results[tf] = analysis
-                print(
-                    f"   {tf}: {analysis['bias']} | "
-                    f"BOS: {'✅' if analysis['bos']['bullish_bos'] or analysis['bos']['bearish_bos'] else '❌'} | "
-                    f"CHOC: {'✅' if analysis['choc']['bullish_choc'] or analysis['choc']['bearish_choc'] else '❌'}"
-                )
-
-        # ===== SMART MTF WEIGHTING (TIER 2 FIX #4) =====
-        # D1=40%, H4=25%, H1=20%, M15=10%, M5=5%
-        weights = {
-            'D1': 0.40,
-            'H4': 0.25,
-            'H1': 0.20,
-            'M15': 0.10,
-            'M5': 0.05
-        }
-
-        # Collect biases per timeframe
-        tf_biases = {tf: res['bias'] for tf, res in results.items()}
-
-        bull_score = 0.0
-        bear_score = 0.0
-        neutral_weight = 0.0
-
-        for tf, bias in tf_biases.items():
-            w = weights.get(tf, 0.0)
-            if bias == 'BULLISH':
-                bull_score += w
-            elif bias == 'BEARISH':
-                bear_score += w
-            elif bias == 'NEUTRAL':
-                neutral_weight += w
-
-        total_weight = bull_score + bear_score + neutral_weight
-        if total_weight == 0:
-            overall_bias = 'NEUTRAL'
-            confidence = 0
-        else:
-            # NEUTRAL supports either side: split its weight equally
-            bull_score_aligned = bull_score + neutral_weight / 2.0
-            bear_score_aligned = bear_score + neutral_weight / 2.0
-
-            if bull_score_aligned > bear_score_aligned:
-                overall_bias = 'BULLISH'
-                confidence = int((bull_score_aligned / total_weight) * 100)
-            elif bear_score_aligned > bull_score_aligned:
-                overall_bias = 'BEARISH'
-                confidence = int((bear_score_aligned / total_weight) * 100)
-            else:
-                overall_bias = 'NEUTRAL'
-                confidence = 50
-
-        # ===== DYNAMIC THRESHOLD (you already consume this in main.py) =====
-        MTF_BASE_THRESHOLD = 60
-        MTF_HIGH_CONFIDENCE_THRESHOLD = 75
-        # (thresholds are used in main.py, so no change needed here)
-
-        # Recommendation text
-        if confidence >= 80:
-            recommendation = f"STRONG {overall_bias} - High confidence setup"
-        elif confidence >= 60:
-            recommendation = f"MODERATE {overall_bias} - Good probability"
-        else:
-            recommendation = "WEAK - Wait for better setup"
-        
-        print(f"\n   🎯 Overall Bias: {overall_bias} ({confidence}%)")
-        print(f"   💡 Recommendation: {recommendation}")
-
-        return {
-            'overall_bias': overall_bias,
-            'confidence': confidence,
-            'tf_signals': results,
-            'recommendation': recommendation
-        }
-
-        
-    def get_dynamic_threshold(self, confidence, zone_strength=0):
-        """
-        Calculate dynamic MTF threshold based on confidence and zone strength.
-        
-        Logic:
-        - Default: 60% MTF confidence required
-        - If zone_strength > 70%: Lower to 50% (strong zone doesn't need high MTF)
-        - If confidence >= 80%: Trade allowed even if slightly below 60%
-        
-        Returns:
-            tuple: (required_threshold, applies_override)
-        """
-        required_threshold = 60  # Default
-        applies_override = False
-        
-        # If zone is strong, MTF can be lower
-        if zone_strength > 70:
-            required_threshold = 50
-            applies_override = True
-        
-        # If MTF confidence very high, it overrides low zone
-        if confidence >= 80:
-            required_threshold = 40
-            applies_override = True
-        
-        return required_threshold, applies_override
-
