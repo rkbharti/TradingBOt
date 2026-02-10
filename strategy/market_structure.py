@@ -126,6 +126,82 @@ class MarketStructureDetector:
 
         return out
 
+    # ------------------------------------------------------------------
+    # Helper: Real Break vs Liquidity Sweep
+    # ------------------------------------------------------------------
+    def check_liquidity_sweep(self, swing_price: float, index: int, direction: str):
+        """
+        Returns True if wick breaks swing but body closes inside; else False.
+        Returns True, break index if sweep. If real break, also mark that.
+        """
+        if self.df is None or index >= len(self.df):
+            return {"is_sweep": False, "break_index": None, "real_break": False}
+        bar = self.df.iloc[index]
+        result = {"is_sweep": False, "break_index": None, "real_break": False}
+        if direction == "bullish":
+            if bar["high"] > swing_price and bar["close"] < swing_price:
+                result["is_sweep"] = True
+                result["break_index"] = index
+                # Check for real break next bar
+                if index + 1 < len(self.df):
+                    next_bar = self.df.iloc[index + 1]
+                    if next_bar["close"] > bar["high"]:
+                        result["real_break"] = True
+        elif direction == "bearish":
+            if bar["low"] < swing_price and bar["close"] > swing_price:
+                result["is_sweep"] = True
+                result["break_index"] = index
+                if index + 1 < len(self.df):
+                    next_bar = self.df.iloc[index + 1]
+                    if next_bar["close"] < bar["low"]:
+                        result["real_break"] = True
+        return result
+
+    # ------------------------------------------------------------------
+    # Helper: Displacement Candle Logic
+    # ------------------------------------------------------------------
+    @staticmethod
+    def detect_displacement(df: pd.DataFrame, start_index: int, window: int = 5):
+        """
+        - 3-candle sequence (start_index, start_index+1, start_index+2)
+        - Candle 2 body must be larger than avg body size of last 'window' candles
+        - Wick of candle1 and candle3 do NOT overlap → displacement exists
+        Returns True/False
+        """
+        if df is None or len(df) < start_index + 3:
+            return False
+        c1 = df.iloc[start_index]
+        c2 = df.iloc[start_index + 1]
+        c3 = df.iloc[start_index + 2]
+        # Wick overlap check
+        wick_overlap = not (c1['high'] < c3['low'] or c3['high'] < c1['low'])
+        if wick_overlap:
+            return False
+        # Body size check
+        c2_body = abs(c2['close'] - c2['open'])
+        if start_index - window + 1 < 0:
+            avg_body = df.iloc[0:start_index + 1][['open', 'close']].apply(lambda row: abs(row['close'] - row['open']), axis=1).mean()
+        else:
+            avg_body = df.iloc[start_index - window + 1:start_index + 1][['open', 'close']].apply(lambda row: abs(row['close'] - row['open']), axis=1).mean()
+        return c2_body > avg_body
+
+    # ------------------------------------------------------------------
+    # Helper: Inside Bar Detection
+    # ------------------------------------------------------------------
+    @staticmethod
+    def detect_inside_bars(df: pd.DataFrame):
+        """
+        Returns indices of inside bars (fully inside previous bar range).
+        """
+        inside_indices = []
+        for i in range(1, len(df)):
+            prev = df.iloc[i - 1]
+            curr = df.iloc[i]
+            high_inside = curr['high'] <= prev['high'] and curr['high'] >= prev['low']
+            low_inside = curr['low'] >= prev['low'] and curr['low'] <= prev['high']
+            if high_inside and low_inside:
+                inside_indices.append(i)
+        return inside_indices
 
     # ------------------------------------------------------------------
     # Structure confirmation (BOS, CHoCH, MSS logic)
@@ -157,33 +233,82 @@ class MarketStructureDetector:
         is_bullish = last_high["price"] > prev_high["price"] and last_low["price"] > prev_low["price"]
         is_bearish = last_high["price"] < prev_high["price"] and last_low["price"] < prev_low["price"]
 
+        # ====== REAL BREAK VS SWEEP LOGIC ======
         if idm_type == "bullish" and is_bullish:
-            # Find close > prev_high["price"] after sweep_bar
             for i in range(sweep_bar + 1, len(self.df)):
                 bar = self.df.iloc[i]
-                if bar["close"] > prev_high["price"]:
-                    out.update({
-                        "structure_confirmed": True,
-                        "mss_or_choch": "MSS_BULLISH",
-                        "bos_or_sweep_occurred": True,
-                        "bos_level": float(prev_high["price"]),
-                        "bos_bar_index": int(i),
-                        "reason_code": "STRUCTURE_CONFIRMED",
-                    })
+                # Wick breaks structure, but close inside = sweep
+                sweep = self.check_liquidity_sweep(prev_high["price"], i, "bullish")
+                if sweep["is_sweep"]:
+                    out["reason_code"] = "LIQUIDITY_SWEEP"
+                    out["bos_or_sweep_occurred"] = True
+                    # If real break confirmed, mark structure_confirmed
+                    if sweep["real_break"] and i + 1 < len(self.df):
+                        out.update({
+                            "structure_confirmed": True,
+                            "mss_or_choch": "MSS_BULLISH",
+                            "bos_or_sweep_occurred": True,
+                            "bos_level": float(prev_high["price"]),
+                            "bos_bar_index": int(i + 1),
+                            "reason_code": "STRUCTURE_CONFIRMED",
+                        })
+                        return out
                     return out
+                # Confirm only if displacement present (NEW RULE D)
+                if bar["close"] > prev_high["price"]:
+                    displacement = self.detect_displacement(self.df, i - 1)
+                    if displacement:
+                        out.update({
+                            "structure_confirmed": True,
+                            "mss_or_choch": "MSS_BULLISH",
+                            "bos_or_sweep_occurred": True,
+                            "bos_level": float(prev_high["price"]),
+                            "bos_bar_index": int(i),
+                            "reason_code": "STRUCTURE_CONFIRMED",
+                        })
+                        return out
+                    else:
+                        out["reason_code"] = "NO_DISPLACEMENT"
+                        out["bos_or_sweep_occurred"] = True
+                        out["bos_level"] = float(prev_high["price"])
+                        out["bos_bar_index"] = int(i)
+                        return out
         elif idm_type == "bearish" and is_bearish:
             for i in range(sweep_bar + 1, len(self.df)):
                 bar = self.df.iloc[i]
-                if bar["close"] < prev_low["price"]:
-                    out.update({
-                        "structure_confirmed": True,
-                        "mss_or_choch": "MSS_BEARISH",
-                        "bos_or_sweep_occurred": True,
-                        "bos_level": float(prev_low["price"]),
-                        "bos_bar_index": int(i),
-                        "reason_code": "STRUCTURE_CONFIRMED",
-                    })
+                sweep = self.check_liquidity_sweep(prev_low["price"], i, "bearish")
+                if sweep["is_sweep"]:
+                    out["reason_code"] = "LIQUIDITY_SWEEP"
+                    out["bos_or_sweep_occurred"] = True
+                    if sweep["real_break"] and i + 1 < len(self.df):
+                        out.update({
+                            "structure_confirmed": True,
+                            "mss_or_choch": "MSS_BEARISH",
+                            "bos_or_sweep_occurred": True,
+                            "bos_level": float(prev_low["price"]),
+                            "bos_bar_index": int(i + 1),
+                            "reason_code": "STRUCTURE_CONFIRMED",
+                        })
+                        return out
                     return out
+                if bar["close"] < prev_low["price"]:
+                    displacement = self.detect_displacement(self.df, i - 1)
+                    if displacement:
+                        out.update({
+                            "structure_confirmed": True,
+                            "mss_or_choch": "MSS_BEARISH",
+                            "bos_or_sweep_occurred": True,
+                            "bos_level": float(prev_low["price"]),
+                            "bos_bar_index": int(i),
+                            "reason_code": "STRUCTURE_CONFIRMED",
+                        })
+                        return out
+                    else:
+                        out["reason_code"] = "NO_DISPLACEMENT"
+                        out["bos_or_sweep_occurred"] = True
+                        out["bos_level"] = float(prev_low["price"])
+                        out["bos_bar_index"] = int(i)
+                        return out
 
         return out
 
@@ -237,5 +362,8 @@ class MarketStructureDetector:
             out["choch_bar_index"] = structure.get("bos_bar_index")
         else:
             out["choch_bar_index"] = None
+
+        # Add inside bar detection as additional output context (not affecting main logic)
+        out["inside_bar_indices"] = self.detect_inside_bars(self.df)
 
         return out
