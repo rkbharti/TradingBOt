@@ -648,9 +648,34 @@ class XAUUSDTradingBot:
 
         # --- MTF Bias --- 
         try:
+            print("DEBUG: Running MTF analysis")
             mtf_conf = self.mtf.get_multi_tf_confluence()
-        except Exception:
+
+            print("\n📊 MULTI-TIMEFRAME FRACTAL ANALYSIS (DEBUG)")
+            print("=================================================")
+            print(f"Overall Bias: {mtf_conf.get('overall_bias')}")
+            print(f"Confidence: {mtf_conf.get('confidence')}")
+
+            tf_signals = mtf_conf.get("tf_signals", {})
+
+            if isinstance(tf_signals, dict):
+                for tf_name, tf_entry in tf_signals.items():
+                    bias = tf_entry.get("bias", "UNKNOWN")
+
+                    bos_block = tf_entry.get("bos", {})
+                    choc_block = tf_entry.get("choc", {})
+
+                    bos = bos_block.get("bullish_bos") or bos_block.get("bearish_bos")
+                    choch = choc_block.get("bullish_choc") or choc_block.get("bearish_choc")
+
+                    print(f"{tf_name}: bias={bias} | BOS={bool(bos)} | CHoCH={bool(choch)}")
+
+            print("=================================================\n")
+
+        except Exception as e:
+            print("❌ MTF ERROR:", str(e))
             mtf_conf = {"overall_bias": "NEUTRAL", "confidence": 0}
+
 
         # --- H4 bias calculation (TASK 1 STEP 3) ---
         try:
