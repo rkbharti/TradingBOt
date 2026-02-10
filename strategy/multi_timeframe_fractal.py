@@ -44,12 +44,6 @@ class MultiTimeframeFractal:
     
     
     def detect_swing_points(self, df: pd.DataFrame, sensitivity=5) -> tuple:
-        """
-        Detect swing highs and lows (fractals)
-        
-        Returns:
-            (swing_high_indices, swing_low_indices)
-        """
         if len(df) < sensitivity * 2 + 1:
             return [], []
         
@@ -162,7 +156,6 @@ class MultiTimeframeFractal:
     
     
     def analyze_timeframe(self, timeframe: str, bars=300) -> dict:
-        """Complete analysis for single timeframe"""
         df = self.fetch_data(timeframe, bars=bars)
         if df is None:
             return None
@@ -193,4 +186,44 @@ class MultiTimeframeFractal:
             'idm': idm,
             'swing_highs': len(swing_highs),
             'swing_lows': len(swing_lows)
+        }
+
+    # =========================================================
+    # NEW METHOD — DOES NOT MODIFY OLD LOGIC
+    # =========================================================
+    def get_multi_tf_confluence(self) -> dict:
+        """
+        Aggregates bias from all timeframes.
+        This method is required by main.py.
+        """
+        results = {}
+        
+        for tf in ['D1', 'H4', 'H1', 'M15', 'M5']:
+            analysis = self.analyze_timeframe(tf, bars=300)
+            if analysis:
+                results[tf] = analysis
+        
+        bull = 0
+        bear = 0
+        
+        for tf_data in results.values():
+            if tf_data["bias"] == "BULLISH":
+                bull += 1
+            elif tf_data["bias"] == "BEARISH":
+                bear += 1
+        
+        if bull > bear:
+            overall = "BULLISH"
+        elif bear > bull:
+            overall = "BEARISH"
+        else:
+            overall = "NEUTRAL"
+        
+        total = bull + bear
+        confidence = int((max(bull, bear) / total) * 100) if total > 0 else 0
+        
+        return {
+            "overall_bias": overall,
+            "confidence": confidence,
+            "tf_signals": results
         }
