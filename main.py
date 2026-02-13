@@ -645,7 +645,7 @@ class XAUUSDTradingBot:
         ask = float(current_price.get("ask", bid))
         spread = abs(ask - bid)
         price_for_zones = bid
-
+        #day 8
         # --- MTF Bias --- 
         try:
             print("DEBUG: Running MTF analysis")
