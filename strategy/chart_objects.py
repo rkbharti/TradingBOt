@@ -25,7 +25,7 @@ def build_chart_objects(smc_state, zones, ltf_pois, current_price):
         "entry_zones": [],
         "sl_tp_boxes": []
     }
-
+    #day 9
     # STRUCTURE LINES (e.g., IDM highs/lows, trendlines)
     try:
         idm_high = smc_state.get("idm_high")
