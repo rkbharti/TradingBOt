@@ -187,7 +187,7 @@ class MultiTimeframeFractal:
             'swing_highs': len(swing_highs),
             'swing_lows': len(swing_lows)
         }
-
+    #day 7
     # =========================================================
     # NEW METHOD — DOES NOT MODIFY OLD LOGIC
     # =========================================================
