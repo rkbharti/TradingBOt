@@ -156,6 +156,31 @@ class MarketStructureDetector:
                     if next_bar["close"] < bar["low"]:
                         result["real_break"] = True
         return result
+        # ------------------------------------------------------------------
+    # Helper: FVG Detection
+    # ------------------------------------------------------------------
+    @staticmethod
+    def detect_fvg(df: pd.DataFrame, start_index: int):
+        """
+        True FVG detection based on ICT/SMC rule.
+        Returns True if 3-candle imbalance exists.
+        """
+        if df is None or len(df) < start_index + 3:
+            return False
+
+        c1 = df.iloc[start_index]
+        c2 = df.iloc[start_index + 1]
+        c3 = df.iloc[start_index + 2]
+
+        # Bullish FVG
+        if c1['high'] < c3['low']:
+            return True
+
+        # Bearish FVG
+        if c1['low'] > c3['high']:
+            return True
+
+        return False
 
     # ------------------------------------------------------------------
     # Helper: Displacement Candle Logic
@@ -173,10 +198,11 @@ class MarketStructureDetector:
         c1 = df.iloc[start_index]
         c2 = df.iloc[start_index + 1]
         c3 = df.iloc[start_index + 2]
-        # Wick overlap check
-        wick_overlap = not (c1['high'] < c3['low'] or c3['high'] < c1['low'])
-        if wick_overlap:
+        # FVG check (true displacement condition)
+        fvg_exists = MarketStructureDetector.detect_fvg(df, start_index)
+        if not fvg_exists:
             return False
+
         # Body size check
         c2_body = abs(c2['close'] - c2['open'])
         if start_index - window + 1 < 0:
@@ -256,7 +282,8 @@ class MarketStructureDetector:
                     return out
                 # Confirm only if displacement present (NEW RULE D)
                 if bar["close"] > prev_high["price"]:
-                    displacement = self.detect_displacement(self.df, i - 1)
+                    start_index = max(0, i - 1)
+                    displacement = self.detect_displacement(self.df, start_index)
                     if displacement:
                         out.update({
                             "structure_confirmed": True,
@@ -273,6 +300,7 @@ class MarketStructureDetector:
                         out["bos_level"] = float(prev_high["price"])
                         out["bos_bar_index"] = int(i)
                         return out
+
         elif idm_type == "bearish" and is_bearish:
             for i in range(sweep_bar + 1, len(self.df)):
                 bar = self.df.iloc[i]
@@ -292,7 +320,8 @@ class MarketStructureDetector:
                         return out
                     return out
                 if bar["close"] < prev_low["price"]:
-                    displacement = self.detect_displacement(self.df, i - 1)
+                    start_index = max(0, i - 1)
+                    displacement = self.detect_displacement(self.df, start_index)
                     if displacement:
                         out.update({
                             "structure_confirmed": True,
@@ -309,6 +338,7 @@ class MarketStructureDetector:
                         out["bos_level"] = float(prev_low["price"])
                         out["bos_bar_index"] = int(i)
                         return out
+
 
         return out
 
