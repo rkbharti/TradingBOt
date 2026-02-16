@@ -887,124 +887,137 @@ class XAUUSDTradingBot:
         send_to_dashboard(dash_payload, analysis_snapshot)
 
         # ============================================================================== 
-        # 🚀 EXECUTION GATE (Strict Session Rule)
+        # 🚀 EXECUTION GATE (Pre-filtered Institutional Model)
         # ============================================================================== 
         if not narrative_snapshot.get("entry_allowed", False):
             print(f"⏸ No trade — Narrative: {narrative_snapshot.get('state')}")
             return
 
-        # Restrict execution to killzones only
-        can_execute = self.current_session in ["LONDON_KZ", "NY_KZ"]
-
-        if can_execute:
-            print(f"🚀 Execution triggered in {self.current_session}")
+        # ================================================================
+        # INSTITUTIONAL PRE-FILTER GATES (All must pass before signal generation)
+        # ================================================================
+        try:
+            execution_allowed = True
+            gate_reason = None
             
-            # ========================================================================
-            # STRUCTURAL STOP LOSS & LIQUIDITY-BASED TAKE PROFIT LOGIC
-            # ========================================================================
-            try:
-                # 1. Calculate recent swing high/low (last 20 bars)
+            # Gate 1: Session must be killzone
+            if self.current_session not in ["LONDON_KZ", "NY_KZ"]:
+                execution_allowed = False
+                gate_reason = "Session not in killzone"
+            
+            # Gate 2: Liquidity sweep must be true
+            if execution_allowed and not external_sweep:
+                execution_allowed = False
+                gate_reason = "No liquidity sweep"
+            
+            # Gate 3: Position limit (no open positions)
+            if execution_allowed and len(self.open_positions) > 0:
+                execution_allowed = False
+                gate_reason = "Position already open"
+            
+            # If any gate fails, exit execution block
+            if not execution_allowed:
+                print(f"⛔ Execution blocked: {gate_reason}")
+                return
+            
+            # ================================================================
+            # SIGNAL GENERATION (Only after all pre-filter gates pass)
+            # ================================================================
+            trend = ms.get("current_trend", "NEUTRAL")
+            signal = None
+            
+            if trend == "BULLISH":
+                # Check BUY-specific gates
+                if current_zone == "DISCOUNT" and stored_bias == "BULLISH":
+                    signal = "BUY"
+                else:
+                    # Explain why BUY was not generated
+                    reasons = []
+                    if current_zone != "DISCOUNT":
+                        reasons.append(f"zone is {current_zone}, need DISCOUNT")
+                    if stored_bias != "BULLISH":
+                        reasons.append(f"HTF bias is {stored_bias}, need BULLISH")
+                    print(f"⛔ BUY signal rejected: {'; '.join(reasons)}")
+                    return
+            
+            elif trend == "BEARISH":
+                # Check SELL-specific gates
+                if current_zone == "PREMIUM" and stored_bias == "BEARISH":
+                    signal = "SELL"
+                else:
+                    # Explain why SELL was not generated
+                    reasons = []
+                    if current_zone != "PREMIUM":
+                        reasons.append(f"zone is {current_zone}, need PREMIUM")
+                    if stored_bias != "BEARISH":
+                        reasons.append(f"HTF bias is {stored_bias}, need BEARISH")
+                    print(f"⛔ SELL signal rejected: {'; '.join(reasons)}")
+                    return
+            
+            else:
+                print(f"⏸️ No clear trend for execution (Trend: {trend})")
+                return
+            
+            # ================================================================
+            # STRUCTURAL SL & LIQUIDITY-BASED TP (Only if signal generated)
+            # ================================================================
+            if signal:
+                # Calculate recent swing high/low (last 20 bars)
                 recent_high = float(market_data['high'].tail(20).max())
                 recent_low = float(market_data['low'].tail(20).min())
                 
-                # 2. Define buffer (configurable)
+                # Define buffer
                 buffer = 0.3
                 
-                # 3. Determine signal based on market structure
-                trend = ms.get("current_trend", "NEUTRAL")
-                signal = None
-                sl = None
-                tp = None
-                
-                if trend == "BULLISH":
-                    signal = "BUY"
-                    # For BUY: SL = recent swing low - buffer
+                if signal == "BUY":
+                    # SL = recent swing low - buffer
                     sl = recent_low - buffer
-                    # For BUY: TP = recent swing high (structural liquidity)
+                    # TP = recent swing high (structural liquidity)
                     tp = recent_high
-                    print(f"📈 BUY Signal detected | SL = {sl:.2f} (Recent Low: {recent_low:.2f}) | TP = {tp:.2f} (Recent High: {recent_high:.2f})")
-                elif trend == "BEARISH":
-                    signal = "SELL"
-                    # For SELL: SL = recent swing high + buffer
+                    print(f"📈 BUY Signal generated | SL = {sl:.2f} (Recent Low: {recent_low:.2f}) | TP = {tp:.2f} (Recent High: {recent_high:.2f})")
+                
+                elif signal == "SELL":
+                    # SL = recent swing high + buffer
                     sl = recent_high + buffer
-                    # For SELL: TP = recent swing low (structural liquidity)
+                    # TP = recent swing low (structural liquidity)
                     tp = recent_low
-                    print(f"📉 SELL Signal detected | SL = {sl:.2f} (Recent High: {recent_high:.2f}) | TP = {tp:.2f} (Recent Low: {recent_low:.2f})")
+                    print(f"📉 SELL Signal generated | SL = {sl:.2f} (Recent High: {recent_high:.2f}) | TP = {tp:.2f} (Recent Low: {recent_low:.2f})")
+                
+                # Place order
+                lot_size = 0.01  # Fixed small lot size
+                
+                print(f"🎯 Placing {signal} order: {lot_size} lots | SL={sl:.2f} | TP={tp:.2f}")
+                ticket = self.mt5_place_order(signal, lot_size, sl, tp)
+                
+                if ticket:
+                    print(f"✅ Order placed successfully | Ticket: {ticket}")
+                    # Log order placement
+                    self.open_positions.append({
+                        "ticket": ticket,
+                        "signal": signal,
+                        "lot_size": lot_size,
+                        "sl": sl,
+                        "tp": tp,
+                        "entry_price": bid,
+                        "entry_time": datetime.now().isoformat(),
+                        "status": "OPEN"
+                    })
+                    self.trade_log.append({
+                        "timestamp": datetime.now().isoformat(),
+                        "action": "ORDER_PLACED",
+                        "ticket": ticket,
+                        "signal": signal,
+                        "lot_size": lot_size,
+                        "sl": sl,
+                        "tp": tp,
+                        "entry_price": bid
+                    })
+                    self.save_trade_log()
                 else:
-                    print(f"⏸️ No clear trend for execution (Trend: {trend})")
-                    signal = None
-                
-                # ================================================================
-                # INSTITUTIONAL ENTRY GATE ENFORCEMENT
-                # ================================================================
-                if signal:
-                    gate_reason = None
-                    
-                    # Gate 1: Liquidity sweep must be true
-                    if not external_sweep:
-                        gate_reason = "No liquidity sweep"
-                    
-                    # Gate 2: Zone alignment
-                    elif signal == "BUY" and current_zone != "DISCOUNT":
-                        gate_reason = "BUY not in discount zone"
-                    
-                    elif signal == "SELL" and current_zone != "PREMIUM":
-                        gate_reason = "SELL not in premium zone"
-                    
-                    # Gate 3: HTF bias alignment
-                    elif signal == "BUY" and stored_bias != "BULLISH":
-                        gate_reason = "BUY against HTF bias"
-                    
-                    elif signal == "SELL" and stored_bias != "BEARISH":
-                        gate_reason = "SELL against HTF bias"
-                    
-                    # Gate 4: Position limit
-                    elif len(self.open_positions) > 0:
-                        gate_reason = "Position already open"
-                    
-                    # If any gate fails, block the trade
-                    if gate_reason:
-                        print(f"⛔ Trade blocked: {gate_reason}")
-                        signal = None
-                
-                # 4. If signal exists (passed all gates), place order
-                if signal:
-                    lot_size = 0.01  # Fixed small lot size
-                    
-                    print(f"🎯 Placing {signal} order: {lot_size} lots | SL={sl:.2f} | TP={tp:.2f}")
-                    ticket = self.mt5_place_order(signal, lot_size, sl, tp)
-                    
-                    if ticket:
-                        print(f"✅ Order placed successfully | Ticket: {ticket}")
-                        # Log order placement
-                        self.open_positions.append({
-                            "ticket": ticket,
-                            "signal": signal,
-                            "lot_size": lot_size,
-                            "sl": sl,
-                            "tp": tp,
-                            "entry_price": bid,
-                            "entry_time": datetime.now().isoformat(),
-                            "status": "OPEN"
-                        })
-                        self.trade_log.append({
-                            "timestamp": datetime.now().isoformat(),
-                            "action": "ORDER_PLACED",
-                            "ticket": ticket,
-                            "signal": signal,
-                            "lot_size": lot_size,
-                            "sl": sl,
-                            "tp": tp,
-                            "entry_price": bid
-                        })
-                        self.save_trade_log()
-                    else:
-                        print(f"❌ Order placement failed")
-                
-            except Exception as e:
-                print(f"❌ Structural SL/TP logic error: {e}")
-        else:
-            print(f"🛑 Entry Allowed by SMC, but BLOCKED by session: {self.current_session} (Off-killzone)")
+                    print(f"❌ Order placement failed")
+        
+        except Exception as e:
+            print(f"❌ Execution logic error: {e}")
 
     # Persistence
     def save_trade_log(self, filename="tradelog.json"):
