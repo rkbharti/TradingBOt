@@ -1,4 +1,3 @@
-# main.py
 DRY_RUN = True
 
 import os
@@ -89,37 +88,50 @@ def compute_atr_from_df(df: pd.DataFrame, period: int = 14) -> float:
         return 0.0
 
 def is_trading_session():
-    now = datetime.now(pytz.utc)
+    """
+    ICT Killzone-based session model using New York time.
+    
+    Sessions:
+    - LONDON_KZ: 02:00-05:00 NY time
+    - NY_KZ: 07:00-12:00 NY time
+    - OFF_KILLZONE: All other times (analysis only, no execution)
+    - WEEKEND_MARKET_CLOSED: Saturday and Sunday
+    """
+    now_utc = datetime.now(pytz.utc)
 
-    # 🛑 Check if it's Saturday (5) or Sunday (6)
-    # This prevents the bot from thinking it's "New York Session" on a Sunday
-    if now.weekday() >= 5:
+    # Weekend check (Saturday=5, Sunday=6)
+    if now_utc.weekday() >= 5:
         return False, "WEEKEND_MARKET_CLOSED"
 
-    t = now.hour + now.minute / 60.0
-    if 8.0 <= t < 16.0:
-        if 13.0 <= t < 16.0:
-            return True, "NY_OVERLAP"
-        return True, "LONDON"
-    if 16.0 <= t < 21.0:
-        return True, "NY_SESSION"
+    # Convert to New York time
+    ny_tz = pytz.timezone("America/New_York")
+    now_ny = now_utc.astimezone(ny_tz)
 
-    # If it's a weekday but outside trading hours (e.g., 22:00 UTC)
-    # We return True so analysis runs, but we filter execution in the main loop
-    return True, "ASIAN"
+    t = now_ny.hour + now_ny.minute / 60.0
+
+    # London Killzone: 02:00–05:00 NY time
+    if 2.0 <= t < 5.0:
+        return True, "LONDON_KZ"
+
+    # New York Killzone: 07:00–12:00 NY time
+    if 7.0 <= t < 12.0:
+        return True, "NY_KZ"
+
+    # Otherwise: analysis only
+    return True, "OFF_KILLZONE"
 
 def map_session_for_filter(session_name: str) -> str:
     if session_name is None:
-        return "ASIAN"
+        return "OFF_KILLZONE"
     s = session_name.upper()
-    if s in ("NY_OVERLAP", "NY-OVERLAP", "NY_OVER", "OVERLAP"):
-        return "OVERLAP"
-    if s in ("NY_SESSION", "NY-SESSION", "NY", "NEW_YORK", "NYSESSION"):
-        return "NEW_YORK"
     if "LONDON" in s:
-        return "LONDON"
-    if "ASIAN" in s:
-        return "ASIAN"
+        return "LONDON_KZ"
+    if "NY" in s:
+        return "NY_KZ"
+    if "OFF" in s or "KILLZONE" in s:
+        return "OFF_KILLZONE"
+    if "WEEKEND" in s:
+        return "WEEKEND_MARKET_CLOSED"
     return s
 
 # ---------- Dashboard webhook sender ----------
@@ -781,7 +793,7 @@ class XAUUSDTradingBot:
             "ltf_structure_shift": smc_state.get("structure_confirmed", False),
 
             "ltf_poi_mitigated": poi_mitigated,
-            "killzone_active": self.current_session in ["LONDON", "NEW_YORK", "OVERLAP"],
+            "killzone_active": self.current_session in ["LONDON_KZ", "NY_KZ"],
             "htf_ob_invalidated": False,
             "daily_structure_flipped": False
         }
@@ -881,14 +893,118 @@ class XAUUSDTradingBot:
             print(f"⏸ No trade — Narrative: {narrative_snapshot.get('state')}")
             return
 
-        # Restrict execution to London/NY/Overlap
-        can_execute = self.current_session in ["LONDON", "NEW_YORK", "OVERLAP"]
+        # Restrict execution to killzones only
+        can_execute = self.current_session in ["LONDON_KZ", "NY_KZ"]
 
         if can_execute:
             print(f"🚀 Execution triggered in {self.current_session}")
-            # [PASTE YOUR ORDER PLACEMENT CODE HERE]
+            
+            # ========================================================================
+            # STRUCTURAL STOP LOSS & LIQUIDITY-BASED TAKE PROFIT LOGIC
+            # ========================================================================
+            try:
+                # 1. Calculate recent swing high/low (last 20 bars)
+                recent_high = float(market_data['high'].tail(20).max())
+                recent_low = float(market_data['low'].tail(20).min())
+                
+                # 2. Define buffer (configurable)
+                buffer = 0.3
+                
+                # 3. Determine signal based on market structure
+                trend = ms.get("current_trend", "NEUTRAL")
+                signal = None
+                sl = None
+                tp = None
+                
+                if trend == "BULLISH":
+                    signal = "BUY"
+                    # For BUY: SL = recent swing low - buffer
+                    sl = recent_low - buffer
+                    # For BUY: TP = recent swing high (structural liquidity)
+                    tp = recent_high
+                    print(f"📈 BUY Signal detected | SL = {sl:.2f} (Recent Low: {recent_low:.2f}) | TP = {tp:.2f} (Recent High: {recent_high:.2f})")
+                elif trend == "BEARISH":
+                    signal = "SELL"
+                    # For SELL: SL = recent swing high + buffer
+                    sl = recent_high + buffer
+                    # For SELL: TP = recent swing low (structural liquidity)
+                    tp = recent_low
+                    print(f"📉 SELL Signal detected | SL = {sl:.2f} (Recent High: {recent_high:.2f}) | TP = {tp:.2f} (Recent Low: {recent_low:.2f})")
+                else:
+                    print(f"⏸️ No clear trend for execution (Trend: {trend})")
+                    signal = None
+                
+                # ================================================================
+                # INSTITUTIONAL ENTRY GATE ENFORCEMENT
+                # ================================================================
+                if signal:
+                    gate_reason = None
+                    
+                    # Gate 1: Liquidity sweep must be true
+                    if not external_sweep:
+                        gate_reason = "No liquidity sweep"
+                    
+                    # Gate 2: Zone alignment
+                    elif signal == "BUY" and current_zone != "DISCOUNT":
+                        gate_reason = "BUY not in discount zone"
+                    
+                    elif signal == "SELL" and current_zone != "PREMIUM":
+                        gate_reason = "SELL not in premium zone"
+                    
+                    # Gate 3: HTF bias alignment
+                    elif signal == "BUY" and stored_bias != "BULLISH":
+                        gate_reason = "BUY against HTF bias"
+                    
+                    elif signal == "SELL" and stored_bias != "BEARISH":
+                        gate_reason = "SELL against HTF bias"
+                    
+                    # Gate 4: Position limit
+                    elif len(self.open_positions) > 0:
+                        gate_reason = "Position already open"
+                    
+                    # If any gate fails, block the trade
+                    if gate_reason:
+                        print(f"⛔ Trade blocked: {gate_reason}")
+                        signal = None
+                
+                # 4. If signal exists (passed all gates), place order
+                if signal:
+                    lot_size = 0.01  # Fixed small lot size
+                    
+                    print(f"🎯 Placing {signal} order: {lot_size} lots | SL={sl:.2f} | TP={tp:.2f}")
+                    ticket = self.mt5_place_order(signal, lot_size, sl, tp)
+                    
+                    if ticket:
+                        print(f"✅ Order placed successfully | Ticket: {ticket}")
+                        # Log order placement
+                        self.open_positions.append({
+                            "ticket": ticket,
+                            "signal": signal,
+                            "lot_size": lot_size,
+                            "sl": sl,
+                            "tp": tp,
+                            "entry_price": bid,
+                            "entry_time": datetime.now().isoformat(),
+                            "status": "OPEN"
+                        })
+                        self.trade_log.append({
+                            "timestamp": datetime.now().isoformat(),
+                            "action": "ORDER_PLACED",
+                            "ticket": ticket,
+                            "signal": signal,
+                            "lot_size": lot_size,
+                            "sl": sl,
+                            "tp": tp,
+                            "entry_price": bid
+                        })
+                        self.save_trade_log()
+                    else:
+                        print(f"❌ Order placement failed")
+                
+            except Exception as e:
+                print(f"❌ Structural SL/TP logic error: {e}")
         else:
-            print(f"🛑 Entry Allowed by SMC, but BLOCKED by session: {self.current_session}")
+            print(f"🛑 Entry Allowed by SMC, but BLOCKED by session: {self.current_session} (Off-killzone)")
 
     # Persistence
     def save_trade_log(self, filename="tradelog.json"):
