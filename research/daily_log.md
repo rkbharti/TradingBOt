@@ -357,3 +357,180 @@ Mode:
 2. Connect narrative `ENTRY_ALLOWED` to execution logic.
 3. Add strict entry candle displacement rule.
 4. Validate first live trades in DRY_RUN.
+
+---
+
+## 2026-02-16 — PHASE 6: Structural SL/TP & Institutional Gates
+
+### Work Done
+
+#### Fix 6.1 — Structural Stop Loss Integration
+
+- Replaced missing SL logic with structural model:
+  - BUY: SL below recent swing low − buffer.
+  - SELL: SL above recent swing high + buffer.
+- Swing levels calculated from last 20 candles.
+- Ensured every order now has a defined structural risk point.
+
+**Result:**
+
+- Eliminated unprotected positions.
+- Restored doctrinal “last line of defense” logic.
+
+---
+
+#### Fix 6.2 — Liquidity-Based Take Profit
+
+- Implemented structural liquidity TP:
+  - BUY: TP at recent structural high.
+  - SELL: TP at recent structural low.
+- Aligned exit logic with institutional liquidity targets.
+
+**Result:**
+
+- Restored defined R:R structure.
+- Eliminated indefinite trade holding.
+
+---
+
+#### Fix 6.3 — Institutional Entry Gate Enforcement
+
+Added hard execution gates:
+
+1. Killzone session only.
+2. External liquidity sweep required.
+3. Zone alignment:
+   - BUY → Discount only.
+   - SELL → Premium only.
+4. HTF bias alignment.
+5. Position limit enforcement.
+
+Initial implementation applied gates **after signal generation**.
+
+---
+
+### Audit Result (Post Phase-6)
+
+External institutional audit performed.
+
+**Findings:**
+
+- Structural SL/TP: **Correct**
+- Killzone timing: **Correct**
+- HTF bias memory: **Correct**
+- Execution path: **Incorrect gate placement**
+
+**Major issue:**
+
+- Gates were blocking trades **after signal creation**.
+- Doctrine requires gates as **preconditions**, not post-filters.
+
+**Alignment Score:**
+
+42 / 100  
+Status: Partially aligned, not production-grade.
+
+---
+
+## 2026-02-17 — PHASE 7: Pre-Filter Institutional Execution Model
+
+### Fix 7.1 — Execution Path Refactor
+
+Refactored execution logic from:
+
+Signal → Execution → Gates → Block trade
+
+to:
+
+Gates → Signal generation → Execution
+
+All institutional conditions now act as **pre-filters**.
+
+---
+
+### New Execution Flow
+
+1. Narrative must allow entry.
+2. Killzone session check.
+3. Liquidity sweep required.
+4. No open positions.
+5. Signal generated only if:
+   - Trend aligns.
+   - Zone condition satisfied.
+   - HTF bias aligned.
+6. Structural SL and liquidity TP applied.
+7. Order placed.
+
+---
+
+### Key Improvements
+
+#### Proactive Execution Model
+
+- No signal created unless institutional conditions are satisfied.
+- Eliminates false narrative progression.
+
+#### HTF Bias as Filter (Not Blocker)
+
+- Signal only created if HTF bias matches direction.
+- Prevents counter-trend setups from forming.
+
+#### Zone Logic Moved Before Signal
+
+- BUY only possible in Discount.
+- SELL only possible in Premium.
+- Not just blocked—**never generated**.
+
+---
+
+### System Behavior After Refactor
+
+Live output example:
+
+Session: OFF_KILLZONE
+Market Narrative: HTF_POI_REACHED
+No trade — Narrative blocked
+
+**This confirms:**
+
+- Killzone filtering working.
+- Narrative gating active.
+- No premature execution.
+
+---
+
+### Structural Status (Post Phase-7)
+
+| Component             | Status                 |
+| --------------------- | ---------------------- |
+| Killzone timing       | Correct                |
+| Structural SL         | Correct                |
+| Liquidity TP          | Correct                |
+| HTF bias memory       | Correct                |
+| Narrative gating      | Active                 |
+| Execution pre-filters | Implemented            |
+| Zone alignment        | Enforced before signal |
+| Liquidity sweep gate  | Enforced before signal |
+
+**Estimated Doctrine Alignment:**
+
+≈ 70–75 / 100  
+Classification: Structurally aligned, still under validation.
+
+---
+
+### Current Bot Mode
+
+- Mode: DRY_RUN
+- Execution model: Institutional pre-filter
+- Narrative authority: Active
+- Session filter: Killzones only
+
+---
+
+### Next Steps (Phase-8)
+
+1. Add displacement validation to LTF structure shift.
+2. Enforce full narrative prerequisite chain.
+3. Replace generic structure flag with true FVG-based displacement.
+4. Re-audit after displacement integration.
