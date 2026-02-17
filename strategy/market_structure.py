@@ -37,22 +37,42 @@ class MarketStructureDetector:
             "reason_code": "INSUFFICIENT_DATA",
         }
 
+    
     # ------------------------------------------------------------------
     # 3-bar swing logic
     # ------------------------------------------------------------------
     def _find_swings(self):
         swings = []
         if len(self.df) < 3:
+            print("DEBUG SWINGS COUNT: 0 (not enough candles)")
             return swings
+
         for i in range(1, len(self.df) - 1):
             prev = self.df.iloc[i - 1]
             curr = self.df.iloc[i]
             nxt = self.df.iloc[i + 1]
+
             if curr['high'] > prev['high'] and curr['high'] > nxt['high']:
-                swings.append({'type': 'high', 'index': i, 'price': curr['high']})
+                swings.append({
+                    'type': 'high',
+                    'index': i,
+                    'price': curr['high']
+                })
+
             if curr['low'] < prev['low'] and curr['low'] < nxt['low']:
-                swings.append({'type': 'low', 'index': i, 'price': curr['low']})
+                swings.append({
+                    'type': 'low',
+                    'index': i,
+                    'price': curr['low']
+                })
+
+        # 🔍 Debug output
+        print("DEBUG SWINGS COUNT:", len(swings))
+        if len(swings) > 0:
+            print("DEBUG FIRST 5 SWINGS:", swings[:5])
+
         return swings
+
 
     # ------------------------------------------------------------------
     # IDM detection (first valid pullback)
@@ -102,7 +122,12 @@ class MarketStructureDetector:
         tolerance = abs(self.tick_size) * 0.5  # half-tick tolerance
 
         for i in range(idm_bar + 1, len(self.df)):
+            min_structure_bars = 20
+            if (i - idm_bar) < min_structure_bars:
+                continue
+
             bar = self.df.iloc[i]
+
 
             if idm_type == "bullish":
                 # Sweep must touch or slightly break IDM
@@ -246,23 +271,36 @@ class MarketStructureDetector:
 
         if sweep_bar is None:
             return out
+        print("DEBUG SWEEP BAR:", sweep_bar)
 
         # Find swings up to but not including sweep_bar
         swings = self._find_swings()
         highs = [s for s in swings if s["type"] == "high" and s["index"] < sweep_bar]
         lows = [s for s in swings if s["type"] == "low" and s["index"] < sweep_bar]
         if len(highs) < 2 or len(lows) < 2:
+            print("DEBUG: Not enough swings for structure")
+            print("High swings:", highs)
+            print("Low swings:", lows)
             return out
+
+
+
 
         prev_high, last_high = highs[-2], highs[-1]
         prev_low, last_low = lows[-2], lows[-1]
+        print("DEBUG STRUCTURE LEVELS:")
+        print("prev_high:", prev_high)
+        print("last_high:", last_high)
+        print("prev_low:", prev_low)
+        print("last_low:", last_low)
+
 
         # Trend determination
         is_bullish = last_high["price"] > prev_high["price"] and last_low["price"] > prev_low["price"]
         is_bearish = last_high["price"] < prev_high["price"] and last_low["price"] < prev_low["price"]
 
         # ====== REAL BREAK VS SWEEP LOGIC ======
-        if idm_type == "bullish" and is_bullish:
+        if idm_type == "bullish":
             for i in range(sweep_bar + 1, len(self.df)):
                 bar = self.df.iloc[i]
                 # Wick breaks structure, but close inside = sweep
@@ -282,11 +320,12 @@ class MarketStructureDetector:
                         })
                         return out
                     return out
-                # Confirm only if displacement present (NEW RULE D)
+                # Confirm only if displacement present
                 if bar["close"] > prev_high["price"]:
                     start_index = max(0, i - 1)
                     displacement = self.detect_displacement(self.df, start_index)
                     out["displacement_detected"] = bool(displacement)
+
                     if displacement:
                         out.update({
                             "structure_confirmed": True,
@@ -296,15 +335,18 @@ class MarketStructureDetector:
                             "bos_bar_index": int(i),
                             "reason_code": "STRUCTURE_CONFIRMED",
                         })
-                        return out
                     else:
-                        out["reason_code"] = "NO_DISPLACEMENT"
-                        out["bos_or_sweep_occurred"] = True
-                        out["bos_level"] = float(prev_high["price"])
-                        out["bos_bar_index"] = int(i)
-                        return out
+                        out.update({
+                            "structure_confirmed": False,
+                            "mss_or_choch": "NONE",
+                            "bos_or_sweep_occurred": True,
+                            "bos_level": float(prev_high["price"]),
+                            "bos_bar_index": int(i),
+                            "reason_code": "NO_DISPLACEMENT",
+                        })
+                    return out
 
-        elif idm_type == "bearish" and is_bearish:
+        elif idm_type == "bearish":
             for i in range(sweep_bar + 1, len(self.df)):
                 bar = self.df.iloc[i]
                 sweep = self.check_liquidity_sweep(prev_low["price"], i, "bearish")
@@ -322,10 +364,12 @@ class MarketStructureDetector:
                         })
                         return out
                     return out
+                # Confirm only if displacement present
                 if bar["close"] < prev_low["price"]:
                     start_index = max(0, i - 1)
                     displacement = self.detect_displacement(self.df, start_index)
                     out["displacement_detected"] = bool(displacement)
+
                     if displacement:
                         out.update({
                             "structure_confirmed": True,
@@ -335,16 +379,18 @@ class MarketStructureDetector:
                             "bos_bar_index": int(i),
                             "reason_code": "STRUCTURE_CONFIRMED",
                         })
-                        return out
                     else:
-                        out["reason_code"] = "NO_DISPLACEMENT"
-                        out["bos_or_sweep_occurred"] = True
-                        out["bos_level"] = float(prev_low["price"])
-                        out["bos_bar_index"] = int(i)
-                        return out
+                        out.update({
+                            "structure_confirmed": False,
+                            "mss_or_choch": "NONE",
+                            "bos_or_sweep_occurred": True,
+                            "bos_level": float(prev_low["price"]),
+                            "bos_bar_index": int(i),
+                            "reason_code": "NO_DISPLACEMENT",
+                        })
+                    return out
 
-
-        return out
+        return out      
 
     # ------------------------------------------------------------------
     # Main public API - required by all integration code
