@@ -44,7 +44,6 @@ class MarketStructureDetector:
     def _find_swings(self):
         swings = []
         if len(self.df) < 3:
-            print("DEBUG SWINGS COUNT: 0 (not enough candles)")
             return swings
 
         for i in range(1, len(self.df) - 1):
@@ -65,11 +64,6 @@ class MarketStructureDetector:
                     'index': i,
                     'price': curr['low']
                 })
-
-        # 🔍 Debug output
-        print("DEBUG SWINGS COUNT:", len(swings))
-        if len(swings) > 0:
-            print("DEBUG FIRST 5 SWINGS:", swings[:5])
 
         return swings
 
@@ -271,16 +265,12 @@ class MarketStructureDetector:
 
         if sweep_bar is None:
             return out
-        print("DEBUG SWEEP BAR:", sweep_bar)
 
         # Find swings up to but not including sweep_bar
         swings = self._find_swings()
         highs = [s for s in swings if s["type"] == "high" and s["index"] < sweep_bar]
         lows = [s for s in swings if s["type"] == "low" and s["index"] < sweep_bar]
         if len(highs) < 2 or len(lows) < 2:
-            print("DEBUG: Not enough swings for structure")
-            print("High swings:", highs)
-            print("Low swings:", lows)
             return out
 
 
@@ -288,11 +278,7 @@ class MarketStructureDetector:
 
         prev_high, last_high = highs[-2], highs[-1]
         prev_low, last_low = lows[-2], lows[-1]
-        print("DEBUG STRUCTURE LEVELS:")
-        print("prev_high:", prev_high)
-        print("last_high:", last_high)
-        print("prev_low:", prev_low)
-        print("last_low:", last_low)
+        
 
 
         # Trend determination
