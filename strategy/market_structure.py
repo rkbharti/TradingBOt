@@ -33,6 +33,7 @@ class MarketStructureDetector:
             "bos_or_sweep_occurred": False,
             "bos_level": None,
             "choch_bar_index": None,
+            "displacement_detected": False,
             "reason_code": "INSUFFICIENT_DATA",
         }
 
@@ -239,6 +240,7 @@ class MarketStructureDetector:
             "bos_or_sweep_occurred": False,
             "bos_level": None,
             "bos_bar_index": None,
+            "displacement_detected": False,
             "reason_code": "NO_STRUCTURE_BREAK",
         }
 
@@ -284,6 +286,7 @@ class MarketStructureDetector:
                 if bar["close"] > prev_high["price"]:
                     start_index = max(0, i - 1)
                     displacement = self.detect_displacement(self.df, start_index)
+                    out["displacement_detected"] = bool(displacement)
                     if displacement:
                         out.update({
                             "structure_confirmed": True,
@@ -322,6 +325,7 @@ class MarketStructureDetector:
                 if bar["close"] < prev_low["price"]:
                     start_index = max(0, i - 1)
                     displacement = self.detect_displacement(self.df, start_index)
+                    out["displacement_detected"] = bool(displacement)
                     if displacement:
                         out.update({
                             "structure_confirmed": True,
@@ -375,6 +379,7 @@ class MarketStructureDetector:
             out["mss_or_choch"] = "NONE"
             out["bos_or_sweep_occurred"] = False
             out["bos_level"] = None
+            out["displacement_detected"] = False
             out["choch_bar_index"] = None
             return out
 
