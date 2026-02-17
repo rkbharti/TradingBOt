@@ -790,6 +790,7 @@ class XAUUSDTradingBot:
             "htf_poi_reached": external_sweep,
 
             # FIXED LINE
+            "displacement_detected": smc_state.get("displacement_detected", False),
             "ltf_structure_shift": smc_state.get("structure_confirmed", False),
 
             "ltf_poi_mitigated": poi_mitigated,
