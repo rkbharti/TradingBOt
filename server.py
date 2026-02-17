@@ -340,7 +340,6 @@ html_content = """
                         console.log(JSON.stringify(data.chart_objects, null, 2));
 
                         if (!data) return;
-
                         this.equity = data.equity || this.equity;
                         this.balance = data.balance || this.balance;
                         this.pnl_daily = data.pnl_daily ?? this.pnl_daily;
@@ -752,7 +751,7 @@ def update_bot_state_v2(bot_instance, analysis_data):
             "poi_overlays": poi_overlays,
             "chart_objects": chart_objects,  # <-- Added key for chart_objects
             "news_event": {"title": "No major events scheduled", "time": "Market Calm"},
-            "chart_data": get_val(bot_instance, "chart_data", [])[-100:]
+            "chart_data": get_val(bot_instance, "chart_data", [])[-300:]
         })
     except Exception as e:
         print(f"⚠️ Error building bot_state: {e}")
