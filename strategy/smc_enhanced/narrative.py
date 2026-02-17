@@ -6,6 +6,7 @@ class NarrativeState(Enum):
     TRADING_RANGE_DEFINED = auto()
     EXTERNAL_LIQUIDITY_SWEPT = auto()
     HTF_POI_REACHED = auto()
+    LTF_DISPLACEMENT_CONFIRMED = auto()
     LTF_STRUCTURE_SHIFT = auto()
     LTF_POI_MITIGATED = auto()
     ENTRY_ALLOWED = auto()
@@ -40,6 +41,10 @@ class NarrativeAnalyzer:
 
         if self.state == NarrativeState.LTF_STRUCTURE_SHIFT:
             if not market_state.get("ltf_structure_shift"):
+                self.state = NarrativeState.LTF_DISPLACEMENT_CONFIRMED
+
+        if self.state == NarrativeState.LTF_DISPLACEMENT_CONFIRMED:
+            if not market_state.get("displacement_detected"):
                 self.state = NarrativeState.HTF_POI_REACHED
 
         if self.state == NarrativeState.LTF_POI_MITIGATED:
@@ -72,6 +77,11 @@ class NarrativeAnalyzer:
                     state_changed = True
 
             elif self.state == NarrativeState.HTF_POI_REACHED:
+                if market_state.get("displacement_detected"):
+                    self.state = NarrativeState.LTF_DISPLACEMENT_CONFIRMED
+                    state_changed = True
+
+            elif self.state == NarrativeState.LTF_DISPLACEMENT_CONFIRMED:
                 if market_state.get("ltf_structure_shift"):
                     self.state = NarrativeState.LTF_STRUCTURE_SHIFT
                     state_changed = True
