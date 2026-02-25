@@ -1,5 +1,3 @@
-DRY_RUN = True
-
 import os
 import time
 import json
@@ -10,6 +8,8 @@ import pytz
 import requests
 import signal
 import sys
+# Global execution mode
+DRY_RUN = True  # Set to False when running live trading
 from utils.observation_logger import ObservationLogger
 obs_logger = ObservationLogger()
 obs_logger.bot_started()
@@ -92,9 +92,12 @@ def is_trading_session():
     ICT Killzone-based session model using New York time.
     
     Sessions:
+    - ASIAN_KZ: 20:00-00:00 NY time
     - LONDON_KZ: 02:00-05:00 NY time
     - NY_KZ: 07:00-12:00 NY time
-    - OFF_KILLZONE: All other times (analysis only, no execution)
+    - SESSION_DEAD_ZONE: 12:00-14:00 NY time (no trading)
+    - CBDR_ANALYSIS_ONLY: 14:00-20:00 NY time (analysis only)
+    - OFF_KILLZONE: All other times
     - WEEKEND_MARKET_CLOSED: Saturday and Sunday
     """
     now_utc = datetime.now(pytz.utc)
@@ -109,25 +112,43 @@ def is_trading_session():
 
     t = now_ny.hour + now_ny.minute / 60.0
 
-    # London Killzone: 02:00–05:00 NY time
+    # ASIAN Killzone: 20:00–00:00
+    if t >= 20.0:
+        return True, "ASIAN_KZ"
+
+    # London Killzone: 02:00–05:00
     if 2.0 <= t < 5.0:
         return True, "LONDON_KZ"
 
-    # New York Killzone: 07:00–12:00 NY time
+    # New York Killzone: 07:00–12:00
     if 7.0 <= t < 12.0:
         return True, "NY_KZ"
 
-    # Otherwise: analysis only
-    return True, "OFF_KILLZONE"
+    # Dead Zone: 12:00–14:00
+    if 12.0 <= t < 14.0:
+        return False, "SESSION_DEAD_ZONE"
+
+    # CBDR: 14:00–20:00 (analysis only)
+    if 14.0 <= t < 20.0:
+        return True, "CBDR_ANALYSIS_ONLY"
+
+    # Otherwise
+    return False, "OFF_KILLZONE"
 
 def map_session_for_filter(session_name: str) -> str:
     if session_name is None:
         return "OFF_KILLZONE"
     s = session_name.upper()
+    if "ASIAN" in s:
+        return "ASIAN_KZ"
     if "LONDON" in s:
         return "LONDON_KZ"
     if "NY" in s:
         return "NY_KZ"
+    if "DEAD" in s:
+        return "SESSION_DEAD_ZONE"
+    if "CBDR" in s:
+        return "CBDR_ANALYSIS_ONLY"
     if "OFF" in s or "KILLZONE" in s:
         return "OFF_KILLZONE"
     if "WEEKEND" in s:
@@ -594,7 +615,7 @@ class XAUUSDTradingBot:
         print(f"\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Session: {self.current_session}")
 
         # TASK 1 STEP 4: Print stored HTF bias on startup / first cycle
-        stored_bias = self.htf_memory.get("h4_bias", "NEUTRAL")
+        stored_bias = self.htf_memory.get("htf_bias", "NEUTRAL")
         print("HTF MEMORY BIAS:", stored_bias)
 
         # ============================================================================== 
@@ -690,13 +711,26 @@ class XAUUSDTradingBot:
 
 
         # --- H4 bias calculation (TASK 1 STEP 3) ---
+        # --- Hierarchical HTF Bias Calculation ---
         try:
-            # Placeholder: Assume H4 bias is calculated here, e.g. from an H4 analysis module or similar logic.
-            h4_bias = mtf_conf.get("H4", {}).get("bias", "NEUTRAL")
+            d1_bias = mtf_conf.get("tf_signals", {}).get("D1", {}).get("bias", "NEUTRAL")
+            h4_bias = mtf_conf.get("tf_signals", {}).get("H4", {}).get("bias", "NEUTRAL")
+
+            # Hierarchy Rule
+            if d1_bias == "BULLISH":
+                final_htf_bias = "BULLISH"
+            elif d1_bias == "BEARISH":
+                final_htf_bias = "BEARISH"
+            else:
+                final_htf_bias = h4_bias  # fallback
+
         except Exception:
-            h4_bias = "NEUTRAL"
-        print("H4 bias detected:", h4_bias) 
-        self.htf_memory.update("h4_bias", h4_bias)  # TASK 1 STEP 3
+            final_htf_bias = "NEUTRAL"
+
+        print("Final HTF Bias (Hierarchical):", final_htf_bias)
+
+        self.htf_memory.update("htf_bias", final_htf_bias)
+        stored_bias = final_htf_bias
 
         # --- Market Structure --- 
         try:
@@ -890,8 +924,23 @@ class XAUUSDTradingBot:
         # ============================================================================== 
         # 🚀 EXECUTION GATE (Pre-filtered Institutional Model)
         # ============================================================================== 
-        if not narrative_snapshot.get("entry_allowed", False):
-            print(f"⏸ No trade — Narrative: {narrative_snapshot.get('state')}")
+        # =============================
+        # 🔎 GATE TELEMETRY DEBUG BLOCK
+        # =============================
+        gate_debug = {
+            "narrative_allowed": narrative_snapshot.get("entry_allowed", False),
+            "session": self.current_session,
+            "session_name": session_name,
+            "session_ok": self.current_session in ["LONDON_KZ", "NY_KZ"],
+            "external_sweep": external_sweep,
+            "open_positions_count": len(self.open_positions),
+            "trend": ms.get("current_trend", "NEUTRAL"),
+            "zone": current_zone,
+            "htf_bias": stored_bias
+        }
+        if not gate_debug["narrative_allowed"]:
+            print("⛔ BLOCKED: NARRATIVE")
+            print("Gate State:", gate_debug)
             return
 
         # ================================================================
@@ -901,20 +950,34 @@ class XAUUSDTradingBot:
             execution_allowed = True
             gate_reason = None
             
-            # Gate 1: Session must be killzone
-            if self.current_session not in ["LONDON_KZ", "NY_KZ"]:
+            # TASK 3: Execution Filter Update
+            allowed_execution_sessions = ["ASIAN_KZ", "LONDON_KZ", "NY_KZ"]
+            
+            # Gate 1: Session must be in allowed execution sessions
+            if session_name not in allowed_execution_sessions:
                 execution_allowed = False
-                gate_reason = "Session not in killzone"
+                if session_name == "SESSION_DEAD_ZONE":
+                    gate_reason = "SESSION_DEAD_ZONE"
+                    print("⛔ BLOCKED: SESSION_DEAD_ZONE")
+                    print("Telemetry: Blocked by session_dead_zone")
+                else:
+                    gate_reason = session_name
+                    print(f"⛔ BLOCKED: SESSION_FILTER ({session_name})")
+                print("Gate State:", gate_debug)
             
             # Gate 2: Liquidity sweep must be true
             if execution_allowed and not external_sweep:
                 execution_allowed = False
-                gate_reason = "No liquidity sweep"
+                gate_reason = "NO_LIQUIDITY_SWEEP"
+                print("⛔ BLOCKED:", gate_reason)
+                print("Gate State:", gate_debug)
             
             # Gate 3: Position limit (no open positions)
             if execution_allowed and len(self.open_positions) > 0:
                 execution_allowed = False
-                gate_reason = "Position already open"
+                gate_reason = "POSITION_ALREADY_OPEN"
+                print("⛔ BLOCKED:", gate_reason)
+                print("Gate State:", gate_debug)
             
             # If any gate fails, exit execution block
             if not execution_allowed:
@@ -926,12 +989,14 @@ class XAUUSDTradingBot:
             # ================================================================
             trend = ms.get("current_trend", "NEUTRAL")
             signal = None
-            
+            print("DEBUG STORED BIAS:", stored_bias)
             if trend == "BULLISH":
                 # Check BUY-specific gates
                 if current_zone == "DISCOUNT" and stored_bias == "BULLISH":
                     signal = "BUY"
                 else:
+                    print("⛔ BLOCKED: BUY_FILTER_FAIL")
+                    print("Gate State:", gate_debug)
                     # Explain why BUY was not generated
                     reasons = []
                     if current_zone != "DISCOUNT":
@@ -946,6 +1011,8 @@ class XAUUSDTradingBot:
                 if current_zone == "PREMIUM" and stored_bias == "BEARISH":
                     signal = "SELL"
                 else:
+                    print("⛔ BLOCKED: SELL_FILTER_FAIL")
+                    print("Gate State:", gate_debug)
                     # Explain why SELL was not generated
                     reasons = []
                     if current_zone != "PREMIUM":
