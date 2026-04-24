@@ -1,3 +1,5 @@
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
 import MetaTrader5 as mt5
 import json
 from datetime import datetime

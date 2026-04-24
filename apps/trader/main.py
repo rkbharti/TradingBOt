@@ -282,6 +282,8 @@ class XAUUSDTradingBot:
         # TASK 1 STEP 2: Add HTFMemory
         self.htf_memory = HTFMemory()
 
+    
+
     # MT5 wrappers
     def mt5_initialize(self):
         try:
@@ -832,12 +834,13 @@ class XAUUSDTradingBot:
             "idm_taken": smc_state.get("is_idm_swept", False),
             "htf_poi_reached": external_sweep,
 
-            # FIXED LINE
-            "displacement_detected": smc_state.get("displacement_detected", False),
-            "ltf_structure_shift": smc_state.get("structure_confirmed", False),
-
+            "displacement_detected": displacement_confirmed,  # was: always False
+            "ltf_structure_shift": (
+                smc_state.get("structure_confirmed", False) or
+                smc_state.get("is_idm_swept", False)
+            ),
             "ltf_poi_mitigated": poi_mitigated,
-            "killzone_active": self.current_session in ["LONDON_KZ", "NY_KZ"],
+            "killzone_active": self.current_session in ["ASIAN_KZ", "LONDON_KZ", "NY_KZ"],
             "htf_ob_invalidated": False,
             "daily_structure_flipped": False
         }
@@ -1113,6 +1116,163 @@ class XAUUSDTradingBot:
         except Exception as e:
             print(f"❌ Error loading trade log: {e}")
 
+    def signal_diagnostics(self):
+        print("\n" + "="*60)
+        print("🔬 SMC SIGNAL DIAGNOSTICS")
+        print("="*60)
+
+        # GATE 0: MT5
+        print("\n[GATE 0] MT5 Connection")
+        try:
+            if not self.mt5_initialize():
+                print("  ❌ FAIL — MT5 could not initialize"); return
+            print("  ✅ PASS — MT5 connected")
+        except Exception as e:
+            print(f"  ❌ FAIL — {e}"); return
+
+        # GATE 1: Market Data
+        print("\n[GATE 1] Market Data Fetch")
+        try:
+            market_data, current_price = self.fetch_and_prepare()
+            if market_data is None or current_price is None:
+                print("  ❌ FAIL — Could not fetch market data"); return
+            bid = float(current_price.get("bid", current_price))
+            print(f"  ✅ PASS — {len(market_data)} bars | Price: {bid}")
+        except Exception as e:
+            print(f"  ❌ FAIL — {e}"); return
+
+        # GATE 2: Session
+        print("\n[GATE 2] Killzone / Session")
+        try:
+            is_active, session_name = is_trading_session()
+            session_norm = map_session_for_filter(session_name)
+            allowed = session_norm in ["ASIAN_KZ", "LONDON_KZ", "NY_KZ"]
+            status = "✅ PASS" if allowed else "⚠️  WARN (outside killzone)"
+            print(f"  {status} — Session: {session_norm} | Active: {is_active}")
+        except Exception as e:
+            print(f"  ❌ FAIL — {e}"); session_norm = "UNKNOWN"
+
+        # GATE 3: HTF Bias
+        print("\n[GATE 3] HTF Bias")
+        try:
+            mtf_conf = self.mtf.get_multi_tf_confluence()
+            d1_bias = mtf_conf.get("tf_signals", {}).get("D1", {}).get("bias", "NEUTRAL")
+            h4_bias = mtf_conf.get("tf_signals", {}).get("H4", {}).get("bias", "NEUTRAL")
+            final_htf_bias = d1_bias if d1_bias in ["BULLISH","BEARISH"] else h4_bias
+            passed = final_htf_bias in ["BULLISH", "BEARISH"]
+            status = "✅ PASS" if passed else "❌ FAIL"
+            print(f"  {status} — HTF: {final_htf_bias} | D1: {d1_bias} | H4: {h4_bias}")
+        except Exception as e:
+            print(f"  ❌ FAIL — {e}"); final_htf_bias = "NEUTRAL"
+            print(f"  DEBUG tf_signals full: {mtf_conf.get('tf_signals', {})}")
+
+        # GATE 4: Market Structure
+        print("\n[GATE 4] Market Structure (CHoCH/MSS)")
+        try:
+            ms_detector = MarketStructureDetector(market_data)
+            smc_state = ms_detector.get_idm_state() or {}
+            idm_type = smc_state.get("idm_type", "none")
+            passed = idm_type in ["bullish", "bearish"]
+            status = "✅ PASS" if passed else "❌ FAIL"
+            print(f"  {status} — IDM: {idm_type} | Swept: {smc_state.get('is_idm_swept')} | Confirmed: {smc_state.get('structure_confirmed')}")
+            ms = {"current_trend": "BULLISH" if idm_type=="bullish" else ("BEARISH" if idm_type=="bearish" else "NEUTRAL")}
+        except Exception as e:
+            print(f"  ❌ FAIL — {e}"); smc_state = {}; ms = {"current_trend": "NEUTRAL"}
+
+        # GATE 5: Liquidity Sweep
+        print("\n[GATE 5] Liquidity Sweep")
+        try:
+            liq = LiquidityDetector(market_data)
+            liq_result = liq.check_liquidity_grab(current_price=bid)
+            pdh = liq_result.get("pdh_grabbed", False)
+            pdl = liq_result.get("pdl_grabbed", False)
+            external_sweep = pdh or pdl
+            status = "✅ PASS" if external_sweep else "❌ FAIL"
+            print(f"  {status} — PDH: {pdh} | PDL: {pdl}")
+        except Exception as e:
+            print(f"  ❌ FAIL — {e}"); external_sweep = False
+
+        # GATE 6: Zone
+        print("\n[GATE 6] Premium / Discount Zone")
+        try:
+            zones = ZoneCalculator.calculate_zones(float(market_data['high'].max()), float(market_data['low'].min()))
+            current_zone = ZoneCalculator.classify_price_zone(bid, zones)
+            trend = ms.get("current_trend", "NEUTRAL")
+            zone_ok = (trend=="BULLISH" and current_zone=="DISCOUNT") or (trend=="BEARISH" and current_zone=="PREMIUM")
+            status = "✅ PASS" if zone_ok else "❌ FAIL"
+            print(f"  {status} — Zone: {current_zone} | Trend: {trend} | Match: {zone_ok}")
+        except Exception as e:
+            print(f"  ❌ FAIL — {e}"); current_zone = "UNKNOWN"; zone_ok = False
+
+        # GATE 7: POI
+        print("\n[GATE 7] LTF POI Detection")
+        try:
+            ltf_df = self.mtf.fetch_data("M5")
+            poi_found = False; poi_type = "NONE"; poi_zone = "N/A"
+            if ltf_df is not None and len(ltf_df) > 10:
+                poi_id = POIIdentifier(ltf_df)
+                direction = smc_state.get("idm_type")
+                if direction in ["bullish", "bearish"]:
+                    ltf_pois = poi_id.detect_ltf_pois(
+                        shift_start=max(0, len(ltf_df)-50),
+                        shift_end=len(ltf_df)-1,
+                        direction=direction, df=ltf_df
+                    )
+                    ep = ltf_pois.get("extreme_poi")
+                    if ep and isinstance(ep, dict):
+                        poi_found = True
+                        poi_type = ep.get("type", "UNKNOWN")
+                        poi_zone = f"{ep.get('bottom',0):.2f} - {ep.get('top',0):.2f}"
+            status = "✅ PASS" if poi_found else "❌ FAIL"
+            print(f"  {status} — Found: {poi_found} | Type: {poi_type} | Zone: {poi_zone}")
+        except Exception as e:
+            print(f"  ❌ FAIL — {e}"); poi_found = False
+
+        # GATE 8: Narrative
+        print("\n[GATE 8] Narrative Engine")
+        try:
+            ns = self.narrative.update({
+                "trading_range_defined": True,
+                "external_liquidity_swept": external_sweep,
+                "idm_taken": smc_state.get("is_idm_swept", False),
+                "htf_poi_reached": external_sweep,
+                "displacement_detected": poi_found,  # POI found = displacement proxy
+                "ltf_structure_shift": (
+                    smc_state.get("structure_confirmed", False) or
+                    smc_state.get("is_idm_swept", False)
+                ),
+                "ltf_poi_mitigated": poi_found,
+                "killzone_active": session_norm in ["ASIAN_KZ", "LONDON_KZ", "NY_KZ"],
+                "htf_ob_invalidated": False,
+                "daily_structure_flipped": False
+            })
+            entry_allowed = ns.get("entry_allowed", False)
+            status = "✅ PASS" if entry_allowed else "❌ FAIL"
+            print(f"  {status} — State: {ns.get('state')} | Entry: {entry_allowed}")
+        except Exception as e:
+            print(f"  ❌ FAIL — {e}"); entry_allowed = False
+
+        # VERDICT
+        print("\n" + "="*60)
+        print("📊 FINAL VERDICT")
+        gates = {
+            "HTF Bias":        final_htf_bias in ["BULLISH","BEARISH"],
+            "Liquidity Sweep": external_sweep,
+            "Zone Match":      zone_ok,
+            "POI Found":       poi_found,
+            "Narrative":       entry_allowed,
+            "Killzone":        session_norm in ["ASIAN_KZ","LONDON_KZ","NY_KZ"],
+        }
+        for name, result in gates.items():
+            print(f"  {'✅' if result else '❌'} {name}")
+
+        failed = [k for k,v in gates.items() if not v]
+        if not failed:
+            print(f"\n  🟢 ENTER {ms.get('current_trend')} | Bias: {final_htf_bias} | Zone: {current_zone}")
+        else:
+            print(f"\n  🔴 NO TRADE — Blocked by: {', '.join(failed)}")
+        print("="*60 + "\n")
+
     def cleanup(self):
         try:
             if hasattr(self.mt5, "shutdown"):
@@ -1132,6 +1292,8 @@ def main():
         return
 
     bot.load_trade_log()
+    print("🔬 Running diagnostics...")
+    bot.signal_diagnostics()
     bot.running = True
     print("🚀 Bot started (DRY_RUN=%s). Press Ctrl+C to stop." % bot.dry_run)
 

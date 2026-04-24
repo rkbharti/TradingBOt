@@ -1113,6 +1113,13 @@ class POIIdentifier:
             for p in pois:
                 if p != extreme_poi and p != idm_poi:
                     median_pois.append(p)
+                    
+        return {
+            "extreme_poi": extreme_poi,
+            "idm_poi": idm_poi,
+            "median_pois": median_pois,
+            "idm_index": idm_index
+        }
 
     # -----------------------
     # Standalone public classify_poi_type()

@@ -79,14 +79,14 @@ class MultiTimeframeFractal:
         
         if swing_highs:
             most_recent_high = df.iloc[swing_highs[-1]]['high']
-            if current_price > most_recent_high:
+            if current_price >= most_recent_high * 0.9998:  # 0.02% tolerance
                 result['bullish_bos'] = True
                 result['bos_price'] = most_recent_high
                 result['strength'] = 'STRONG'
         
         if swing_lows:
             most_recent_low = df.iloc[swing_lows[-1]]['low']
-            if current_price < most_recent_low:
+            if current_price <= most_recent_low * 1.0002:   # 0.02% tolerance
                 result['bearish_bos'] = True
                 result['bos_price'] = most_recent_low
                 result['strength'] = 'STRONG'
@@ -161,7 +161,16 @@ class MultiTimeframeFractal:
             return None
         print(f"{timeframe} candles loaded:", len(df))
         
-        swing_highs, swing_lows = self.detect_swing_points(df, sensitivity=3)
+        # Timeframe-aware sensitivity
+        tf_sensitivity = {
+            'D1': 1,
+            'H4': 1,
+            'H1': 2,
+            'M15': 2,
+            'M5': 3
+        }
+        sens = tf_sensitivity.get(timeframe, 3)
+        swing_highs, swing_lows = self.detect_swing_points(df, sensitivity=sens)
         bos = self.detect_bos(df, swing_highs, swing_lows)
         choc = self.detect_choc(df, swing_highs, swing_lows)
         idm = self.detect_idm(df)
@@ -176,7 +185,16 @@ class MultiTimeframeFractal:
         if choc['bearish_choc']:
             bias_score -= 1
         
-        bias = 'BULLISH' if bias_score > 0 else ('BEARISH' if bias_score < 0 else 'NEUTRAL')
+        if bias_score > 0:
+            bias = 'BULLISH'
+        elif bias_score < 0:
+            bias = 'BEARISH'
+        elif choc['bullish_choc']:
+            bias = 'BULLISH'   # CHoCH alone = bias signal
+        elif choc['bearish_choc']:
+            bias = 'BEARISH'
+        else:
+            bias = 'NEUTRAL'
         
         return {
             'timeframe': timeframe,
