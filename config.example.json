@@ -1,0 +1,9 @@
+{
+  "symbol": "XAUUSD",
+  "timeframe": "M5",
+  "risk_per_trade_percent": 0.5,
+  "max_positions": 3,
+  "max_lot_size": 2.0,
+  "dry_run": true,
+  "dashboard_url": "http://localhost:8000/webhook"
+}

@@ -42,9 +42,7 @@ from tradingbot.infra.storage.state_repository import HTFMemory  # TASK 1 STEP 1
 # (This keeps bot and server processes decoupled and robust.)
 
 # Telegram config (optional)
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-ENABLE_TELEGRAM = os.getenv("ENABLE_TELEGRAM", "False").lower() == "true"
+from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ENABLE_TELEGRAM
 
 def send_telegram(message, silent=False):
     if not ENABLE_TELEGRAM or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -475,6 +473,14 @@ class XAUUSDTradingBot:
             return market_data, None
         return market_data, current_price
 
+    def sync_closed_positions(self):
+        live_tickets = {p["ticket"] for p in self.mt5_get_all_positions()}
+        before = len(self.open_positions)
+        self.open_positions = [p for p in self.open_positions if p.get("ticket") in live_tickets]
+        removed = before - len(self.open_positions)
+        if removed > 0:
+            print(f"🔄 Synced: removed {removed} closed position(s)")
+
     # === MANUAL TRADE OBSERVATION (ADDED) ===
     def detect_and_manage_manual_trades(self, analysis_context):
         """
@@ -611,6 +617,7 @@ class XAUUSDTradingBot:
     # ========================================
 
     def analyze_once(self):
+        self.sync_closed_positions()
         is_active, session_name = is_trading_session()
         session_norm = map_session_for_filter(session_name)
         self.current_session = session_norm
@@ -811,7 +818,7 @@ class XAUUSDTradingBot:
                     poi_mitigated = poi_identifier.is_poi_mitigated(extreme_poi, ltf_df)
                     if poi_mitigated:
                         displacement_confirmed = poi_identifier.is_displacement_after_poi(
-                            extreme_poi, direction, ltf_df
+                            extreme_poi, ltf_df, direction
                         )
         except Exception as e:
             print(f"⚠️ Phase-6/7 POI logic failed: {e}")
