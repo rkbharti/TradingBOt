@@ -5,46 +5,59 @@ import os
 import time
 import json
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta, timezone
+from typing import Optional
+
 import pandas as pd
 import pytz
 import requests
-import signal
-# Global execution mode
-DRY_RUN = True  # Set to False when running live trading
+import signal as _signal  # renamed: avoids clash with local 'signal' trade variable
+
+# ── Infra ─────────────────────────────────────────────────────────────────────
+from tradingbot.infra.mt5.client import MT5Connection
+from tradingbot.data.timeframe_aggregator import MultiTimeframeFractal
+from tradingbot.infra.storage.json_store import IdeaMemory
+from tradingbot.infra.storage.state_repository import HTFMemory
 from tradingbot.observability.logger import ObservationLogger
+from tradingbot.observability.decision_audit import OBObservationLogger, AuditLogger
+
+# ── Phase 4: Risk engine + audit ──────────────────────────────────────────────
+from tradingbot.risk.challenge_policy import ChallengePolicy
+from tradingbot.execution.order_executor import (
+    OrderExecutor,
+    SignalResult as ExecutorSignalResult,
+)
+from tradingbot.observability.chart_objects import build_chart_objects
+
+# ── Phase 2: Canonical Signal Engine (replaces all legacy strategy modules) ───
+from tradingbot.strategy.smc.signal_engine import SignalEngine, SignalEngineConfig
+
+# ── RETIRED strategy modules — do NOT re-enable, logic is inside signal_engine ─
+# from tradingbot.strategy.smc.market_structure_detector import MarketStructureDetector
+# from tradingbot.strategy.smc.zones import ZoneCalculator
+# from tradingbot.strategy.smc.liquidity import LiquidityDetector
+# from tradingbot.strategy.smc.narrative import NarrativeAnalyzer
+# from tradingbot.strategy.smc.poi import POIIdentifier
+# from tradingbot.strategy.smc.bias import BiasAnalyzer
+
+# ── Config ────────────────────────────────────────────────────────────────────
+from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ENABLE_TELEGRAM
+
+# ── Globals ───────────────────────────────────────────────────────────────────
+DRY_RUN = True  # Set to False for live trading
+
 obs_logger = ObservationLogger()
 obs_logger.bot_started()
 
-# OBSERVATION ONLY — passive OB logger
-from tradingbot.observability.decision_audit import OBObservationLogger
 ob_obs_logger = OBObservationLogger()
-# OBSERVATION ONLY — sanity check log
 try:
     ob_obs_logger.log({"event": "LOGGER_INIT", "timestamp": datetime.now().isoformat()})
 except Exception as e:
-    print(f"⚠️ OBObservationLogger error: {e}")
+    print(f"\u26a0\ufe0f OBObservationLogger error: {e}")
 
-# Local modules (must exist per your directory structure)
-from tradingbot.infra.mt5.client import MT5Connection
-from tradingbot.data.timeframe_aggregator import MultiTimeframeFractal
-from tradingbot.strategy.smc.market_structure_detector import MarketStructureDetector
-from tradingbot.strategy.smc.zones import ZoneCalculator
-from tradingbot.infra.storage.json_store import IdeaMemory
-from tradingbot.strategy.smc.liquidity import LiquidityDetector
-from tradingbot.strategy.smc.narrative import NarrativeAnalyzer
-from tradingbot.strategy.smc.poi import POIIdentifier
-from tradingbot.observability.chart_objects import build_chart_objects
-from tradingbot.infra.storage.state_repository import HTFMemory  # TASK 1 STEP 1
 
-# Note: we no longer rely on direct in-process server imports.
-# Communication to the dashboard is done via webhook POST to the server.
-# (This keeps bot and server processes decoupled and robust.)
-
-# Telegram config (optional)
-from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ENABLE_TELEGRAM
-
-def send_telegram(message, silent=False):
+# ── Telegram ──────────────────────────────────────────────────────────────────
+def send_telegram(message: str, silent: bool = False):
     if not ENABLE_TELEGRAM or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return None
     try:
@@ -53,15 +66,15 @@ def send_telegram(message, silent=False):
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message,
             "parse_mode": "HTML",
-            "disable_notification": silent
+            "disable_notification": silent,
         }, timeout=10)
         return resp.json() if resp.status_code == 200 else None
     except Exception as e:
-        print(f" ❌ Telegram error: {e}")
+        print(f"\u274c Telegram error: {e}")
         return None
 
-# ---------- Utilities ----------
 
+# ── Utilities ─────────────────────────────────────────────────────────────────
 def compute_atr_from_df(df: pd.DataFrame, period: int = 14) -> float:
     try:
         if df is None or len(df) == 0:
@@ -69,349 +82,291 @@ def compute_atr_from_df(df: pd.DataFrame, period: int = 14) -> float:
         for c in ("high", "low", "close"):
             if c not in df.columns:
                 return 0.0
-        d = df[['high', 'low', 'close']].astype(float).copy()
-        d['prev_close'] = d['close'].shift(1)
-        d['tr1'] = d['high'] - d['low']
-        d['tr2'] = (d['high'] - d['prev_close']).abs()
-        d['tr3'] = (d['low'] - d['prev_close']).abs()
-        d['tr'] = d[['tr1', 'tr2', 'tr3']].max(axis=1)
-        if len(d['tr'].dropna()) >= period:
-            atr = d['tr'].rolling(window=period, min_periods=1).mean().iloc[-1]
+        d = df[["high", "low", "close"]].astype(float).copy()
+        d["prev_close"] = d["close"].shift(1)
+        d["tr1"] = d["high"] - d["low"]
+        d["tr2"] = (d["high"] - d["prev_close"]).abs()
+        d["tr3"] = (d["low"]  - d["prev_close"]).abs()
+        d["tr"]  = d[["tr1", "tr2", "tr3"]].max(axis=1)
+        if len(d["tr"].dropna()) >= period:
+            atr = d["tr"].rolling(window=period, min_periods=1).mean().iloc[-1]
         else:
-            atr = float(d['tr'].dropna().mean() or 0.0)
+            atr = float(d["tr"].dropna().mean() or 0.0)
         if not atr or atr <= 0:
             recent = d.tail(max(3, len(d)))
-            atr = float((recent['high'] - recent['low']).abs().mean() or 0.0)
+            atr = float((recent["high"] - recent["low"]).abs().mean() or 0.0)
         return float(atr)
     except Exception as e:
-        print(f"❌ compute_atr_from_df error: {e}")
+        print(f"\u274c compute_atr_from_df error: {e}")
         return 0.0
+
 
 def is_trading_session():
     """
     ICT Killzone-based session model using New York time.
-    
-    Sessions:
-    - ASIAN_KZ: 20:00-00:00 NY time
-    - LONDON_KZ: 02:00-05:00 NY time
-    - NY_KZ: 07:00-12:00 NY time
-    - SESSION_DEAD_ZONE: 12:00-14:00 NY time (no trading)
-    - CBDR_ANALYSIS_ONLY: 14:00-20:00 NY time (analysis only)
-    - OFF_KILLZONE: All other times
-    - WEEKEND_MARKET_CLOSED: Saturday and Sunday
+    - ASIAN_KZ:           20:00-00:00 NY
+    - LONDON_KZ:          02:00-05:00 NY
+    - NY_KZ:              07:00-12:00 NY
+    - SESSION_DEAD_ZONE:  12:00-14:00 NY  (no trading)
+    - CBDR_ANALYSIS_ONLY: 14:00-20:00 NY  (analysis only)
+    - OFF_KILLZONE:       all other times
+    - WEEKEND_MARKET_CLOSED: Sat + Sun
     """
     now_utc = datetime.now(pytz.utc)
-
-    # Weekend check (Saturday=5, Sunday=6)
     if now_utc.weekday() >= 5:
         return False, "WEEKEND_MARKET_CLOSED"
 
-    # Convert to New York time
-    ny_tz = pytz.timezone("America/New_York")
+    ny_tz  = pytz.timezone("America/New_York")
     now_ny = now_utc.astimezone(ny_tz)
-
     t = now_ny.hour + now_ny.minute / 60.0
 
-    # ASIAN Killzone: 20:00–00:00
-    if t >= 20.0:
-        return True, "ASIAN_KZ"
-
-    # London Killzone: 02:00–05:00
-    if 2.0 <= t < 5.0:
-        return True, "LONDON_KZ"
-
-    # New York Killzone: 07:00–12:00
-    if 7.0 <= t < 12.0:
-        return True, "NY_KZ"
-
-    # Dead Zone: 12:00–14:00
-    if 12.0 <= t < 14.0:
-        return False, "SESSION_DEAD_ZONE"
-
-    # CBDR: 14:00–20:00 (analysis only)
-    if 14.0 <= t < 20.0:
-        return True, "CBDR_ANALYSIS_ONLY"
-
-    # Otherwise
+    if t >= 20.0:              return True,  "ASIAN_KZ"
+    if 2.0  <= t < 5.0:       return True,  "LONDON_KZ"
+    if 7.0  <= t < 12.0:      return True,  "NY_KZ"
+    if 12.0 <= t < 14.0:      return False, "SESSION_DEAD_ZONE"
+    if 14.0 <= t < 20.0:      return True,  "CBDR_ANALYSIS_ONLY"
     return False, "OFF_KILLZONE"
+
 
 def map_session_for_filter(session_name: str) -> str:
     if session_name is None:
         return "OFF_KILLZONE"
     s = session_name.upper()
-    if "ASIAN" in s:
-        return "ASIAN_KZ"
-    if "LONDON" in s:
-        return "LONDON_KZ"
-    if "NY" in s:
-        return "NY_KZ"
-    if "DEAD" in s:
-        return "SESSION_DEAD_ZONE"
-    if "CBDR" in s:
-        return "CBDR_ANALYSIS_ONLY"
-    if "OFF" in s or "KILLZONE" in s:
-        return "OFF_KILLZONE"
-    if "WEEKEND" in s:
-        return "WEEKEND_MARKET_CLOSED"
+    if "ASIAN"    in s: return "ASIAN_KZ"
+    if "LONDON"   in s: return "LONDON_KZ"
+    if "NY"       in s: return "NY_KZ"
+    if "DEAD"     in s: return "SESSION_DEAD_ZONE"
+    if "CBDR"     in s: return "CBDR_ANALYSIS_ONLY"
+    if "OFF"      in s or "KILLZONE" in s: return "OFF_KILLZONE"
+    if "WEEKEND"  in s: return "WEEKEND_MARKET_CLOSED"
     return s
 
-# ---------- Dashboard webhook sender ----------
-def send_to_dashboard(bot_data: dict, analysis: dict, endpoint: str = "http://localhost:8000/webhook", timeout: float = 3.0):
-    """
-    Send a JSON snapshot to the dashboard server's /webhook endpoint.
-    - Safe: catches exceptions and returns False on failure.
-    - Replaces NaN values in serializable data by converting via json.dumps -> replace.
-    """
 
-    # --------------------------------------------------
-    # PHASE-7A: POI VISUAL OVERLAY FEED
-    # --------------------------------------------------
+# ── Dashboard webhook ─────────────────────────────────────────────────────────
+def send_to_dashboard(
+    bot_data: dict,
+    analysis: dict,
+    endpoint: str = "http://localhost:8000/webhook",
+    timeout: float = 3.0,
+) -> bool:
+    """
+    Send JSON snapshot to dashboard /webhook.
+    Safe: catches all exceptions, returns False on failure.
+    Replaces NaN tokens before posting.
+    """
     poi_overlays = []
-    print("DEBUG overlays:", poi_overlays)
-
     try:
-        ltf_pois = analysis.get("ltf_pois")
-
-        if ltf_pois:
-            if ltf_pois.get("extreme_poi"):
-                poi_overlays.append({
-                    "type": "extreme",
-                    "top": ltf_pois["extreme_poi"]["top"],
-                    "bottom": ltf_pois["extreme_poi"]["bottom"]
-                })
-
-            if ltf_pois.get("idm_poi"):
-                poi_overlays.append({
-                    "type": "idm",
-                    "top": ltf_pois["idm_poi"]["top"],
-                    "bottom": ltf_pois["idm_poi"]["bottom"]
-                })
-
-            for mp in ltf_pois.get("median_pois", []):
-                poi_overlays.append({
-                    "type": "median",
-                    "top": mp["top"],
-                    "bottom": mp["bottom"]
-                })
-
+        ltf_pois = analysis.get("ltf_pois") or {}
+        if ltf_pois.get("extreme_poi"):
+            poi_overlays.append({
+                "type":   "extreme",
+                "top":    ltf_pois["extreme_poi"]["top"],
+                "bottom": ltf_pois["extreme_poi"]["bottom"],
+            })
+        if ltf_pois.get("idm_poi"):
+            poi_overlays.append({
+                "type":   "idm",
+                "top":    ltf_pois["idm_poi"]["top"],
+                "bottom": ltf_pois["idm_poi"]["bottom"],
+            })
+        for mp in ltf_pois.get("median_pois", []):
+            poi_overlays.append({"type": "median", "top": mp["top"], "bottom": mp["bottom"]})
     except Exception as e:
-        print(f"⚠️ POI overlay build failed: {e}")
+        print(f"\u26a0\ufe0f POI overlay build failed: {e}")
 
     try:
-        # attach overlays into analysis_data
-        analysis_with_overlays = analysis.copy()
+        analysis_with_overlays = {**analysis, "chart_overlays": {"poi_zones": poi_overlays}}
+        payload = {"bot_instance": bot_data, "analysis_data": analysis_with_overlays}
 
-        analysis_with_overlays["chart_overlays"] = {
-            "poi_zones": poi_overlays
-        }
-
-        payload = {
-            "bot_instance": bot_data,
-            "analysis_data": analysis_with_overlays
-        }
-
-        # Attempt to serialize and replace NaN tokens
         try:
             json_payload = json.dumps(payload, default=str)
             if "NaN" in json_payload:
                 json_payload = json_payload.replace("NaN", "null")
-            resp = requests.post(endpoint, data=json_payload, headers={"Content-Type": "application/json"}, timeout=timeout)
+            resp = requests.post(
+                endpoint,
+                data=json_payload,
+                headers={"Content-Type": "application/json"},
+                timeout=timeout,
+            )
         except TypeError:
-            # fallback
             resp = requests.post(endpoint, json=payload, timeout=timeout)
 
         if resp.status_code == 200:
             return True
-        else:
-            print(f"   ⚠️ Dashboard POST returned status {resp.status_code}")
-            return False
+        print(f"\u26a0\ufe0f Dashboard POST returned {resp.status_code}")
+        return False
 
     except requests.exceptions.RequestException as e:
-        print(f"   ⚠️ Dashboard POST failed: {e}")
+        print(f"\u26a0\ufe0f Dashboard POST failed: {e}")
         return False
     except Exception as e:
-        print(f"   ❌ Dashboard unexpected error: {e}")
+        print(f"\u274c Dashboard unexpected error: {e}")
         return False
 
 
+# ── Shutdown ──────────────────────────────────────────────────────────────────
 def graceful_shutdown(signum=None, frame=None):
-    print("🛑 Graceful shutdown initiated")
+    print("\U0001f6d1 Graceful shutdown initiated")
     try:
         obs_logger.bot_stopped()
     except Exception as e:
-        print(f"⚠️ Failed to log bot stop: {e}")
+        print(f"\u26a0\ufe0f Failed to log bot stop: {e}")
     sys.exit(0)
 
 
-signal.signal(signal.SIGINT, graceful_shutdown)   # Ctrl+C
-signal.signal(signal.SIGTERM, graceful_shutdown)  # Kill / stop
+_signal.signal(_signal.SIGINT,  graceful_shutdown)  # Ctrl+C
+_signal.signal(_signal.SIGTERM, graceful_shutdown)  # kill / systemd stop
 
 
-# ---------- Bot ----------
-
+# ─────────────────────────────────────────────────────────────────────────────
+# BOT
+# ─────────────────────────────────────────────────────────────────────────────
 class XAUUSDTradingBot:
-    def __init__(self, config_path="config.json"):
+
+    def __init__(self, config_path: str = "config.json") -> None:
         self.config_path = config_path
-        self.mt5 = MT5Connection(config_path)
-        self.mtf = MultiTimeframeFractal(symbol="XAUUSD")
+
+        # ── Infrastructure ────────────────────────────────────────────────────
+        self.mt5         = MT5Connection(config_path)
+        self.mtf         = MultiTimeframeFractal(symbol="XAUUSD")
         self.idea_memory = IdeaMemory(expiry_minutes=30)
-        # === SMC NARRATIVE STATE MACHINE (PHASE-3B-1) ===
-        self.narrative = NarrativeAnalyzer()
-        self.zone_calculator = ZoneCalculator
-        self.zone_calculator = ZoneCalculator
-        self.poi_identifier = None   # initialized later with fresh data
+        self.htf_memory  = HTFMemory()
 
-        self.running = False
-        self.trade_log = []
+        # ── Phase 2: canonical signal engine ─────────────────────────────────
+        self.signal_engine = SignalEngine(SignalEngineConfig())
 
-        # Internal tracking for BOT initiated positions
-        self.open_positions = []
+        # ── Phase 4: Risk + Audit ─────────────────────────────────────────────
+        self.challenge_policy = ChallengePolicy(
+            daily_loss_limit_pct=1.0,
+            max_drawdown_pct=3.5,
+            max_trades_per_day=2,
+            max_consecutive_losses=2,
+            min_trade_gap_minutes=90,
+            risk_per_trade_pct=0.25,
+        )
+        self.order_executor: Optional[OrderExecutor] = None  # created after MT5 init
+        self.audit_logger = AuditLogger(
+            log_path="logs/decisions/audit.jsonl",
+            symbol="XAUUSD",
+            timeframe="M5",
+        )
+        self._peak_balance: float = 0.0
+        self._daily_pnl_pct: float = 0.0
+        self._trades_today: int = 0
+        self._consecutive_losses: int = 0
+        self._last_trade_time: Optional[datetime] = None
+        self._session_date: Optional[date] = None  # tracks current trading day
 
-        # === MANUAL TRADE OBSERVATION (ADDED) ===
-        # Separate list to track positions found in MT5 that are NOT in self.open_positions
-        self.manual_positions = []
-
-        self.max_positions = 3
-        self.max_lot_size = 2.0
-        self.risk_per_trade_percent = 0.5
-        self.current_session = "UNKNOWN"
-        self.dry_run = DRY_RUN
-        # Reaction logic: waiting for confirmation after HTF POI hit
+        # ── State ─────────────────────────────────────────────────────────────
+        self.running                 = False
+        self.trade_log: list         = []
+        self.open_positions: list    = []
+        self.manual_positions: list  = []
+        self.max_positions           = 3
+        self.max_lot_size            = 2.0
+        self.risk_per_trade_percent  = 0.5
+        self.current_session         = "UNKNOWN"
+        self.dry_run                 = DRY_RUN
         self.waiting_for_confirmation = False
 
-        # TASK 1 STEP 2: Add HTFMemory
-        self.htf_memory = HTFMemory()
-
-    
-
-    # MT5 wrappers
-    def mt5_initialize(self):
+    # ── MT5 wrappers ──────────────────────────────────────────────────────────
+    def mt5_initialize(self) -> bool:
         try:
-            if hasattr(self.mt5, "initialize_mt5"):
-                return self.mt5.initialize_mt5()
-            if hasattr(self.mt5, "initialize"):
-                return self.mt5.initialize()
+            if hasattr(self.mt5, "initialize_mt5"): return self.mt5.initialize_mt5()
+            if hasattr(self.mt5, "initialize"):      return self.mt5.initialize()
         except Exception as e:
-            print(f"❌ MT5 init error: {e}")
+            print(f"\u274c MT5 init error: {e}")
         return False
 
     def mt5_get_account(self):
         try:
-            if hasattr(self.mt5, "get_account_info"):
-                return self.mt5.get_account_info()
-            if hasattr(self.mt5, "account_info"):
-                return self.mt5.account_info()
+            if hasattr(self.mt5, "get_account_info"): return self.mt5.get_account_info()
+            if hasattr(self.mt5, "account_info"):      return self.mt5.account_info()
         except Exception:
             pass
         return None
 
     def mt5_get_current_price(self):
         try:
-            if hasattr(self.mt5, "get_current_price"):
-                return self.mt5.get_current_price()
-            if hasattr(self.mt5, "get_price"):
-                return self.mt5.get_price()
+            if hasattr(self.mt5, "get_current_price"): return self.mt5.get_current_price()
+            if hasattr(self.mt5, "get_price"):          return self.mt5.get_price()
         except Exception:
             pass
         return None
 
-    def mt5_get_historical(self, bars=300):
+    def mt5_get_historical(self, bars: int = 300):
         try:
-            if hasattr(self.mt5, "get_historical_data"):
-                return self.mt5.get_historical_data(bars=bars)
-            if hasattr(self.mt5, "history"):
-                return self.mt5.history(bars)
+            if hasattr(self.mt5, "get_historical_data"): return self.mt5.get_historical_data(bars=bars)
+            if hasattr(self.mt5, "history"):              return self.mt5.history(bars)
         except Exception:
             pass
         return None
 
-    # === MANUAL TRADE OBSERVATION (ADDED) ===
-    def mt5_get_all_positions(self):
+    def mt5_get_all_positions(self) -> list:
         """
         Robust, unified accessor for live MT5 positions.
-        Handles various wrapper implementations and return types safely.
-        Returns a list of standardized dictionaries.
+        Returns a list of normalised dicts.
         """
         positions_raw = None
-
-        # 1. Try various method names common in wrappers
         try:
-            if hasattr(self.mt5, "positions_get"):
-                positions_raw = self.mt5.positions_get()
-            elif hasattr(self.mt5, "get_positions"):
-                positions_raw = self.mt5.get_positions()
-            elif hasattr(self.mt5, "get_open_positions"):
-                positions_raw = self.mt5.get_open_positions()
-            # 2. Try direct MT5 access if wrapper exposes it
+            if   hasattr(self.mt5, "positions_get"):     positions_raw = self.mt5.positions_get()
+            elif hasattr(self.mt5, "get_positions"):      positions_raw = self.mt5.get_positions()
+            elif hasattr(self.mt5, "get_open_positions"): positions_raw = self.mt5.get_open_positions()
             elif hasattr(self.mt5, "mt5") and hasattr(self.mt5.mt5, "positions_get"):
                 positions_raw = self.mt5.mt5.positions_get()
         except Exception as e:
-            print(f"⚠️ Error fetching live positions: {e}")
+            print(f"\u26a0\ufe0f Error fetching live positions: {e}")
             return []
 
         if positions_raw is None:
             return []
 
-        # 3. Normalize Result
         normalized = []
         try:
-            # Handle Tuple/List inputs
-            iterable = positions_raw
-            if not isinstance(positions_raw, (list, tuple)):
-                iterable = [positions_raw] # Single object case
-
+            iterable = positions_raw if isinstance(positions_raw, (list, tuple)) else [positions_raw]
             for p in iterable:
-                p_dict = {}
-                # Extract data based on type
                 if isinstance(p, dict):
                     p_dict = p
                 elif hasattr(p, "_asdict"):
                     p_dict = p._asdict()
                 else:
-                    # Generic Object access
                     p_dict = {
-                        "ticket": getattr(p, "ticket", 0),
-                        "type": getattr(p, "type", 0),
-                        "volume": getattr(p, "volume", 0.0),
-                        "price_open": getattr(p, "price_open", 0.0),
-                        "sl": getattr(p, "sl", 0.0),
-                        "tp": getattr(p, "tp", 0.0),
-                        "symbol": getattr(p, "symbol", ""),
+                        "ticket":        getattr(p, "ticket", 0),
+                        "type":          getattr(p, "type", 0),
+                        "volume":        getattr(p, "volume", 0.0),
+                        "price_open":    getattr(p, "price_open", 0.0),
+                        "sl":            getattr(p, "sl", 0.0),
+                        "tp":            getattr(p, "tp", 0.0),
+                        "symbol":        getattr(p, "symbol", ""),
                         "price_current": getattr(p, "price_current", 0.0),
-                        "profit": getattr(p, "profit", 0.0)
+                        "profit":        getattr(p, "profit", 0.0),
                     }
-
-                # Ensure critical keys exist and are typed correctly
                 if p_dict.get("ticket"):
                     normalized.append({
-                        "ticket": int(p_dict.get("ticket", 0)),
-                        "type": int(p_dict.get("type", 0)), # 0=Buy, 1=Sell usually
-                        "volume": float(p_dict.get("volume", 0.0)),
-                        "price_open": float(p_dict.get("price_open", 0.0)),
-                        "sl": float(p_dict.get("sl", 0.0)),
-                        "tp": float(p_dict.get("tp", 0.0)),
-                        "symbol": str(p_dict.get("symbol", "")),
+                        "ticket":        int(p_dict.get("ticket", 0)),
+                        "type":          int(p_dict.get("type", 0)),
+                        "volume":        float(p_dict.get("volume", 0.0)),
+                        "price_open":    float(p_dict.get("price_open", 0.0)),
+                        "sl":            float(p_dict.get("sl", 0.0)),
+                        "tp":            float(p_dict.get("tp", 0.0)),
+                        "symbol":        str(p_dict.get("symbol", "")),
                         "price_current": float(p_dict.get("price_current", 0.0)),
-                        "profit": float(p_dict.get("profit", 0.0))
+                        "profit":        float(p_dict.get("profit", 0.0)),
                     })
         except Exception as e:
-            print(f"⚠️ Error normalizing positions: {e}")
+            print(f"\u26a0\ufe0f Error normalizing positions: {e}")
             return []
-
         return normalized
-    # ========================================
 
-    def mt5_place_order(self, side, lots, sl, tp):
+    def mt5_place_order(self, side: str, lots: float, sl: float, tp: float):
         try:
             if self.dry_run:
-                print(f" ⚠️ DRY_RUN enabled — simulated order: {side} {lots} lots SL={sl} TP={tp}")
+                print(f"\u26a0\ufe0f DRY_RUN — simulated order: {side} {lots} lots SL={sl} TP={tp}")
                 return f"DRY-{int(time.time())}"
-            if hasattr(self.mt5, "place_order"):
-                return self.mt5.place_order(side, lots, sl, tp)
-            if hasattr(self.mt5, "order_send"):
-                return self.mt5.order_send(side, lots, sl, tp)
+            if hasattr(self.mt5, "place_order"):  return self.mt5.place_order(side, lots, sl, tp)
+            if hasattr(self.mt5, "order_send"):   return self.mt5.order_send(side, lots, sl, tp)
         except Exception as e:
-            print(f"❌ place_order error: {e}")
+            print(f"\u274c place_order error: {e}")
         return None
 
     def mt5_close_position(self, ticket, volume=None):
@@ -421,49 +376,60 @@ class XAUUSDTradingBot:
             if hasattr(self.mt5, "close_trade"):
                 return self.mt5.close_trade(ticket, volume) if volume else self.mt5.close_trade(ticket)
         except Exception as e:
-            print(f"❌ close position error: {e}")
+            print(f"\u274c close_position error: {e}")
         return False
 
     def mt5_modify_position(self, ticket, sl=None, tp=None):
         try:
-            if hasattr(self.mt5, "modify_position"):
-                return self.mt5.modify_position(ticket, sl, tp)
-            if hasattr(self.mt5, "modify_trade"):
-                return self.mt5.modify_trade(ticket, sl, tp)
+            if hasattr(self.mt5, "modify_position"): return self.mt5.modify_position(ticket, sl, tp)
+            if hasattr(self.mt5, "modify_trade"):     return self.mt5.modify_trade(ticket, sl, tp)
         except Exception as e:
-            print(f"❌ modify position error: {e}")
+            print(f"\u274c modify_position error: {e}")
         return False
 
-    def initialize(self):
+    # ── Initialization ────────────────────────────────────────────────────────
+    def initialize(self) -> bool:
         print("=== Initializing XAUUSDTradingBot ===")
         if not self.mt5_initialize():
-            print("❌ MT5 initialization failed")
+            print("\u274c MT5 initialization failed")
             return False
 
         acct = self.mt5_get_account()
         if acct:
             try:
                 bal = float(acct.balance)
-                self.risk_per_trade_percent = getattr(acct, "risk_per_trade", self.risk_per_trade_percent) or self.risk_per_trade_percent
-                print(f"✅ Account balance: ${bal:,.2f}")
+                self._peak_balance = bal
+                self.risk_per_trade_percent = (
+                    getattr(acct, "risk_per_trade", self.risk_per_trade_percent)
+                    or self.risk_per_trade_percent
+                )
+                print(f"\u2705 Account balance: ${bal:,.2f}")
             except Exception:
-                print("ℹ️ Could not read account balance cleanly")
+                print("\u2139\ufe0f Could not read account balance cleanly")
         else:
-            print("ℹ️ No account info available (continuing in read-only/test mode)")
+            print("\u2139\ufe0f No account info available (continuing in read-only/test mode)")
 
-        print("✅ Initialization complete")
+        # Wire OrderExecutor now that MT5 client is ready
+        self.order_executor = OrderExecutor(
+            mt5_client=self.mt5,
+            challenge_policy=self.challenge_policy,
+            dry_run=self.dry_run,
+        )
+        print("\u2705 OrderExecutor wired")
+        print("\u2705 Initialization complete")
         return True
 
+    # ── Data fetch ────────────────────────────────────────────────────────────
     def fetch_and_prepare(self):
         market_data = self.mt5_get_historical(bars=300)
         if market_data is None:
-            print("❌ Could not fetch historical data")
+            print("\u274c Could not fetch historical data")
             return None, None
         if not isinstance(market_data, pd.DataFrame):
             try:
                 market_data = pd.DataFrame(market_data)
             except Exception:
-                print("❌ Historical data conversion failed")
+                print("\u274c Historical data conversion failed")
                 return None, None
         for c in ("high", "low", "close", "open", "tick_volume"):
             if c in market_data.columns:
@@ -471,185 +437,204 @@ class XAUUSDTradingBot:
 
         current_price = self.mt5_get_current_price()
         if current_price is None:
-            print("❌ Could not fetch current price")
+            print("\u274c Could not fetch current price")
             return market_data, None
         return market_data, current_price
 
-    def sync_closed_positions(self):
+    def sync_closed_positions(self) -> None:
         live_tickets = {p["ticket"] for p in self.mt5_get_all_positions()}
         before = len(self.open_positions)
         self.open_positions = [p for p in self.open_positions if p.get("ticket") in live_tickets]
         removed = before - len(self.open_positions)
         if removed > 0:
-            print(f"🔄 Synced: removed {removed} closed position(s)")
+            print(f"\U0001f504 Synced: removed {removed} closed position(s)")
 
-    # === MANUAL TRADE OBSERVATION (ADDED) ===
-    def detect_and_manage_manual_trades(self, analysis_context):
+    # ── Manual trade observation ──────────────────────────────────────────────
+    def detect_and_manage_manual_trades(self, analysis_context: dict) -> None:
         """
-        Detects trades that exist in MT5 but are not tracked in self.open_positions.
-        These are flagged as MANUAL.
-        It then applies SMC analysis to generate advisory logs.
+        Detects MT5 positions not tracked in self.open_positions → flags as MANUAL.
+        Applies SMC context for advisory output.
         """
         try:
-            # 1. Fetch all live positions from MT5 (Normalized)
-            live_pos_list = self.mt5_get_all_positions()
-            if live_pos_list is None:
-                live_pos_list = []
+            live_pos_list = self.mt5_get_all_positions() or []
+            if live_pos_list:
+                print(f"\U0001f50e DEBUG: MT5 reports {len(live_pos_list)} open positions.")
 
-            # DEBUG: Print found positions to ensure connectivity
-            if len(live_pos_list) > 0:
-                print(f"🔎 DEBUG: MT5 reports {len(live_pos_list)} open positions.")
-
-            # 2. Identify Bot Ticket IDs
-            bot_tickets = [int(p.get("ticket", 0)) for p in self.open_positions]
-
-            # 3. Sync Logic
+            bot_tickets          = [int(p.get("ticket", 0)) for p in self.open_positions]
             current_manual_tickets = []
 
             for pos in live_pos_list:
-                ticket = int(pos.get("ticket", 0))
-                symbol = pos.get("symbol", "")
-
-                # Filter for XAUUSD (or current symbol) only - CASE INSENSITIVE FIX
+                ticket    = int(pos.get("ticket", 0))
+                symbol    = pos.get("symbol", "")
                 sym_upper = symbol.upper()
+
                 if "XAU" not in sym_upper and "GOLD" not in sym_upper:
-                    # DEBUG: Print why we are skipping
-                    print(f"⚠️ DEBUG: Skipping position {ticket} (Symbol: {symbol} not XAU/GOLD)")
+                    print(f"\u26a0\ufe0f DEBUG: Skipping {ticket} (symbol={symbol})")
                     continue
 
-                # TASK 2: Manual trade detection
-                # If this ticket is NOT in bot_tickets, it is MANUAL
                 if ticket not in bot_tickets:
                     current_manual_tickets.append(ticket)
+                    existing = next((x for x in self.manual_positions if x["ticket"] == ticket), None)
 
-                    # Check if we are already tracking this manual trade
-                    existing_manual = next((item for item in self.manual_positions if item["ticket"] == ticket), None)
-
-                    if not existing_manual:
-                        # === NEW MANUAL TRADE DETECTED ===
-                        trade_type_code = pos.get("type", 0)
-                        trade_type = "BUY" if trade_type_code == 0 else "SELL"
+                    if not existing:
+                        type_code   = pos.get("type", 0)
+                        trade_type  = "BUY" if type_code == 0 else "SELL"
                         entry_price = float(pos.get("price_open", 0.0))
 
-                        # Apply SMC Intelligence
-                        advisory = "HOLD"
-                        rationale = []
-
                         trend = analysis_context.get("market_structure", {}).get("current_trend", "NEUTRAL")
-                        zone = analysis_context.get("current_zone", "UNKNOWN")
+                        zone  = analysis_context.get("current_zone", "UNKNOWN")
 
-                        # Trend Alignment
+                        rationale = []
                         if trade_type == "BUY":
                             if trend == "BULLISH": rationale.append("Aligned with Bullish Trend")
                             elif trend == "BEARISH": rationale.append("Counter-trend (High Risk)")
-                        else: # SELL
+                        else:
                             if trend == "BEARISH": rationale.append("Aligned with Bearish Trend")
                             elif trend == "BULLISH": rationale.append("Counter-trend (High Risk)")
 
-                        # Zone Alignment
-                        if zone == "DISCOUNT" and trade_type == "BUY": rationale.append("Buying in Discount (Good)")
-                        if zone == "PREMIUM" and trade_type == "BUY": rationale.append("Buying in Premium (Risk)")
-                        if zone == "PREMIUM" and trade_type == "SELL": rationale.append("Selling in Premium (Good)")
+                        if zone == "DISCOUNT" and trade_type == "BUY":  rationale.append("Buying in Discount (Good)")
+                        if zone == "PREMIUM"  and trade_type == "BUY":  rationale.append("Buying in Premium (Risk)")
+                        if zone == "PREMIUM"  and trade_type == "SELL": rationale.append("Selling in Premium (Good)")
                         if zone == "DISCOUNT" and trade_type == "SELL": rationale.append("Selling in Discount (Risk)")
 
                         advisory_str = "; ".join(rationale) if rationale else "Neutral structure"
+                        print(f"\U0001f440 MANUAL TRADE DETECTED: Ticket {ticket} | {trade_type} @ {entry_price}")
+                        print(f"   \U0001f916 SMC Advisory: {advisory_str}")
 
-                        print(f"👀 MANUAL TRADE DETECTED: Ticket {ticket} | {trade_type} @ {entry_price}")
-                        print(f"   🤖 SMC Analysis: {advisory_str}")
-
-                        # Register
                         new_manual = {
-                            "ticket": ticket,
-                            "origin": "MANUAL",
-                            "signal": trade_type,
-                            "entry_price": entry_price,
-                            "volume": pos.get("volume"),
-                            "sl": pos.get("sl"),
-                            "tp": pos.get("tp"),
-                            "entry_time": datetime.now().isoformat(),
-                            "advisory": advisory_str,
-                            "status": "OPEN",
-                            "symbol": symbol,
-                            "type": trade_type_code,
-                            "profit": pos.get("profit", 0.0),
-                            "price_open": entry_price,
+                            "ticket":        ticket,
+                            "origin":        "MANUAL",
+                            "signal":        trade_type,
+                            "entry_price":   entry_price,
+                            "volume":        pos.get("volume"),
+                            "sl":            pos.get("sl"),
+                            "tp":            pos.get("tp"),
+                            "entry_time":    datetime.now().isoformat(),
+                            "advisory":      advisory_str,
+                            "status":        "OPEN",
+                            "symbol":        symbol,
+                            "type":          type_code,
+                            "profit":        pos.get("profit", 0.0),
+                            "price_open":    entry_price,
                             "price_current": pos.get("price_current", 0.0),
-                            "source": "MANUAL"  # TASK 2 (Add 'source': 'MANUAL')
+                            "source":        "MANUAL",
                         }
                         self.manual_positions.append(new_manual)
-
-                        # Log to persistent log
                         self.trade_log.append({
                             "timestamp": datetime.now().isoformat(),
-                            "action": "MANUAL_DETECTED",
-                            "ticket": ticket,
-                            "details": new_manual
+                            "action":    "MANUAL_DETECTED",
+                            "ticket":    ticket,
+                            "details":   new_manual,
                         })
                         self.save_trade_log()
                     else:
-                        # Update dynamic fields (SL/TP could change manually)
-                        existing_manual["sl"] = pos.get("sl")
-                        existing_manual["tp"] = pos.get("tp")
-                        existing_manual["current_price"] = pos.get("price_current", 0.0) # If available
+                        existing["sl"]            = pos.get("sl")
+                        existing["tp"]            = pos.get("tp")
+                        existing["current_price"] = pos.get("price_current", 0.0)
 
-            # 4. Cleanup Closed Manual Trades
-            # Remove trades from self.manual_positions that are no longer in live_positions (tickets)
-            active_manual_tickets = set(current_manual_tickets)
-            for m_pos in list(self.manual_positions):
-                if m_pos["ticket"] not in active_manual_tickets:
-                    print(f"🏁 Manual Trade {m_pos['ticket']} Closed/Removed")
-                    self.manual_positions.remove(m_pos)
+            # Cleanup closed manual trades
+            active_manual = set(current_manual_tickets)
+            for m in list(self.manual_positions):
+                if m["ticket"] not in active_manual:
+                    print(f"\U0001f3c1 Manual Trade {m['ticket']} Closed/Removed")
+                    self.manual_positions.remove(m)
                     self.trade_log.append({
                         "timestamp": datetime.now().isoformat(),
-                        "action": "MANUAL_CLOSED",
-                        "ticket": m_pos["ticket"]
+                        "action":    "MANUAL_CLOSED",
+                        "ticket":    m["ticket"],
                     })
                     self.save_trade_log()
 
-            # TASK 2: Ensure manual trades are visible in open_positions
-            # This block guarantees that manual trades appear in the open_positions list and are passed to dashboard
-            manual_tickets_set = set([pm["ticket"] for pm in self.manual_positions])
-            for manual_pos in self.manual_positions:
-                # Check if not already injected in open_positions
-                if not any(op.get("ticket", 0) == manual_pos["ticket"] for op in self.open_positions):
-                    self.open_positions.append(manual_pos)
+            # Inject manual trades into open_positions for dashboard visibility
+            for mp in self.manual_positions:
+                if not any(op.get("ticket", 0) == mp["ticket"] for op in self.open_positions):
+                    self.open_positions.append(mp)
 
         except Exception as e:
-            print(f"⚠️ Manual trade sync error: {e}")
-    # ========================================
+            print(f"\u26a0\ufe0f Manual trade sync error: {e}")
 
-    def analyze_once(self):
+    # ── Main analysis cycle ───────────────────────────────────────────────────
+
+    def _maybe_reset_daily_state(self) -> None:
+        """Reset daily counters at 08:00 IST (02:30 UTC) on a new calendar day."""
+        try:
+            import pytz
+            ist_tz  = pytz.timezone("Asia/Kolkata")
+            now_ist = datetime.now(pytz.utc).astimezone(ist_tz)
+            today   = now_ist.date()
+            if self._session_date != today and now_ist.hour >= 8:
+                print(f"\U0001f504 New trading day ({today}) — resetting daily counters")
+                self.challenge_policy.reset_daily_state()
+                self._trades_today       = 0
+                self._daily_pnl_pct      = 0.0
+                self._consecutive_losses = self.challenge_policy.consecutive_losses
+                self._session_date       = today
+        except Exception as e:
+            print(f"\u26a0\ufe0f Daily reset error: {e}")
+
+    def _build_policy_state_snapshot(self, account_balance: float) -> dict:
+        """Return a serialisable policy-state dict for audit records."""
+        return {
+            "daily_pnl_pct":          self._daily_pnl_pct,
+            "consecutive_losses":     self._consecutive_losses,
+            "trades_today":           self._trades_today,
+            "peak_balance":           self._peak_balance,
+            "current_balance":        account_balance,
+            "max_drawdown_pct":       self.challenge_policy.max_drawdown_pct,
+            "daily_loss_limit_pct":   self.challenge_policy.daily_loss_limit_pct,
+            "max_consecutive_losses": self.challenge_policy.max_consecutive_losses,
+            "max_trades_per_day":     self.challenge_policy.max_trades_per_day,
+        }
+
+    def analyze_once(self) -> None:
+        # ── Daily reset (08:00 IST) ───────────────────────────────────────────
+        self._maybe_reset_daily_state()
+
         self.sync_closed_positions()
+
+        # ── Lockdown gate ─────────────────────────────────────────────────────
+        _acct_early = self.mt5_get_account()
+        _bal_early  = float(getattr(_acct_early, "balance", self._peak_balance or 100000.0)) if _acct_early else (self._peak_balance or 100000.0)
+        lockdown_reason = self.challenge_policy.get_lockdown_reason(
+            daily_pnl_pct=self._daily_pnl_pct,
+            peak_balance=self._peak_balance or _bal_early,
+            current_balance=_bal_early,
+            consecutive_losses=self._consecutive_losses,
+        )
+        if lockdown_reason:
+            print(f"\U0001f6d1 LOCKDOWN: {lockdown_reason} — skipping cycle (wait 60s)")
+            try:
+                self.audit_logger.log_lockdown(
+                    lockdown_reason,
+                    self._build_policy_state_snapshot(_bal_early),
+                )
+            except Exception as _e:
+                print(f"\u26a0\ufe0f Audit lockdown log failed: {_e}")
+            time.sleep(60)
+            return
+
         is_active, session_name = is_trading_session()
         session_norm = map_session_for_filter(session_name)
         self.current_session = session_norm
-        print(f"\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Session: {self.current_session}")
+        print(f"\n\U0001f552 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Session: {self.current_session}")
 
-        # TASK 1 STEP 4: Print stored HTF bias on startup / first cycle
         stored_bias = self.htf_memory.get("htf_bias", "NEUTRAL")
         print("HTF MEMORY BIAS:", stored_bias)
 
-        # ============================================================================== 
-        # MARKET CLOSED (WEEKEND ONLY)
-        # ============================================================================== 
+        # ── Weekend / market closed ───────────────────────────────────────────
         if not is_active:
-            print(f"⏸️ Market session '{session_norm}' not active — heartbeat only")
-            acct = self.mt5_get_account()
-            equity = float(getattr(acct, 'equity', 0.0)) if acct else 0.0
-            balance = float(getattr(acct, 'balance', 0.0)) if acct else 0.0
+            print(f"\u23f8\ufe0f Market session '{session_norm}' not active — heartbeat only")
+            acct    = self.mt5_get_account()
+            equity  = float(getattr(acct, "equity",  0.0)) if acct else 0.0
+            balance = float(getattr(acct, "balance", 0.0)) if acct else 0.0
 
-            # Narrative state logging (even when market closed)
-            narrative_state = "MARKET_CLOSED"
-            entry_allowed = False
-            structure_state = {"current_trend": "MARKET CLOSED"}
-            bias = "NEUTRAL"
             log_record = {
-                "time": datetime.now().isoformat(),
-                "narrative_state": narrative_state,
-                "entry_allowed": entry_allowed,
-                "structure_state": structure_state,
-                "bias": bias,
-                "reason": f"Market session '{session_norm}' not active"
+                "time":            datetime.now().isoformat(),
+                "narrative_state": "MARKET_CLOSED",
+                "entry_allowed":   False,
+                "structure_state": {"current_trend": "MARKET CLOSED"},
+                "bias":            "NEUTRAL",
+                "reason":          f"Market session '{session_norm}' not active",
             }
             self.trade_log.append(log_record)
             self.save_trade_log()
@@ -660,657 +645,420 @@ class XAUUSDTradingBot:
 
             send_to_dashboard(
                 {
-                    "equity": equity,
-                    "balance": balance,
-                    "last_price": 0,
-                    "open_positions": self.open_positions,
+                    "equity": equity, "balance": balance, "last_price": 0,
+                    "open_positions":   self.open_positions,
                     "manual_positions": self.manual_positions,
-                    "closed_trades": [],
-                    "chart_data": [],
-                    "current_session": session_norm
+                    "closed_trades": [], "chart_data": [],
+                    "current_session":  session_norm,
                 },
                 {
                     "market_structure": {"current_trend": "MARKET CLOSED"},
-                    "zone_strength": 0,
-                    "current_zone": "CLOSED",
-                    "zones": {}
-                }
+                    "zone_strength": 0, "current_zone": "CLOSED", "zones": {},
+                },
             )
             return
 
-        # ============================================================================== 
-        # ACTIVE MARKET (Analysis runs 24/5)
-        # ============================================================================== 
+        # ── Fetch market data ─────────────────────────────────────────────────
         market_data, current_price = self.fetch_and_prepare()
         if market_data is None or current_price is None:
             return
 
-        bid = float(current_price.get("bid", current_price))
-        ask = float(current_price.get("ask", bid))
+        bid    = float(current_price.get("bid", current_price))
+        ask    = float(current_price.get("ask", bid))
         spread = abs(ask - bid)
-        price_for_zones = bid
-        #day 8
-        # --- MTF Bias --- 
-        try:
-            print("DEBUG: Running MTF analysis")
-            mtf_conf = self.mtf.get_multi_tf_confluence()
 
-            print("\n📊 MULTI-TIMEFRAME FRACTAL ANALYSIS (DEBUG)")
-            print("=================================================")
-            print(f"Overall Bias: {mtf_conf.get('overall_bias')}")
-            print(f"Confidence: {mtf_conf.get('confidence')}")
+        # ── Fetch all timeframe DataFrames ────────────────────────────────────
+        m5_df  = self.mtf.fetch_data("M5")
+        m15_df = self.mtf.fetch_data("M15")
+        h4_df  = self.mtf.fetch_data("H4")
+        d1_df  = self.mtf.fetch_data("D1")
 
-            tf_signals = mtf_conf.get("tf_signals", {})
+        if any(df is None or len(df) == 0 for df in [m5_df, m15_df, h4_df, d1_df]):
+            print("\u274c One or more timeframe DataFrames unavailable — skipping cycle")
+            return
 
-            if isinstance(tf_signals, dict):
-                for tf_name, tf_entry in tf_signals.items():
-                    bias = tf_entry.get("bias", "UNKNOWN")
-
-                    bos_block = tf_entry.get("bos", {})
-                    choc_block = tf_entry.get("choc", {})
-
-                    bos = bos_block.get("bullish_bos") or bos_block.get("bearish_bos")
-                    choch = choc_block.get("bullish_choc") or choc_block.get("bearish_choc")
-
-                    print(f"{tf_name}: bias={bias} | BOS={bool(bos)} | CHoCH={bool(choch)}")
-
-            print("=================================================\n")
-
-        except Exception as e:
-            print("❌ MTF ERROR:", str(e))
-            mtf_conf = {"overall_bias": "NEUTRAL", "confidence": 0}
-
-
-        # --- H4 bias calculation (TASK 1 STEP 3) ---
-        # --- Hierarchical HTF Bias Calculation ---
-        try:
-            d1_bias = mtf_conf.get("tf_signals", {}).get("D1", {}).get("bias", "NEUTRAL")
-            h4_bias = mtf_conf.get("tf_signals", {}).get("H4", {}).get("bias", "NEUTRAL")
-
-            # Hierarchy Rule
-            if d1_bias == "BULLISH":
-                final_htf_bias = "BULLISH"
-            elif d1_bias == "BEARISH":
-                final_htf_bias = "BEARISH"
-            else:
-                final_htf_bias = h4_bias  # fallback
-
-        except Exception:
-            final_htf_bias = "NEUTRAL"
-
-        print("Final HTF Bias (Hierarchical):", final_htf_bias)
-
-        self.htf_memory.update("htf_bias", final_htf_bias)
-        stored_bias = final_htf_bias
-
-        # --- Market Structure --- 
-        try:
-            ms_detector = MarketStructureDetector(market_data)
-            smc_state = ms_detector.get_idm_state()
-            if not isinstance(smc_state, dict): smc_state = {}
-
-            if smc_state.get("idm_type") == "bullish": ms = {"current_trend": "BULLISH"}
-            elif smc_state.get("idm_type") == "bearish": ms = {"current_trend": "BEARISH"}
-            else: ms = {"current_trend": "NEUTRAL"}
-        except Exception as e:
-            print("❌ Market structure error:", e)
-            ms = {"current_trend": "NEUTRAL"}
-            smc_state = {}
-
-        # --- Zones --- 
-        try:
-            latest_high = float(market_data['high'].max())
-            latest_low = float(market_data['low'].min())
-            zones = ZoneCalculator.calculate_zones(latest_high, latest_low)
-            current_zone = ZoneCalculator.classify_price_zone(price_for_zones, zones)
-            zone_strength = 0
-        except Exception:
-            current_zone = "UNKNOWN"; zone_strength = 0; zones = {}
-
-        # --- Manual trade observation --- 
+        # ── Manual trade observation ──────────────────────────────────────────
         self.detect_and_manage_manual_trades({
-            "market_structure": ms, "current_zone": current_zone,
-            "zone_strength": zone_strength, "mtf_bias": mtf_conf
+            "market_structure": {"current_trend": stored_bias},
+            "current_zone":     "UNKNOWN",
         })
 
-        # --- Liquidity Detection --- 
-        external_sweep = False
+        # ── CANONICAL SIGNAL ENGINE ───────────────────────────────────────────
+        print("\n\U0001f52c Running SMC Signal Engine (8-gate sequential check)...")
         try:
-            liquidity_detector = LiquidityDetector(market_data)
-            liq_result = liquidity_detector.check_liquidity_grab(current_price=bid)
-            external_sweep = liq_result.get("pdh_grabbed", False) or liq_result.get("pdl_grabbed", False)
+            result = self.signal_engine.evaluate(
+                m5_df=m5_df,
+                m15_df=m15_df,
+                h4_df=h4_df,
+                d1_df=d1_df,
+                now_utc=datetime.now(timezone.utc),
+            )
         except Exception as e:
-            print(f"⚠️ Liquidity detection error: {e}")
+            print(f"\u274c SignalEngine error: {e}")
+            import traceback; traceback.print_exc()
+            return
 
-        # ======================================================================
-        # 🔥 PHASE-6/7 — LTF POI DETECTION & OVERLAYS
-        # ======================================================================
-        poi_mitigated = False
-        displacement_confirmed = False
-        ltf_pois = {} # <--- PHASE-7: Store for visual dashboard
+        # Update HTF memory from engine-confirmed direction
+        if result.direction:
+            self.htf_memory.update("htf_bias", result.direction)
+            stored_bias = result.direction
 
-        try:
-            ltf_df = self.mtf.fetch_data("M5")
-            if ltf_df is not None and len(ltf_df) > 10:
-                poi_identifier = POIIdentifier(ltf_df)
-                idm_type = smc_state.get("idm_type")
+        # ── Print gate results ────────────────────────────────────────────────
+        print("\n\U0001f4ca SIGNAL ENGINE — GATE RESULTS")
+        print("=" * 58)
+        for gate_name, gate_data in result.gates.items():
+            icon   = "\u2705" if gate_data.get("passed") else "\u274c"
+            reason = gate_data.get("reason", "")
+            print(f"  {icon}  {gate_name:<40} {reason}")
+        print("=" * 58)
+        print(f"  \U0001f3af ACTION:     {result.action}")
+        print(f"  \U0001f4cc DIRECTION:  {result.direction}")
+        print(f"  \U0001f511 REASON:     {result.reason}")
+        print(f"  \U0001f4af CONFIDENCE: {result.confidence_score}%")
+        if result.entry_price:
+            print(f"  \U0001f4b0 ENTRY: {result.entry_price}  SL: {result.sl_price}  TP: {result.tp_price}")
+        print("=" * 58 + "\n")
 
-                if idm_type == "bullish":
-                    direction = "bullish"
-                elif idm_type == "bearish":
-                    direction = "bearish"
-                else:
-                    direction = None
-
-                if direction:
-                    shift_start = max(0, len(ltf_df) - 50)   # temporary safe window
-                    shift_end = len(ltf_df) - 1
-
-                    ltf_pois = poi_identifier.detect_ltf_pois(
-                        shift_start=shift_start,
-                        shift_end=shift_end,
-                        direction=direction,
-                        df=ltf_df
-                    )
-                else:
-                    ltf_pois = {}
-
-                extreme_poi = ltf_pois.get("extreme_poi")
-                if extreme_poi:
-                    poi_mitigated = poi_identifier.is_poi_mitigated(extreme_poi, ltf_df)
-                    if poi_mitigated:
-                        displacement_confirmed = poi_identifier.is_displacement_after_poi(
-                            extreme_poi, ltf_df, direction
-                        )
-        except Exception as e:
-            print(f"⚠️ Phase-6/7 POI logic failed: {e}")
-
-        # ============================================================================== 
-        # 🔥 PHASE-3B-1 — NARRATIVE ENGINE
-        # ============================================================================== 
-        market_state = {
-            "trading_range_defined": True,
-            "external_liquidity_swept": external_sweep,
-            "idm_taken": smc_state.get("is_idm_swept", False),
-            "htf_poi_reached": external_sweep,
-
-            "displacement_detected": displacement_confirmed,  # was: always False
-            "ltf_structure_shift": (
-                smc_state.get("structure_confirmed", False) or
-                smc_state.get("is_idm_swept", False)
-            ),
-            "ltf_poi_mitigated": poi_mitigated,
-            "killzone_active": self.current_session in ["ASIAN_KZ", "LONDON_KZ", "NY_KZ"],
-            "htf_ob_invalidated": False,
-            "daily_structure_flipped": False
-        }
-
-        
-        print("NARRATIVE CHECK:")
-        print("ltf_structure_shift:", market_state.get("ltf_structure_shift"))
-        print("ltf_poi_mitigated:", market_state.get("ltf_poi_mitigated"))
-        print("killzone_active:", market_state.get("killzone_active"))
-
-        narrative_snapshot = self.narrative.update(market_state)
-
-        # Narrative state logging (required: every cycle)
-        bias = None
-        try:
-            from tradingbot.strategy.smc.bias import BiasAnalyzer
-            bias_analyzer = BiasAnalyzer()
-            bias_result = bias_analyzer.get_bias(smc_state)
-            bias = bias_result.get("bias", "NEUTRAL") if isinstance(bias_result, dict) else "NEUTRAL"
-        except Exception:
-            bias = "NEUTRAL"
-
+        # ── Log cycle ─────────────────────────────────────────────────────────
         log_record = {
-            "time": datetime.now().isoformat(),
-            "narrative_state": narrative_snapshot.get("state"),
-            "entry_allowed": narrative_snapshot.get("entry_allowed"),
-            "structure_state": smc_state,
-            "bias": bias,
-            "reason": narrative_snapshot.get("state") if not narrative_snapshot.get("entry_allowed") else "Entry permitted"
+            "time":             datetime.now().isoformat(),
+            "narrative_state":  result.reason,
+            "entry_allowed":    result.action == "ENTER",
+            "action":           result.action,
+            "direction":        result.direction,
+            "entry_price":      result.entry_price,
+            "sl_price":         result.sl_price,
+            "tp_price":         result.tp_price,
+            "confidence_score": result.confidence_score,
+            "gates":            result.gates,
+            "bias":             result.direction or "NEUTRAL",
+            "session":          session_norm,
         }
         self.trade_log.append(log_record)
         self.save_trade_log()
         try:
-            obs_logger.log_event("narrative_state", log_record)
+            obs_logger.log_event("signal_result", log_record)
         except Exception:
             pass
 
-        # TASK 3: Narrative explanation print
-        narrative_state = narrative_snapshot.get("state", "UNKNOWN")
-        print(f"🧠 Market Narrative: {narrative_state} — structure context for this minute")
+        # ── Dashboard payload ─────────────────────────────────────────────────
+        acct     = self.mt5_get_account()
+        htf_gate = result.gates.get("step_1_htf_bias",       {})
+        dr_gate  = result.gates.get("step_6_dealing_range",  {})
+        rr_gate  = result.gates.get("step_8_risk_reward",    {})
 
-        # ====================================================================== 
-        # 📊 PHASE-7 — SEND TO DASHBOARD (ALWAYS)
-        # ====================================================================== 
-        acct = self.mt5_get_account()
-        dash_payload = {
-            "equity": float(getattr(acct, 'equity', 0.0)) if acct else 0.0,
-            "balance": float(getattr(acct, 'balance', 0.0)) if acct else 0.0,
-            "last_price": bid,
-            "open_positions": self.open_positions,
-            "manual_positions": self.manual_positions,
-            "closed_trades": [],
-            "chart_data": market_data.tail(300).to_dict(orient="records"),
-            "current_session": self.current_session
-        }
-
-        # === 🟦 Build chart objects module integration ===
-
-        # Debug: check what SMC engine is producing
-        print("SMC STATE:", smc_state)
-        print("LTF POIS:", ltf_pois)
-
-        chart_objects = build_chart_objects(
-            smc_state, zones, ltf_pois, bid
-        )
-
-        # Debug: check final chart objects
-        print("CHART OBJECTS:", chart_objects)
+        # Build chart_objects using existing module (keep dashboard overlay working)
+        try:
+            chart_objects = build_chart_objects({}, {}, {}, bid)
+        except Exception:
+            chart_objects = {}
 
         analysis_snapshot = {
-            # Core structure info
-            "market_structure": ms,
-            "zone_strength": zone_strength,
-            "current_zone": current_zone,
-
-            # HTF zones
-            "zones": zones,
-
-            # Daily levels
-            "pdh": float(market_data['high'].max()),
-            "pdl": float(market_data['low'].min()),
-
-            # LTF POIs (legacy overlay system)
-            "ltf_pois": ltf_pois,
-
-            # New unified chart objects
-            "chart_objects": chart_objects
+            "market_structure": {
+                "current_trend": result.direction or htf_gate.get("h4_bias", "NEUTRAL"),
+                "d1_bias":       htf_gate.get("d1_bias", "NEUTRAL"),
+                "h4_bias":       htf_gate.get("h4_bias", "NEUTRAL"),
+            },
+            "zone_strength": result.confidence_score,
+            "current_zone":  dr_gate.get("zone", "UNKNOWN"),
+            "zones": {
+                "dealing_low":  dr_gate.get("dealing_low"),
+                "dealing_high": dr_gate.get("dealing_high"),
+                "equilibrium":  dr_gate.get("equilibrium"),
+            },
+            "pdh":           float(market_data["high"].max()),
+            "pdl":           float(market_data["low"].min()),
+            "ltf_pois":      {},
+            "chart_objects": chart_objects,
+            # Full engine output for dashboard drill-down panel
+            "signal_engine": {
+                "action":           result.action,
+                "direction":        result.direction,
+                "entry_price":      result.entry_price,
+                "sl_price":         result.sl_price,
+                "tp_price":         result.tp_price,
+                "reason":           result.reason,
+                "confidence_score": result.confidence_score,
+                "rr":               rr_gate.get("rr"),
+                "gates":            result.gates,
+            },
         }
 
-        # Send to dashboard
-        send_to_dashboard(dash_payload, analysis_snapshot)
+        send_to_dashboard(
+            {
+                "equity":           float(getattr(acct, "equity",  0.0)) if acct else 0.0,
+                "balance":          float(getattr(acct, "balance", 0.0)) if acct else 0.0,
+                "last_price":       bid,
+                "open_positions":   self.open_positions,
+                "manual_positions": self.manual_positions,
+                "closed_trades":    [],
+                "chart_data":       market_data.tail(300).to_dict(orient="records"),
+                "current_session":  self.current_session,
+            },
+            analysis_snapshot,
+        )
 
-        # ============================================================================== 
-        # 🚀 EXECUTION GATE (Pre-filtered Institutional Model)
-        # ============================================================================== 
-        # =============================
-        # 🔎 GATE TELEMETRY DEBUG BLOCK
-        # =============================
-        gate_debug = {
-            "narrative_allowed": narrative_snapshot.get("entry_allowed", False),
-            "session": self.current_session,
-            "session_name": session_name,
-            "session_ok": self.current_session in ["LONDON_KZ", "NY_KZ"],
-            "external_sweep": external_sweep,
-            "open_positions_count": len(self.open_positions),
-            "trend": ms.get("current_trend", "NEUTRAL"),
-            "zone": current_zone,
-            "htf_bias": stored_bias
-        }
-        if not gate_debug["narrative_allowed"]:
-            print("⛔ BLOCKED: NARRATIVE")
-            print("Gate State:", gate_debug)
+        # ── Execution gate ────────────────────────────────────────────────────
+        if len(self.open_positions) > 0:
+            print(f"\u26d4 BLOCKED: POSITION_ALREADY_OPEN ({len(self.open_positions)} open)")
             return
 
-        # ================================================================
-        # INSTITUTIONAL PRE-FILTER GATES (All must pass before signal generation)
-        # ================================================================
-        try:
-            execution_allowed = True
-            gate_reason = None
-            
-            # TASK 3: Execution Filter Update
-            allowed_execution_sessions = ["ASIAN_KZ", "LONDON_KZ", "NY_KZ"]
-            
-            # Gate 1: Session must be in allowed execution sessions
-            if session_name not in allowed_execution_sessions:
-                execution_allowed = False
-                if session_name == "SESSION_DEAD_ZONE":
-                    gate_reason = "SESSION_DEAD_ZONE"
-                    print("⛔ BLOCKED: SESSION_DEAD_ZONE")
-                    print("Telemetry: Blocked by session_dead_zone")
-                else:
-                    gate_reason = session_name
-                    print(f"⛔ BLOCKED: SESSION_FILTER ({session_name})")
-                print("Gate State:", gate_debug)
-            
-            # Gate 2: Liquidity sweep must be true
-            if execution_allowed and not external_sweep:
-                execution_allowed = False
-                gate_reason = "NO_LIQUIDITY_SWEEP"
-                print("⛔ BLOCKED:", gate_reason)
-                print("Gate State:", gate_debug)
-            
-            # Gate 3: Position limit (no open positions)
-            if execution_allowed and len(self.open_positions) > 0:
-                execution_allowed = False
-                gate_reason = "POSITION_ALREADY_OPEN"
-                print("⛔ BLOCKED:", gate_reason)
-                print("Gate State:", gate_debug)
-            
-            # If any gate fails, exit execution block
-            if not execution_allowed:
-                print(f"⛔ Execution blocked: {gate_reason}")
-                return
-            
-            # ================================================================
-            # SIGNAL GENERATION (Only after all pre-filter gates pass)
-            # ================================================================
-            trend = ms.get("current_trend", "NEUTRAL")
-            signal = None
-            print("DEBUG STORED BIAS:", stored_bias)
-            if trend == "BULLISH":
-                # Check BUY-specific gates
-                if current_zone == "DISCOUNT" and stored_bias == "BULLISH":
-                    signal = "BUY"
-                else:
-                    print("⛔ BLOCKED: BUY_FILTER_FAIL")
-                    print("Gate State:", gate_debug)
-                    # Explain why BUY was not generated
-                    reasons = []
-                    if current_zone != "DISCOUNT":
-                        reasons.append(f"zone is {current_zone}, need DISCOUNT")
-                    if stored_bias != "BULLISH":
-                        reasons.append(f"HTF bias is {stored_bias}, need BULLISH")
-                    print(f"⛔ BUY signal rejected: {'; '.join(reasons)}")
-                    return
-            
-            elif trend == "BEARISH":
-                # Check SELL-specific gates
-                if current_zone == "PREMIUM" and stored_bias == "BEARISH":
-                    signal = "SELL"
-                else:
-                    print("⛔ BLOCKED: SELL_FILTER_FAIL")
-                    print("Gate State:", gate_debug)
-                    # Explain why SELL was not generated
-                    reasons = []
-                    if current_zone != "PREMIUM":
-                        reasons.append(f"zone is {current_zone}, need PREMIUM")
-                    if stored_bias != "BEARISH":
-                        reasons.append(f"HTF bias is {stored_bias}, need BEARISH")
-                    print(f"⛔ SELL signal rejected: {'; '.join(reasons)}")
-                    return
-            
-            else:
-                print(f"⏸️ No clear trend for execution (Trend: {trend})")
-                return
-            
-            # ================================================================
-            # STRUCTURAL SL & LIQUIDITY-BASED TP (Only if signal generated)
-            # ================================================================
-            if signal:
-                # Calculate recent swing high/low (last 20 bars)
-                recent_high = float(market_data['high'].tail(20).max())
-                recent_low = float(market_data['low'].tail(20).min())
-                
-                # Define buffer
-                buffer = 0.3
-                
-                if signal == "BUY":
-                    # SL = recent swing low - buffer
-                    sl = recent_low - buffer
-                    # TP = recent swing high (structural liquidity)
-                    tp = recent_high
-                    print(f"📈 BUY Signal generated | SL = {sl:.2f} (Recent Low: {recent_low:.2f}) | TP = {tp:.2f} (Recent High: {recent_high:.2f})")
-                
-                elif signal == "SELL":
-                    # SL = recent swing high + buffer
-                    sl = recent_high + buffer
-                    # TP = recent swing low (structural liquidity)
-                    tp = recent_low
-                    print(f"📉 SELL Signal generated | SL = {sl:.2f} (Recent High: {recent_high:.2f}) | TP = {tp:.2f} (Recent Low: {recent_low:.2f})")
-                
-                # Place order
-                lot_size = 0.01  # Fixed small lot size
-                
-                print(f"🎯 Placing {signal} order: {lot_size} lots | SL={sl:.2f} | TP={tp:.2f}")
-                ticket = self.mt5_place_order(signal, lot_size, sl, tp)
-                
-                if ticket:
-                    print(f"✅ Order placed successfully | Ticket: {ticket}")
-                    # Log order placement
-                    self.open_positions.append({
-                        "ticket": ticket,
-                        "signal": signal,
-                        "lot_size": lot_size,
-                        "sl": sl,
-                        "tp": tp,
-                        "entry_price": bid,
-                        "entry_time": datetime.now().isoformat(),
-                        "status": "OPEN"
-                    })
-                    self.trade_log.append({
-                        "timestamp": datetime.now().isoformat(),
-                        "action": "ORDER_PLACED",
-                        "ticket": ticket,
-                        "signal": signal,
-                        "lot_size": lot_size,
-                        "sl": sl,
-                        "tp": tp,
-                        "entry_price": bid
-                    })
-                    self.save_trade_log()
-                else:
-                    print(f"❌ Order placement failed")
-        
-        except Exception as e:
-            print(f"❌ Execution logic error: {e}")
+        if result.action != "ENTER":
+            print(f"\u26d4 NO_TRADE: {result.reason}")
+            return
 
-    # Persistence
-    def save_trade_log(self, filename="tradelog.json"):
-        try:
-            with open(filename, "w") as f:
-                json.dump(self.trade_log, f, indent=2, default=str)
-        except Exception as e:
-            print(f"❌ Error saving trade log: {e}")
+        # ── All 8 gates passed — execute via OrderExecutor ───────────────────
+        acct           = self.mt5_get_account()
+        account_balance = float(getattr(acct, "balance", 100000.0)) if acct else 100000.0
+        if account_balance > self._peak_balance:
+            self._peak_balance = account_balance
 
-    def load_trade_log(self, filename="tradelog.json"):
-        try:
-            if os.path.exists(filename):
-                with open(filename, "r") as f:
-                    self.trade_log = json.load(f)
-                print(f"✅ Loaded {len(self.trade_log)} log entries")
-        except Exception as e:
-            print(f"❌ Error loading trade log: {e}")
+        policy_snap = self._build_policy_state_snapshot(account_balance)
 
-    def signal_diagnostics(self):
-        print("\n" + "="*60)
-        print("🔬 SMC SIGNAL DIAGNOSTICS")
-        print("="*60)
+        # Build a minimal SignalResult-compatible dict for the executor
+        # (OrderExecutor.execute_signal expects a SignalResult with poi_zone /
+        #  liquidity_levels; when those are unavailable we pass safe defaults)
+        try:
+            executor_signal = ExecutorSignalResult(
+                action=result.action or "BUY",
+                direction=result.direction or "BULLISH",
+                entry_price=float(result.entry_price or 0),
+                sl_price=float(result.sl_price or 0),
+                tp_price=float(result.tp_price or 0),
+                poi_zone=getattr(result, "poi_zone", None) or {
+                    "top":    float(result.entry_price or 0) + 5,
+                    "bottom": float(result.entry_price or 0),
+                    "mt":     float(result.entry_price or 0) + 2.5,
+                },
+                liquidity_levels=getattr(result, "liquidity_levels", None) or {
+                    "pdh":         float(result.tp_price or 0),
+                    "pdl":         float(result.sl_price or 0),
+                    "weekly_high": float(result.tp_price or 0),
+                    "weekly_low":  float(result.sl_price or 0),
+                },
+            )
+
+            exec_result = self.order_executor.execute_signal(
+                signal=executor_signal,
+                account_balance=account_balance,
+                peak_balance=self._peak_balance,
+                current_daily_pnl_pct=self._daily_pnl_pct,
+                trades_today=self._trades_today,
+                consecutive_losses=self._consecutive_losses,
+                last_trade_time=self._last_trade_time,
+            )
+        except Exception as e:
+            print(f"\u274c OrderExecutor error: {e}")
+            import traceback; traceback.print_exc()
+            return
+
+        # ── Audit log every evaluation ────────────────────────────────────────
+        try:
+            self.audit_logger.log_evaluation(result, exec_result, policy_snap)
+        except Exception as e:
+            print(f"\u26a0\ufe0f Audit log failed: {e}")
+
+        if not exec_result.success:
+            print(f"\u26d4 OrderExecutor rejected: {exec_result.rejection_reason}")
+            return
+
+        lot_size   = exec_result.lot_size
+        trade_side = result.action  # "BUY" / "SELL"
+        final_sl   = exec_result.sl_price
+        final_tp   = exec_result.tp_price
+
+        print(f"\U0001f680 ENTERING {trade_side} | Entry={result.entry_price} | SL={final_sl} | TP={final_tp} | RR={exec_result.rr_ratio:.2f}x | Lot={lot_size}")
+
+        ticket = self.mt5_place_order(trade_side, lot_size, final_sl, final_tp)
+
+        if ticket:
+            print(f"\u2705 Order placed | Ticket: {ticket}")
+            self._trades_today += 1
+            self._last_trade_time = datetime.now()
+
+            position_record = {
+                "ticket":           ticket,
+                "signal":           trade_side,
+                "lot_size":         lot_size,
+                "sl":               final_sl,
+                "tp":               final_tp,
+                "entry_price":      result.entry_price,
+                "rr_ratio":         exec_result.rr_ratio,
+                "risk_amount":      exec_result.risk_amount,
+                "entry_time":       datetime.now().isoformat(),
+                "status":           "OPEN",
+                "source":           "SIGNAL_ENGINE",
+                "confidence_score": result.confidence_score,
+            }
+            self.open_positions.append(position_record)
+            self.trade_log.append({
+                "timestamp": datetime.now().isoformat(),
+                "action":    "ORDER_PLACED",
+                **position_record,
+            })
+            self.save_trade_log()
+
+            send_telegram(
+                f"\U0001f680 <b>{trade_side}</b> entered @ {result.entry_price}\n"
+                f"SL: {final_sl} | TP: {final_tp}\n"
+                f"RR: {exec_result.rr_ratio:.2f}x | Lot: {lot_size} | Risk: ${exec_result.risk_amount:.2f}\n"
+                f"Confidence: {result.confidence_score}% | Session: {self.current_session}"
+            )
+        else:
+            print("\u274c Order placement failed")
+
+    # ── Diagnostics ───────────────────────────────────────────────────────────
+    def signal_diagnostics(self) -> None:
+        """
+        Runs full 8-gate check against live market data and prints structured output.
+        Replaces the old manual gate-by-gate diagnostic that called legacy modules.
+        """
+        print("\n" + "=" * 65)
+        print("\U0001f52c  SMC SIGNAL ENGINE — LIVE DIAGNOSTICS")
+        print("=" * 65)
 
         # GATE 0: MT5
         print("\n[GATE 0] MT5 Connection")
         try:
             if not self.mt5_initialize():
-                print("  ❌ FAIL — MT5 could not initialize"); return
-            print("  ✅ PASS — MT5 connected")
+                print("  \u274c FAIL — MT5 could not initialize"); return
+            print("  \u2705 PASS — MT5 connected")
         except Exception as e:
-            print(f"  ❌ FAIL — {e}"); return
+            print(f"  \u274c FAIL — {e}"); return
 
-        # GATE 1: Market Data
+        # GATE 1: Market data
         print("\n[GATE 1] Market Data Fetch")
         try:
             market_data, current_price = self.fetch_and_prepare()
             if market_data is None or current_price is None:
-                print("  ❌ FAIL — Could not fetch market data"); return
+                print("  \u274c FAIL — Could not fetch market data"); return
             bid = float(current_price.get("bid", current_price))
-            print(f"  ✅ PASS — {len(market_data)} bars | Price: {bid}")
+            print(f"  \u2705 PASS — {len(market_data)} bars | Price: {bid}")
         except Exception as e:
-            print(f"  ❌ FAIL — {e}"); return
+            print(f"  \u274c FAIL — {e}"); return
 
         # GATE 2: Session
-        print("\n[GATE 2] Killzone / Session")
+        print("\n[GATE 2] Session Check")
         try:
             is_active, session_name = is_trading_session()
             session_norm = map_session_for_filter(session_name)
             allowed = session_norm in ["ASIAN_KZ", "LONDON_KZ", "NY_KZ"]
-            status = "✅ PASS" if allowed else "⚠️  WARN (outside killzone)"
+            status  = "\u2705 PASS" if allowed else "\u26a0\ufe0f  WARN (outside killzone)"
             print(f"  {status} — Session: {session_norm} | Active: {is_active}")
         except Exception as e:
-            print(f"  ❌ FAIL — {e}"); session_norm = "UNKNOWN"
+            print(f"  \u274c FAIL — {e}")
 
-        # GATE 3: HTF Bias
-        print("\n[GATE 3] HTF Bias")
+        # GATE 3: Multi-TF DataFrames
+        print("\n[GATE 3] Multi-Timeframe DataFrames")
+        m5_df = m15_df = h4_df = d1_df = None
         try:
-            mtf_conf = self.mtf.get_multi_tf_confluence()
-            d1_bias = mtf_conf.get("tf_signals", {}).get("D1", {}).get("bias", "NEUTRAL")
-            h4_bias = mtf_conf.get("tf_signals", {}).get("H4", {}).get("bias", "NEUTRAL")
-            final_htf_bias = d1_bias if d1_bias in ["BULLISH","BEARISH"] else h4_bias
-            passed = final_htf_bias in ["BULLISH", "BEARISH"]
-            status = "✅ PASS" if passed else "❌ FAIL"
-            print(f"  {status} — HTF: {final_htf_bias} | D1: {d1_bias} | H4: {h4_bias}")
+            m5_df  = self.mtf.fetch_data("M5")
+            m15_df = self.mtf.fetch_data("M15")
+            h4_df  = self.mtf.fetch_data("H4")
+            d1_df  = self.mtf.fetch_data("D1")
+            for name, df in [("M5", m5_df), ("M15", m15_df), ("H4", h4_df), ("D1", d1_df)]:
+                if df is None or len(df) == 0:
+                    print(f"  \u274c FAIL — {name} DataFrame empty or None"); return
+                print(f"  \u2705  {name}: {len(df)} bars")
         except Exception as e:
-            print(f"  ❌ FAIL — {e}"); final_htf_bias = "NEUTRAL"
-            print(f"  DEBUG tf_signals full: {mtf_conf.get('tf_signals', {})}")
+            print(f"  \u274c FAIL — {e}"); return
 
-        # GATE 4: Market Structure
-        print("\n[GATE 4] Market Structure (CHoCH/MSS)")
+        # GATES 4-11: Signal Engine evaluation
+        print("\n[GATES 4-11] Signal Engine — 8-Gate Sequential Check")
+        print("-" * 65)
         try:
-            ms_detector = MarketStructureDetector(market_data)
-            smc_state = ms_detector.get_idm_state() or {}
-            idm_type = smc_state.get("idm_type", "none")
-            passed = idm_type in ["bullish", "bearish"]
-            status = "✅ PASS" if passed else "❌ FAIL"
-            print(f"  {status} — IDM: {idm_type} | Swept: {smc_state.get('is_idm_swept')} | Confirmed: {smc_state.get('structure_confirmed')}")
-            ms = {"current_trend": "BULLISH" if idm_type=="bullish" else ("BEARISH" if idm_type=="bearish" else "NEUTRAL")}
-        except Exception as e:
-            print(f"  ❌ FAIL — {e}"); smc_state = {}; ms = {"current_trend": "NEUTRAL"}
+            result = self.signal_engine.evaluate(
+                m5_df=m5_df,
+                m15_df=m15_df,
+                h4_df=h4_df,
+                d1_df=d1_df,
+                now_utc=datetime.now(timezone.utc),
+            )
 
-        # GATE 5: Liquidity Sweep
-        print("\n[GATE 5] Liquidity Sweep")
+            for gate_name, gate_data in result.gates.items():
+                icon   = "  \u2705" if gate_data.get("passed") else "  \u274c"
+                reason = gate_data.get("reason", "")
+                detail = {k: v for k, v in gate_data.items() if k not in ("passed", "reason")}
+                print(f"{icon}  {gate_name:<40} [{reason}]")
+                if detail:
+                    for dk, dv in detail.items():
+                        print(f"         {dk}: {dv}")
+
+            print("\n" + "-" * 65)
+            print(f"  \U0001f3af DECISION:    {result.action}")
+            print(f"  \U0001f4cc DIRECTION:   {result.direction}")
+            print(f"  \U0001f511 BLOCKED BY:  {result.reason}")
+            print(f"  \U0001f4af CONFIDENCE:  {result.confidence_score}%")
+            if result.entry_price:
+                print(f"  \U0001f4b0 ENTRY={result.entry_price}  SL={result.sl_price}  TP={result.tp_price}")
+
+        except Exception as e:
+            print(f"  \u274c FAIL — Signal Engine error: {e}")
+            import traceback; traceback.print_exc()
+
+        print("=" * 65 + "\n")
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+    def save_trade_log(self, filename: str = "tradelog.json") -> None:
         try:
-            liq = LiquidityDetector(market_data)
-            liq_result = liq.check_liquidity_grab(current_price=bid)
-            pdh = liq_result.get("pdh_grabbed", False)
-            pdl = liq_result.get("pdl_grabbed", False)
-            external_sweep = pdh or pdl
-            status = "✅ PASS" if external_sweep else "❌ FAIL"
-            print(f"  {status} — PDH: {pdh} | PDL: {pdl}")
+            with open(filename, "w") as f:
+                json.dump(self.trade_log, f, indent=2, default=str)
         except Exception as e:
-            print(f"  ❌ FAIL — {e}"); external_sweep = False
+            print(f"\u274c Error saving trade log: {e}")
 
-        # GATE 6: Zone
-        print("\n[GATE 6] Premium / Discount Zone")
+    def load_trade_log(self, filename: str = "tradelog.json") -> None:
         try:
-            zones = ZoneCalculator.calculate_zones(float(market_data['high'].max()), float(market_data['low'].min()))
-            current_zone = ZoneCalculator.classify_price_zone(bid, zones)
-            trend = ms.get("current_trend", "NEUTRAL")
-            zone_ok = (trend=="BULLISH" and current_zone=="DISCOUNT") or (trend=="BEARISH" and current_zone=="PREMIUM")
-            status = "✅ PASS" if zone_ok else "❌ FAIL"
-            print(f"  {status} — Zone: {current_zone} | Trend: {trend} | Match: {zone_ok}")
+            if os.path.exists(filename):
+                with open(filename, "r") as f:
+                    self.trade_log = json.load(f)
+                print(f"\u2705 Loaded {len(self.trade_log)} log entries")
         except Exception as e:
-            print(f"  ❌ FAIL — {e}"); current_zone = "UNKNOWN"; zone_ok = False
+            print(f"\u274c Error loading trade log: {e}")
 
-        # GATE 7: POI
-        print("\n[GATE 7] LTF POI Detection")
+    # ── Cleanup ───────────────────────────────────────────────────────────────
+    def cleanup(self) -> None:
         try:
-            ltf_df = self.mtf.fetch_data("M5")
-            poi_found = False; poi_type = "NONE"; poi_zone = "N/A"
-            if ltf_df is not None and len(ltf_df) > 10:
-                poi_id = POIIdentifier(ltf_df)
-                direction = smc_state.get("idm_type")
-                if direction in ["bullish", "bearish"]:
-                    ltf_pois = poi_id.detect_ltf_pois(
-                        shift_start=max(0, len(ltf_df)-50),
-                        shift_end=len(ltf_df)-1,
-                        direction=direction, df=ltf_df
-                    )
-                    ep = ltf_pois.get("extreme_poi")
-                    if ep and isinstance(ep, dict):
-                        poi_found = True
-                        poi_type = ep.get("type", "UNKNOWN")
-                        poi_zone = f"{ep.get('bottom',0):.2f} - {ep.get('top',0):.2f}"
-            status = "✅ PASS" if poi_found else "❌ FAIL"
-            print(f"  {status} — Found: {poi_found} | Type: {poi_type} | Zone: {poi_zone}")
+            if   hasattr(self.mt5, "shutdown"):    self.mt5.shutdown()
+            elif hasattr(self.mt5, "disconnect"):  self.mt5.disconnect()
         except Exception as e:
-            print(f"  ❌ FAIL — {e}"); poi_found = False
-
-        # GATE 8: Narrative
-        print("\n[GATE 8] Narrative Engine")
-        try:
-            ns = self.narrative.update({
-                "trading_range_defined": True,
-                "external_liquidity_swept": external_sweep,
-                "idm_taken": smc_state.get("is_idm_swept", False),
-                "htf_poi_reached": external_sweep,
-                "displacement_detected": poi_found,  # POI found = displacement proxy
-                "ltf_structure_shift": (
-                    smc_state.get("structure_confirmed", False) or
-                    smc_state.get("is_idm_swept", False)
-                ),
-                "ltf_poi_mitigated": poi_found,
-                "killzone_active": session_norm in ["ASIAN_KZ", "LONDON_KZ", "NY_KZ"],
-                "htf_ob_invalidated": False,
-                "daily_structure_flipped": False
-            })
-            entry_allowed = ns.get("entry_allowed", False)
-            status = "✅ PASS" if entry_allowed else "❌ FAIL"
-            print(f"  {status} — State: {ns.get('state')} | Entry: {entry_allowed}")
-        except Exception as e:
-            print(f"  ❌ FAIL — {e}"); entry_allowed = False
-
-        # VERDICT
-        print("\n" + "="*60)
-        print("📊 FINAL VERDICT")
-        gates = {
-            "HTF Bias":        final_htf_bias in ["BULLISH","BEARISH"],
-            "Liquidity Sweep": external_sweep,
-            "Zone Match":      zone_ok,
-            "POI Found":       poi_found,
-            "Narrative":       entry_allowed,
-            "Killzone":        session_norm in ["ASIAN_KZ","LONDON_KZ","NY_KZ"],
-        }
-        for name, result in gates.items():
-            print(f"  {'✅' if result else '❌'} {name}")
-
-        failed = [k for k,v in gates.items() if not v]
-        if not failed:
-            print(f"\n  🟢 ENTER {ms.get('current_trend')} | Bias: {final_htf_bias} | Zone: {current_zone}")
-        else:
-            print(f"\n  🔴 NO TRADE — Blocked by: {', '.join(failed)}")
-        print("="*60 + "\n")
-
-    def cleanup(self):
-        try:
-            if hasattr(self.mt5, "shutdown"):
-                self.mt5.shutdown()
-            elif hasattr(self.mt5, "disconnect"):
-                self.mt5.disconnect()
-        except Exception as e:
-            print(f"⚠️ Error shutting down MT5 connection: {e}")
+            print(f"\u26a0\ufe0f Error shutting down MT5: {e}")
         self.save_trade_log()
-        print("✅ Bot cleaned up")
+        print("\u2705 Bot cleaned up")
 
-# CLI main
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI ENTRY POINT
+# ─────────────────────────────────────────────────────────────────────────────
 def main():
     bot = XAUUSDTradingBot()
+
     if not bot.initialize():
-        print("❌ Bot initialization failed — exiting")
+        print("\u274c Bot initialization failed — exiting")
         return
 
     bot.load_trade_log()
-    print("🔬 Running diagnostics...")
+
+    print("\U0001f52c Running diagnostics...")
     bot.signal_diagnostics()
+
     bot.running = True
-    print("🚀 Bot started (DRY_RUN=%s). Press Ctrl+C to stop." % bot.dry_run)
+    print(f"\U0001f680 Bot started (DRY_RUN={bot.dry_run}). Press Ctrl+C to stop.")
 
     try:
         while bot.running:
             try:
                 bot.analyze_once()
             except Exception as e:
-                print(f"⚠️ Analysis exception (continuing): {e}")
+                print(f"\u26a0\ufe0f Analysis exception (continuing): {e}")
 
+            # 60-second interval with interrupt-aware sleep
             for _ in range(60):
                 time.sleep(1)
                 if not bot.running:
                     break
 
     except KeyboardInterrupt:
-        print("\n🛑 Stopped by user")
+        print("\n\U0001f6d1 Stopped by user")
     finally:
         bot.running = False
         try:
