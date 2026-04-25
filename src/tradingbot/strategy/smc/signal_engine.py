@@ -790,10 +790,6 @@ class SignalEngine:
                 out.append(p)
         return out
 
-    def _is_bos_sweep(self, df: pd.DataFrame, sb: StructureBreak) -> bool:
-        close = float(df["close"].iat[sb.candle_index])
-        return close > sb.level if sb.direction == "BULLISH" else close < sb.level
-
     def _get_candle_time(self, df: pd.DataFrame, idx: int) -> Optional[pd.Timestamp]:
         if self.config.time_column in df.columns:
             val = df[self.config.time_column].iat[idx]
