@@ -89,13 +89,3 @@ desktop.ini
 tmp/
 temp/
 *.swp
-
-.venv/
-__pycache__/
-*.pyc
-*.json
-.env
-data/raw/*.json
-logs/app/*.log
-logs/observations/*.json
-apps/trader/logs/
