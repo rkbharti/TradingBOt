@@ -498,8 +498,14 @@ class SignalEngine:
     ) -> Dict[str, Any]:
         """
         Guardeer Lecture 10: Only trade during active killzones.
-        London: 08:00–11:00 UTC | NY: 13:00–16:00 UTC.
-        Outside these windows → probability drops significantly.
+
+        Killzone trading windows (UTC):
+        London Killzone: 07:00 – 09:00 UTC
+        New York Killzone: 13:00 – 15:30 UTC
+
+        Note:
+        These windows are aligned with ICT/SMC session definitions.
+        Only trades within these windows are considered valid.
         """
         ts = self._resolve_now_utc(now_utc, m5_df)
         t = ts.time()
