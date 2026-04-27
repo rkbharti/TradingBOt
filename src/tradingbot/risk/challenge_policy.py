@@ -60,6 +60,7 @@ class ChallengePolicy:
     max_consecutive_losses: int = DEFAULT_MAX_CONSECUTIVE_LOSSES
     min_trade_gap_minutes: int = DEFAULT_MIN_TRADE_GAP_MINUTES
     risk_per_trade_pct: float = DEFAULT_RISK_PER_TRADE_PCT
+    starting_balance: float = 100000.0
 
     # =========================================================================
     # RUNTIME STATE (updated after each trade)
@@ -296,6 +297,9 @@ class ChallengePolicy:
         """
         try:
             self.daily_pnl += pnl
+            # Update daily pnl percentage
+            if hasattr(self, "starting_balance") and self.starting_balance > 0:
+                self.daily_pnl_pct = (self.daily_pnl / self.starting_balance) * 100
 
             if was_win:
                 self.consecutive_losses = 0
