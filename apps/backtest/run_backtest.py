@@ -1,16 +1,16 @@
 import pandas as pd
+from bisect import bisect_right
 from tradingbot.strategy.smc.signal_engine import SignalEngine
+from backtest_logger import BacktestLogger
+import uuid
+
+INITIAL_CAPITAL = 1000000.0
+RISK_PER_TRADE = 0.01
 
 
-# =========================
-# LOAD DATA
-# =========================
 def load_data(path):
-    df = pd.read_csv(path, sep="\t")
+    df = pd.read_csv(path, sep=None, engine='python')
 
-    print("RAW COLUMNS:", df.columns.tolist())  # DEBUG
-
-    # Clean column names properly
     df.columns = (
         df.columns
         .str.strip()
@@ -19,167 +19,195 @@ def load_data(path):
         .str.lower()
     )
 
-    print("CLEANED COLUMNS:", df.columns.tolist())  # DEBUG
-
-    # Now safe to access
-    df["date"] = df["date"].astype(str).str.strip()
-    df["time"] = df["time"].astype(str).str.strip()
-
-    # Create datetime
     df["datetime"] = pd.to_datetime(
         df["date"] + " " + df["time"],
         format="%Y.%m.%d %H:%M:%S",
         errors="coerce"
-        
     )
-    print("Invalid datetime rows:", df["datetime"].isna().sum())
 
     df = df.dropna(subset=["datetime"])
-    df["datetime"] = df["datetime"].dt.tz_localize("UTC")
     df.set_index("datetime", inplace=True)
+    df = df[["open", "high", "low", "close"]]
 
-    print("Total rows after clean:", len(df))
-
-    return df
+    return df.sort_index()
 
 
-# =========================
-# CREATE MULTI-TIMEFRAME
-# =========================
 def create_timeframes(df):
     df_m5 = df.copy()
 
-    df_m15 = df.resample("15min").agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last"
+    df_m15 = df_m5.resample("15min").agg({
+        "open": "first", "high": "max",
+        "low": "min", "close": "last"
     }).dropna()
 
-    df_h4 = df.resample("4h").agg({   # fixed warning
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last"
+    df_h4 = df_m5.resample("4h", offset="2h").agg({
+        "open": "first", "high": "max",
+        "low": "min", "close": "last"
     }).dropna()
 
-    df_d1 = df.resample("1d").agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last"
+    df_d1 = df_m5.resample("1D").agg({
+        "open": "first", "high": "max",
+        "low": "min", "close": "last"
     }).dropna()
 
     return df_d1, df_h4, df_m15, df_m5
 
 
-# =========================
-# BACKTEST ENGINE
-# =========================
 def run_backtest(df):
     engine = SignalEngine()
-    trades = []
+    capital = INITIAL_CAPITAL
+    active_trade = None
+    last_entry_price = None  # 🔥 duplicate filter
+
+    logger = BacktestLogger(reset=False)
+    run_id = str(uuid.uuid4())[:8]
+    logger.start_run(run_id)
 
     df_d1, df_h4, df_m15, df_m5 = create_timeframes(df)
 
-    max_len = min(len(df_m5), 500)  # limit for speed
+    m15_index = list(df_m15.index)
+    h4_index = list(df_h4.index)
+    d1_index = list(df_d1.index)
 
-    # TEMP: force HTF pass (for debugging)
-    engine._step_htf_bias = lambda d1, h4: {
-        "passed": True,
-        "direction": "BULLISH",
-        "reason": "FORCED"
-    }
+    print(f"\n🚀 START BACKTEST | RUN_ID: {run_id} | CAPITAL: ₹{capital}")
+    print("=" * 60)
 
-    for i in range(100, max_len):
-        print(f"\nProcessing candle: {i}")
+    start_idx = 200
 
-        try:
-            # 🔥 CRITICAL FIX — TIME-ALIGNED SLICING
-            current_time = df_m5.index[i]
+    for i in range(start_idx, len(df_m5)):
 
-            d1_slice = df_d1[df_d1.index <= current_time].copy()
-            h4_slice = df_h4[df_h4.index <= current_time].copy()
-            m15_slice = df_m15[df_m15.index <= current_time].copy()
-            m5_slice = df_m5.iloc[max(0, i-100):i].copy()
+        current_time = df_m5.index[i]
+        candle = df_m5.iloc[i]
 
-            # CRITICAL — Preserve datetime as 'time' column
-            for df_ in [m5_slice, m15_slice, h4_slice, d1_slice]:
-                if not isinstance(df_.index, pd.DatetimeIndex):
+        # ===== TIMEFRAME SLICING =====
+        m5 = df_m5.iloc[max(0, i - 100): i]
+
+        m15_idx = bisect_right(m15_index, current_time)
+        h4_idx = bisect_right(h4_index, current_time)
+        d1_idx = bisect_right(d1_index, current_time)
+
+        m15 = df_m15.iloc[max(0, m15_idx - 100): m15_idx]
+        h4 = df_h4.iloc[max(0, h4_idx - 50): h4_idx]
+        d1 = df_d1.iloc[max(0, d1_idx - 30): d1_idx]
+
+        # ===== DATA QUALITY WARNING =====
+        if len(d1) < 20:
+            print(f"⚠️ Weak D1 data: {len(d1)} candles")
+
+        # ===== ENGINE CALL =====
+        result = engine.evaluate(
+            m5_df=m5,
+            m15_df=m15,
+            h4_df=h4,
+            d1_df=d1,
+            now_utc=current_time
+        )
+
+        # =========================================================
+        # 🔵 ENTRY
+        # =========================================================
+        if result.action == "ENTER" and active_trade is None:
+
+            entry = result.entry_price
+            sl = result.sl_price
+            tp = result.tp_price
+            direction = result.direction
+
+            # 🔥 BASIC VALIDATION
+            if not all([entry, sl, tp, direction]):
+                continue
+
+            # 🔥 DUPLICATE TRADE FILTER
+            if last_entry_price is not None:
+                if abs(entry - last_entry_price) < 0.5:
                     continue
-                df_["time"] = df_.index
-            print("M5 slice len:", len(m5_slice))
-            print("M15 slice len:", len(m15_slice))
-            result = engine.evaluate(
-                d1_slice,
-                h4_slice,
-                m15_slice,
-                m5_slice
+
+            # 🔥 RR FILTER
+            rr = abs(tp - entry) / abs(entry - sl)
+            if rr < 1.5:
+                continue
+
+            last_entry_price = entry
+
+            risk = capital * RISK_PER_TRADE
+
+            active_trade = {
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "direction": direction,
+                "risk": risk
+            }
+
+            logger.log_trade_open(
+                str(current_time),
+                direction,
+                entry,
+                sl,
+                tp,
+                risk
             )
 
-            print("Action:", result.action)
-            print("Reason:", result.reason)
+            print("\n[ENTRY]")
+            print(f"{direction} @ {entry} | SL: {sl} | TP: {tp} | RR: {round(rr,2)}")
 
-            # Deep debug
-            if hasattr(result, "__dict__"):
-                print("Full Result:", result.__dict__)
+        # =========================================================
+        # 🔴 EXIT
+        # =========================================================
+        if active_trade is not None:
 
-            if result.action == "ENTER":
-                print("🔥 TRADE FOUND")
+            direction = active_trade["direction"]
+            entry = active_trade["entry"]
+            sl = active_trade["sl"]
+            tp = active_trade["tp"]
+            risk = active_trade["risk"]
 
-                trades.append({
-                    "index": i,
-                    "direction": result.direction,
-                    "entry": result.entry_price,
-                    "sl": result.stop_loss,
-                    "tp": result.take_profit
-                })
+            # ===== STOP LOSS =====
+            if (direction == "BULLISH" and candle["low"] <= sl) or \
+               (direction == "BEARISH" and candle["high"] >= sl):
 
-        except Exception as e:
-            print(f"Error at candle {i}: {e}")
-            continue
+                capital -= risk
 
-    return trades
+                logger.log_trade_close(
+                    str(current_time),
+                    "SL_HIT",
+                    -risk
+                )
+
+                print(f"[EXIT] {current_time} | LOSS | ₹{round(capital,2)}")
+
+                active_trade = None
+                continue
+
+            # ===== TAKE PROFIT =====
+            if (direction == "BULLISH" and candle["high"] >= tp) or \
+               (direction == "BEARISH" and candle["low"] <= tp):
+
+                rr = abs(tp - entry) / abs(entry - sl)
+                pnl = risk * rr
+                capital += pnl
+
+                logger.log_trade_close(
+                    str(current_time),
+                    "TP_HIT",
+                    pnl
+                )
+
+                print(f"[EXIT] {current_time} | WIN | ₹{round(capital,2)}")
+
+                active_trade = None
+
+    # =========================================================
+    # 📊 FINAL SUMMARY
+    # =========================================================
+    summary = logger.finalize_run(capital, INITIAL_CAPITAL)
+
+    print("\n" + "=" * 60)
+    print(f"💰 FINAL CAPITAL: ₹{round(capital,2)}")
+    print(f"📊 SUMMARY: {summary['total_trades']} trades | {summary['win_rate']:.1f}% win rate")
+    print("=" * 60)
 
 
-# =========================
-# RESULT ANALYSIS
-# =========================
-def analyze_results(trades):
-    total = len(trades)
-
-    print("\n📊 BACKTEST RESULT")
-
-    if total == 0:
-        print("Total Trades: 0")
-        print("Wins: 0")
-        print("Losses: 0")
-        print("Win Rate: 0.00%")
-        return
-
-    wins = 0
-    losses = 0
-
-    for t in trades:
-        if t["tp"] > t["entry"]:
-            wins += 1
-        else:
-            losses += 1
-
-    win_rate = (wins / total) * 100
-
-    print(f"Total Trades: {total}")
-    print(f"Wins: {wins}")
-    print(f"Losses: {losses}")
-    print(f"Win Rate: {win_rate:.2f}%")
-
-
-# =========================
-# MAIN
-# =========================
 if __name__ == "__main__":
-    path = "data.csv"
-
-    df = load_data(path)
-    trades = run_backtest(df)
-    analyze_results(trades)
+    df = load_data("data.csv")
+    run_backtest(df)
