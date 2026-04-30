@@ -1,5 +1,5 @@
 import pandas as pd
-from bisect import bisect_right
+from bisect import bisect_left
 from tradingbot.strategy.smc.signal_engine import SignalEngine
 from backtest_logger import BacktestLogger
 import uuid
@@ -57,7 +57,10 @@ def run_backtest(df):
     engine = SignalEngine()
     capital = INITIAL_CAPITAL
     active_trade = None
-    last_entry_price = None  # 🔥 duplicate filter
+    last_entry_price = None
+
+    peak_capital = INITIAL_CAPITAL
+    max_dd = 0.0
 
     logger = BacktestLogger(reset=False)
     run_id = str(uuid.uuid4())[:8]
@@ -80,11 +83,11 @@ def run_backtest(df):
         candle = df_m5.iloc[i]
 
         # ===== TIMEFRAME SLICING =====
-        m5 = df_m5.iloc[max(0, i - 100): i]
+        m5 = df_m5.iloc[max(0, i - 300): i]
 
-        m15_idx = bisect_right(m15_index, current_time)
-        h4_idx = bisect_right(h4_index, current_time)
-        d1_idx = bisect_right(d1_index, current_time)
+        m15_idx = bisect_left(m15_index, current_time)
+        h4_idx = bisect_left(h4_index, current_time)
+        d1_idx = bisect_left(d1_index, current_time)
 
         m15 = df_m15.iloc[max(0, m15_idx - 100): m15_idx]
         h4 = df_h4.iloc[max(0, h4_idx - 50): h4_idx]
@@ -113,22 +116,18 @@ def run_backtest(df):
             tp = result.tp_price
             direction = result.direction
 
-            # 🔥 BASIC VALIDATION
             if not all([entry, sl, tp, direction]):
                 continue
 
-            # 🔥 DUPLICATE TRADE FILTER
             if last_entry_price is not None:
                 if abs(entry - last_entry_price) < 0.5:
                     continue
 
-            # 🔥 RR FILTER
             rr = abs(tp - entry) / abs(entry - sl)
             if rr < 1.5:
                 continue
 
             last_entry_price = entry
-
             risk = capital * RISK_PER_TRADE
 
             active_trade = {
@@ -149,7 +148,7 @@ def run_backtest(df):
             )
 
             print("\n[ENTRY]")
-            print(f"{direction} @ {entry} | SL: {sl} | TP: {tp} | RR: {round(rr,2)}")
+            print(f"{direction} @ {entry} | SL: {sl} | TP: {tp} | RR: {round(rr, 2)}")
 
         # =========================================================
         # 🔴 EXIT
@@ -168,14 +167,18 @@ def run_backtest(df):
 
                 capital -= risk
 
+                if capital < peak_capital:
+                    dd = (peak_capital - capital) / peak_capital
+                    if dd > max_dd:
+                        max_dd = dd
+
                 logger.log_trade_close(
                     str(current_time),
                     "SL_HIT",
                     -risk
                 )
 
-                print(f"[EXIT] {current_time} | LOSS | ₹{round(capital,2)}")
-
+                print(f"[EXIT] {current_time} | LOSS | ₹{round(capital, 2)} | DD: {round(max_dd * 100, 2)}%")
                 active_trade = None
                 continue
 
@@ -187,25 +190,31 @@ def run_backtest(df):
                 pnl = risk * rr
                 capital += pnl
 
+                if capital > peak_capital:
+                    peak_capital = capital
+
                 logger.log_trade_close(
                     str(current_time),
                     "TP_HIT",
                     pnl
                 )
 
-                print(f"[EXIT] {current_time} | WIN | ₹{round(capital,2)}")
-
+                print(f"[EXIT] {current_time} | WIN | ₹{round(capital, 2)} | Peak: ₹{round(peak_capital, 2)}")
                 active_trade = None
 
     # =========================================================
     # 📊 FINAL SUMMARY
     # =========================================================
-    summary = logger.finalize_run(capital, INITIAL_CAPITAL)
+    summary = logger.finalize_run(capital, INITIAL_CAPITAL, max_dd)
 
     print("\n" + "=" * 60)
-    print(f"💰 FINAL CAPITAL: ₹{round(capital,2)}")
+    print(f"💰 FINAL CAPITAL: ₹{round(capital, 2)}")
+    print(f"📉 MAX DRAWDOWN: {round(max_dd * 100, 2)}%")
     print(f"📊 SUMMARY: {summary['total_trades']} trades | {summary['win_rate']:.1f}% win rate")
     print("=" * 60)
+    engine.print_gate_summary()
+
+    return summary
 
 
 if __name__ == "__main__":

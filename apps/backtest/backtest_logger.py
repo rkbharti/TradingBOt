@@ -72,10 +72,10 @@ class BacktestLogger:
             else:
                 self.losses += 1
     
-    def finalize_run(self, final_capital: float, initial_capital: float):
+    def finalize_run(self, final_capital: float, initial_capital: float, max_dd: float = 0.0):
         net_pnl = final_capital - initial_capital
         win_rate = (self.wins / self.total_trades * 100) if self.total_trades > 0 else 0
-        
+
         run_summary = {
             'run_id': self.run_id,
             'started_at': self.run_started_at,
@@ -86,25 +86,23 @@ class BacktestLogger:
             'win_rate': win_rate,
             'final_capital': final_capital,
             'net_pnl': net_pnl,
-            'max_dd': 0.0  # Add calculation if needed
+            'max_dd': round(max_dd, 4)
         }
-        
-        # Append to summary CSV
+
         summary_df = pd.DataFrame([run_summary])
         if self.summary_file.exists():
             summary_df.to_csv(self.summary_file, mode='a', header=False, index=False)
         else:
             summary_df.to_csv(self.summary_file, index=False)
-        
-        # Write trade CSV
+
         if self.trades:
             trades_df = pd.DataFrame(self.trades)
             if self.trade_file.exists():
                 trades_df.to_csv(self.trade_file, mode='a', header=False, index=False)
             else:
                 trades_df.to_csv(self.trade_file, index=False)
-        
+
         print(f"📊 Logged {self.total_trades} trades to {self.trade_file}")
         print(f"📈 Run summary saved to {self.summary_file}")
-        
+
         return run_summary
