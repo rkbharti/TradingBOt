@@ -72,3 +72,31 @@ def post_trade_result(
     except Exception as e:
         print(f"⚠️ VPS post_trade_result failed (bot continues): {e}")
         return False
+
+def post_daily_summary(
+    total_trades: int,
+    wins: int,
+    losses: int,
+    net_pnl: float,
+    max_drawdown: float,
+    session: str = "ALL",
+) -> bool:
+    """POST end-of-day summary to VPS → Telegram."""
+    payload = {
+        "total_trades": total_trades,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round((wins / total_trades * 100), 1) if total_trades else 0.0,
+        "net_pnl": round(net_pnl, 2),
+        "max_drawdown": round(max_drawdown, 2),
+        "session": session,
+    }
+    return _post("/daily-summary", payload)
+
+def check_bot_active() -> bool:
+    """Returns True if VPS says bot is active, False if paused."""
+    try:
+        resp = requests.get(f"{VPS_BASE_URL}/bot/status", timeout=3)
+        return resp.json().get("trading", True)
+    except Exception:
+        return True  # fail-safe: keep trading if VPS unreachable

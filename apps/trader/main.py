@@ -20,6 +20,8 @@ from tradingbot.infra.storage.json_store import IdeaMemory
 from tradingbot.infra.storage.state_repository import HTFMemory
 from tradingbot.observability.logger import ObservationLogger
 from tradingbot.observability.decision_audit import OBObservationLogger, AuditLogger
+#import for oracle Clous vpos for daily summary or toggle for bot ON/OFF
+from apps.trader.vps_reporter import post_daily_summary, check_bot_active  
 
 # ── Phase 4: Risk engine + audit ──────────────────────────────────────────────
 from tradingbot.risk.challenge_policy import ChallengePolicy
@@ -674,7 +676,23 @@ class XAUUSDTradingBot:
             # ── Only reset if it's genuinely a new calendar day AND past 08:00 IST
             if self._session_date != today and now_ist.hour >= 8:
                 print(f"🔄 New trading day ({today}) — resetting daily counters")
-                self.challenge_policy.reset_daily_state()
+
+                # ── Fire daily summary BEFORE resetting counters ──────────────
+                try:
+                    cp = self.challenge_policy
+                    total = cp.daily_wins + cp.daily_losses
+                    post_daily_summary(
+                        total_trades=total,
+                        wins=cp.daily_wins,
+                        losses=cp.daily_losses,
+                        net_pnl=round(self._daily_pnl_pct, 2),
+                        max_drawdown=round(cp.max_daily_drawdown, 2),
+                        session=str(self._session_date),
+                    )
+                except Exception as e:
+                    print(f"⚠️ Daily summary post failed: {e}")
+
+                self.challenge_policy.reset_daily_state() 
                 self._trades_today       = 0
                 self._daily_pnl_pct      = 0.0
                 self._consecutive_losses = self.challenge_policy.consecutive_losses
@@ -791,6 +809,10 @@ class XAUUSDTradingBot:
     def analyze_once(self) -> None:
         # ── Daily reset (08:00 IST) ───────────────────────────────────────────
         self._maybe_reset_daily_state()
+        # ── Remote pause check ────────────────────────────────────────
+        if not check_bot_active():
+            print("⏸️ Bot paused via dashboard — skipping cycle")
+            return
 
         self.sync_closed_positions()
 
