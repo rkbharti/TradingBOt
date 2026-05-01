@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from tradingbot.infra.news.news_filter import NewsFilter
 
 import numpy as np
 import pandas as pd
@@ -120,6 +121,7 @@ class SignalEngine:
 
     def __init__(self, config: Optional[SignalEngineConfig] = None) -> None:
         self.config = config or SignalEngineConfig()
+        self.news_filter: Optional[NewsFilter] = None
 
     # ── Public Entry Point ────────────────────────────────────────────────────
 
@@ -202,11 +204,24 @@ class SignalEngine:
         if not step6["passed"]:
             return _reject(gates, step6["reason"], direction=direction)
 
-        # ─── Step 7: Killzone ────────────────────────────────────────────────
+                # ─── Step 7: Killzone ────────────────────────────────────────────────
         step7 = self._step_killzone(now_utc, m5_df)
         gates["step_7_killzone"] = step7
         if not step7["passed"]:
             return _reject(gates, step7["reason"], direction=direction)
+
+        # ─── Step 7.5: News Filter ───────────────────────────────────────────
+        if self.news_filter is not None:
+            blocked, news_reason = self.news_filter.is_news_blackout(now_utc)
+            step7b = {
+                "passed": not blocked,
+                "reason": news_reason or "NO_HIGH_IMPACT_NEWS",
+            }
+        else:
+            step7b = {"passed": True, "reason": "NEWS_FILTER_DISABLED"}
+        gates["step_7b_news_filter"] = step7b
+        if not step7b["passed"]:
+            return _reject(gates, step7b["reason"], direction=direction)
 
         # ─── Step 8: Risk/Reward ─────────────────────────────────────────────
         step8, sl_price, tp_price = self._step_rr(direction, entry_price, sweep, selected_poi)
@@ -802,19 +817,30 @@ class SignalEngine:
                 session = kz_name
                 break
 
+        # 🔴 XAUUSD: Asian session hard-blocked.
+        # Broker spreads spike, liquidity is fake, sweeps are traps.
+        if session == "ASIAN":
+            return {
+                "passed": False,
+                "reason": "ASIAN_SESSION_BLOCKED",
+                "timestamp_utc": ts.isoformat(),
+                "session": "ASIAN",
+                "killzone_active": False,
+            }
+
         active = session is not None
 
-        # 🔥 BLOCK TRADES OUTSIDE KILLZONE
+        # 🔥 BLOCK TRADES OUTSIDE ALL KILLZONES
         if not active:
             return {
-                "passed": False,  # ❌ BLOCK TRADE
+                "passed": False,
                 "reason": "OUTSIDE_KILLZONE",
                 "timestamp_utc": ts.isoformat(),
                 "session": None,
                 "killzone_active": False,
             }
 
-        # ✅ ALLOW TRADE
+        # ✅ ALLOW TRADE — London or NY only
         return {
             "passed": True,
             "reason": f"INSIDE_{session}_KILLZONE",

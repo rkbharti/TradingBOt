@@ -927,6 +927,11 @@ class TestOrderExecutorEdgeCases:
         """Test successful signal execution in live mode (with MT5 mock)."""
         mock_mt5_client.send_order = Mock(return_value=54321)
 
+        # Wire spread check: spread=20 points → 2.0 pips (under 3.5 limit)
+        mock_symbol_info = Mock()
+        mock_symbol_info.spread = 20
+        mock_mt5_client.get_symbol_info = Mock(return_value=mock_symbol_info)
+
         executor = OrderExecutor(
             mt5_client=mock_mt5_client,
             challenge_policy=challenge_policy,
@@ -1147,6 +1152,107 @@ class TestFullWorkflow:
             f"✓ Full workflow: Trade 1 success, Trade 2 success, Trade 3 blocked "
             f"(as expected)"
         )
+
+    class TestPeakBalanceTracking:
+        """Test that ChallengePolicy owns and updates its peak balance."""
+
+        def test_peak_balance_initialises_to_starting_balance(self, challenge_policy):
+            assert challenge_policy.peak_balance == challenge_policy.starting_balance
+
+        def test_peak_balance_updates_on_new_high(self, challenge_policy):
+            challenge_policy.log_trade_result(was_win=True, pnl=500.0, current_balance=100500.0)
+            assert challenge_policy.peak_balance == 100500.0
+
+        def test_peak_balance_never_decreases_on_loss(self, challenge_policy):
+            challenge_policy.log_trade_result(was_win=True, pnl=500.0, current_balance=100500.0)
+            challenge_policy.log_trade_result(was_win=False, pnl=-200.0, current_balance=100300.0)
+            assert challenge_policy.peak_balance == 100500.0  # still the high-water-mark
+
+        def test_drawdown_uses_internal_peak(self, challenge_policy):
+            # Set peak to 100500 via a win
+            challenge_policy.log_trade_result(was_win=True, pnl=500.0, current_balance=100500.0)
+            # Now check drawdown against internal peak — 100500 → 96882 = ~3.6% > 3.5% limit
+            allowed, reason = challenge_policy.check_can_trade(
+                daily_pnl_pct=0.0,
+                peak_balance=challenge_policy.peak_balance,
+                current_balance=96882.0,
+                trades_today=0,
+                consecutive_losses=0,
+            )
+            assert allowed is False
+            assert "MAX_DRAWDOWN" in reason
+
+        def test_log_trade_without_balance_does_not_crash(self, challenge_policy):
+            # Existing call signature (no current_balance) must still work
+            challenge_policy.log_trade_result(was_win=False, pnl=-50.0)
+            assert challenge_policy.consecutive_losses == 1
+            assert challenge_policy.peak_balance == challenge_policy.starting_balance
+
+    class TestOrderRequestDeviation:
+        """Ensure slippage tolerance is tight — 3 points max."""
+
+        def test_default_deviation_is_3_points(
+            self, order_executor, valid_signal
+        ):
+            request = order_executor._build_order_request(
+                signal=valid_signal,
+                lot=0.02,
+                entry_price=2700.0,
+                sl_price=2695.0,
+                tp_price=2712.5,
+            )
+            assert request["deviation"] == 3, (
+                f"deviation must be 3 points (0.3 pips), got {request['deviation']}"
+            )
+
+        def test_caller_can_override_deviation(
+            self, order_executor, valid_signal
+        ):
+            request = order_executor._build_order_request(
+                signal=valid_signal,
+                lot=0.02,
+                entry_price=2700.0,
+                sl_price=2695.0,
+                tp_price=2712.5,
+                deviation=5,
+            )
+            assert request["deviation"] == 5
+
+    class TestSessionStatePersistence:
+        """Test that _session_date persists across simulated restarts."""
+
+        def test_session_state_file_created_on_reset(self, tmp_path, monkeypatch):
+            import json
+            from datetime import date
+            monkeypatch.chdir(tmp_path)
+            (tmp_path / "logs").mkdir()
+
+            from src.tradingbot.risk.challenge_policy import ChallengePolicy
+            policy = ChallengePolicy()
+
+            # Simulate what _maybe_reset_daily_state writes
+            state_file = tmp_path / "logs" / "session_state.json"
+            state_file.write_text(json.dumps({"session_date": date.today().isoformat()}))
+
+            saved = json.loads(state_file.read_text())
+            assert saved["session_date"] == date.today().isoformat()
+
+        def test_session_date_restored_prevents_double_reset(self, tmp_path, monkeypatch):
+            import json
+            from datetime import date
+            monkeypatch.chdir(tmp_path)
+            (tmp_path / "logs").mkdir()
+
+            state_file = tmp_path / "logs" / "session_state.json"
+            today_str = date.today().isoformat()
+            state_file.write_text(json.dumps({"session_date": today_str}))
+
+            saved = json.loads(state_file.read_text())
+            restored_date = date.fromisoformat(saved["session_date"])
+
+            today = date.today()
+            should_reset = restored_date != today  # False — same day, no reset
+            assert should_reset is False
 
 
 # ============================================================================

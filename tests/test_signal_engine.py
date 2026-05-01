@@ -276,3 +276,110 @@ def test_no_trade_rr_fail():
 
     assert result.action == "NO_TRADE"
     assert result.reason == "RR_BELOW_MINIMUM"
+
+def test_killzone_blocks_asian_session():
+    from datetime import datetime, timezone
+    engine = SignalEngine()
+    df = generate_candles()
+    asian_time = datetime(2025, 1, 15, 1, 30, 0, tzinfo=timezone.utc)
+    result = engine._step_killzone(asian_time, df)
+    assert result["passed"] is False
+    assert result["session"] == "ASIAN"
+    assert result["reason"] == "ASIAN_SESSION_BLOCKED"
+
+
+def test_killzone_allows_london_session():
+    from datetime import datetime, timezone
+    engine = SignalEngine()
+    df = generate_candles()
+    london_time = datetime(2025, 1, 15, 7, 45, 0, tzinfo=timezone.utc)
+    result = engine._step_killzone(london_time, df)
+    assert result["passed"] is True
+    assert result["session"] == "LONDON"
+    assert result["reason"] == "INSIDE_LONDON_KILLZONE"
+
+
+def test_killzone_allows_ny_session():
+    from datetime import datetime, timezone
+    engine = SignalEngine()
+    df = generate_candles()
+    ny_time = datetime(2025, 1, 15, 14, 0, 0, tzinfo=timezone.utc)
+    result = engine._step_killzone(ny_time, df)
+    assert result["passed"] is True
+    assert result["session"] == "NEW_YORK"
+    assert result["reason"] == "INSIDE_NEW_YORK_KILLZONE"
+
+# =========================
+# NEWS FILTER TESTS
+# =========================
+
+def test_news_filter_blocks_during_high_impact_event():
+    from datetime import datetime, timezone, timedelta
+    from tradingbot.infra.news.news_filter import NewsFilter
+
+    nf = NewsFilter(api_key="test")
+
+    # Inject a fake HIGH impact event 5 min from now
+    event_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+    nf._cache = [{
+        "event": "FOMC Rate Decision",
+        "country": "US",
+        "impact": "high",
+        "time": event_time.strftime("%Y-%m-%d %H:%M:%S"),
+    }]
+    nf._cache_ts = datetime.now(timezone.utc)
+
+    blocked, reason = nf.is_news_blackout()
+    assert blocked is True
+    assert "HIGH_IMPACT_NEWS_BLACKOUT" in reason
+    assert "FOMC" in reason
+
+
+def test_news_filter_allows_outside_blackout_window():
+    from datetime import datetime, timezone, timedelta
+    from tradingbot.infra.news.news_filter import NewsFilter
+
+    nf = NewsFilter(api_key="test")
+
+    # Inject event 2 hours ago — well outside 15 min window
+    event_time = datetime.now(timezone.utc) - timedelta(hours=2)
+    nf._cache = [{
+        "event": "CPI m/m",
+        "country": "US",
+        "impact": "high",
+        "time": event_time.strftime("%Y-%m-%d %H:%M:%S"),
+    }]
+    nf._cache_ts = datetime.now(timezone.utc)
+
+    blocked, reason = nf.is_news_blackout()
+    assert blocked is False
+    assert reason is None
+
+
+def test_news_filter_ignores_low_impact_events():
+    from datetime import datetime, timezone, timedelta
+    from tradingbot.infra.news.news_filter import NewsFilter
+
+    nf = NewsFilter(api_key="test")
+
+    # LOW impact event right now — should NOT block
+    event_time = datetime.now(timezone.utc)
+    nf._cache = [{
+        "event": "Balance of Trade",
+        "country": "US",
+        "impact": "low",
+        "time": event_time.strftime("%Y-%m-%d %H:%M:%S"),
+    }]
+    nf._cache_ts = datetime.now(timezone.utc)
+
+    blocked, reason = nf.is_news_blackout()
+    assert blocked is False
+
+
+def test_news_filter_disabled_when_no_api_key():
+    from tradingbot.infra.news.news_filter import NewsFilter
+
+    nf = NewsFilter(api_key="")  # no key
+    blocked, reason = nf.is_news_blackout()
+    assert blocked is False
+    assert reason is None
