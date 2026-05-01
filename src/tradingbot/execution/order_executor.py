@@ -175,45 +175,20 @@ class OrderExecutor:
         trades_today: int = 0,
         consecutive_losses: int = 0,
         last_trade_time: Optional[datetime] = None,
+        max_spread_pips: float = 3.5,  # Default threshold for XAUUSD
     ) -> ExecutionResult:
         """
         Execute a trading signal through all policy and validation checks.
         
         Steps:
         1. Check ChallengePolicy.check_can_trade()
-        2. Recalculate SL using structural levels
-        3. Recalculate TP using liquidity levels
-        4. Validate RR >= 2.5
-        5. Calculate optimal lot size
-        6. Build MT5 order request
-        7. Send to MT5 (or log in dry-run)
-        
-        Args:
-            signal: SignalResult from signal engine
-            account_balance: Current account balance
-            peak_balance: Highest balance reached (for drawdown)
-            daily_pnl_pct: Today's PnL as % (optional)
-            trades_today: Number of trades executed today (optional)
-            consecutive_losses: Count of consecutive losing trades (optional)
-            last_trade_time: Timestamp of last trade (optional)
-        
-        Returns:
-            ExecutionResult with success status and order details
-        
-        Example:
-            result = executor.execute_signal(
-                signal=signal,
-                account_balance=99800,
-                peak_balance=100000,
-                current_daily_pnl_pct=-0.2,
-                trades_today=1,
-                consecutive_losses=0
-            )
-            
-            if result.success:
-                print(f"✓ Ticket {result.ticket} | RR {result.rr_ratio:.2f}x | Lot {result.lot_size}")
-            else:
-                print(f"✗ {result.rejection_reason}")
+        2. Validate current spread < threshold
+        3. Recalculate SL using structural levels
+        4. Recalculate TP using liquidity levels
+        5. Validate RR >= 2.5
+        6. Calculate optimal lot size
+        7. Build MT5 order request
+        8. Send to MT5 (or log in dry-run)
         """
         try:
             timestamp = datetime.now()
@@ -245,6 +220,43 @@ class OrderExecutor:
                     rejection_reason=policy_reason,
                     timestamp=timestamp,
                 )
+
+            # =========================================================================
+            # STEP 1.5: SPREAD CHECK (CRITICAL FOR XAUUSD)
+            # =========================================================================
+            
+            try:
+                # Fetch live spread from MT5 client
+                # Assumes mt5_client has a get_symbol_info or similar wrapper
+                symbol_info = self.mt5_client.get_symbol_info(self.mt5_client.symbol)
+                
+                if symbol_info is None:
+                    raise ValueError(f"Could not fetch info for {self.mt5_client.symbol}")
+
+                # MT5 spread is in points. For Gold (XAUUSD), 10 points = 1 pip ($0.10)
+                current_spread_points = symbol_info.spread
+                current_spread_pips = current_spread_points / 10.0
+                
+                if current_spread_pips > max_spread_pips:
+                    reason = f"SPREAD_TOO_HIGH: {current_spread_pips} pips (Max: {max_spread_pips})"
+                    logger.warning(reason)
+                    return ExecutionResult(
+                        success=False,
+                        rejection_reason=reason,
+                        timestamp=timestamp,
+                    )
+                
+                logger.info(f"✓ Spread check passed: {current_spread_pips} pips")
+
+            except Exception as e:
+                logger.error(f"Spread check failed due to error: {str(e)}")
+                # In dry-run we might allow it, but in live we fail-safe
+                if not self.dry_run:
+                    return ExecutionResult(
+                        success=False,
+                        rejection_reason=f"Spread check execution error: {str(e)}",
+                        timestamp=timestamp,
+                    )
 
             # =========================================================================
             # STEP 2: RECALCULATE SL (STRUCTURAL)
@@ -431,37 +443,33 @@ class OrderExecutor:
         entry_price: float,
         sl_price: float,
         tp_price: float,
+        deviation: int = 3,  # 3 points = 0.3 pips on XAUUSD. DO NOT increase.
     ) -> Dict[str, Any]:
         """
         Build MT5 order request dictionary.
-        
+
         Returns dict ready for mt5_client.send_order().
-        
+
         Args:
             signal: Signal containing action, direction, etc.
             lot: Lot size
             entry_price: Entry price
             sl_price: Stop-loss price
             tp_price: Take-profit price
-        
-        Returns:
-            MT5 order request dict
+            deviation: Max slippage in MT5 points (default 3 = 0.3 pips XAUUSD).
+                    Old value was 50 (5 pips) — silently allowed massive slippage.
         """
         try:
-            # Lazy import MetaTrader5 constants (only needed for live trading)
             try:
                 import MetaTrader5 as mt5
             except ImportError:
-                # Fallback to integer constants if MT5 not available (for testing)
-                # These match MetaTrader5 library definitions
                 class mt5:
                     ORDER_TYPE_BUY = 0
                     ORDER_TYPE_SELL = 1
                     TRADE_ACTION_DEAL = 1
                     ORDER_TIME_GTC = 0
                     ORDER_FILLING_IOC = 1
-            
-            # Determine order type based on action
+
             if signal.action == "BUY":
                 order_type = mt5.ORDER_TYPE_BUY
             elif signal.action == "SELL":
@@ -477,8 +485,8 @@ class OrderExecutor:
                 "price": entry_price,
                 "sl": sl_price,
                 "tp": tp_price,
-                "deviation": 50,
-                "magic": 12345,
+                "deviation": deviation,  # ← 3 points, not 50
+                "magic": getattr(self.mt5_client, "magic_number", 20250101),
                 "comment": f"{signal.direction}_{signal.action}",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,

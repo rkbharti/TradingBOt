@@ -73,7 +73,10 @@ class ChallengePolicy:
     last_trade_time: Optional[datetime] = field(default=None)
 
     def __post_init__(self):
-        """Initialize logger after dataclass setup."""
+        """Initialize logger and internal peak balance tracker."""
+        # Internal high-water-mark — owned by the policy, not the caller
+        self.peak_balance: float = self.starting_balance
+
         logger.info(
             f"ChallengePolicy initialized:\n"
             f"  Daily Loss Limit: {self.daily_loss_limit_pct}%\n"
@@ -81,7 +84,8 @@ class ChallengePolicy:
             f"  Max Trades/Day: {self.max_trades_per_day}\n"
             f"  Max Consecutive Losses: {self.max_consecutive_losses}\n"
             f"  Min Gap: {self.min_trade_gap_minutes} min\n"
-            f"  Risk/Trade: {self.risk_per_trade_pct}%"
+            f"  Risk/Trade: {self.risk_per_trade_pct}%\n"
+            f"  Peak Balance: ${self.peak_balance:.2f}"
         )
 
     # =========================================================================
@@ -274,44 +278,59 @@ class ChallengePolicy:
     # TRADE LOGGING
     # =========================================================================
 
-    def log_trade_result(self, was_win: bool, pnl: float) -> None:
+    def log_trade_result(
+        self,
+        was_win: bool,
+        pnl: float,
+        current_balance: float = 0.0,
+    ) -> None:
         """
         Update internal state after a trade closes.
-        
+
         Call this method every time a trade completes (win or loss).
         It updates:
         - consecutive_losses counter
         - daily_pnl total
         - daily_pnl_pct
-        
+        - peak_balance high-water-mark (if current_balance provided)
+
         Args:
             was_win: True if trade was profitable, False if loss
             pnl: Profit/loss amount in account currency (can be negative)
-        
+            current_balance: Current account balance after trade closes.
+                            Used to update internal peak_balance tracker.
+                            Pass this every time — omitting it means
+                            drawdown protection uses a stale peak.
+
         Example:
-            # Trade lost $50
-            policy.log_trade_result(was_win=False, pnl=-50.0)
-            
-            # Trade won $120
-            policy.log_trade_result(was_win=True, pnl=120.0)
+            policy.log_trade_result(was_win=False, pnl=-50.0, current_balance=99950.0)
+            policy.log_trade_result(was_win=True, pnl=120.0, current_balance=100070.0)
         """
         try:
             self.daily_pnl += pnl
-            # Update daily pnl percentage
-            if hasattr(self, "starting_balance") and self.starting_balance > 0:
+
+            if self.starting_balance > 0:
                 self.daily_pnl_pct = (self.daily_pnl / self.starting_balance) * 100
+
+            # Update internal high-water-mark — this is the fix.
+            # peak_balance must NEVER decrease; only move up on new equity highs.
+            if current_balance > 0:
+                self.peak_balance = max(self.peak_balance, current_balance)
 
             if was_win:
                 self.consecutive_losses = 0
-                logger.info(f"Trade WIN: +${pnl:.2f} | Consecutive losses reset to 0")
+                logger.info(
+                    f"Trade WIN: +${pnl:.2f} | Consecutive losses reset to 0 | "
+                    f"Peak balance: ${self.peak_balance:.2f}"
+                )
             else:
                 self.consecutive_losses += 1
                 logger.info(
                     f"Trade LOSS: -${abs(pnl):.2f} | "
-                    f"Consecutive losses: {self.consecutive_losses}"
+                    f"Consecutive losses: {self.consecutive_losses} | "
+                    f"Peak balance: ${self.peak_balance:.2f}"
                 )
 
-            # Note: daily_pnl_pct is calculated externally (needs starting balance)
             logger.debug(f"Daily PnL total: ${self.daily_pnl:.2f}")
 
         except Exception as e:
