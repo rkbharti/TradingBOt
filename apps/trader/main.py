@@ -42,12 +42,15 @@ from tradingbot.strategy.smc.signal_engine import SignalEngine, SignalEngineConf
 
 # ── Config ────────────────────────────────────────────────────────────────────
 from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ENABLE_TELEGRAM
+from vps_reporter import ping_health, post_signal, post_trade_result
 
 # ── Globals ───────────────────────────────────────────────────────────────────
 DRY_RUN = True  # Set to False for live trading
+BOT_MAGIC_NUMBER = 20250101
 
 obs_logger = ObservationLogger()
 obs_logger.bot_started()
+ping_health()
 
 ob_obs_logger = OBObservationLogger()
 try:
@@ -233,7 +236,11 @@ class XAUUSDTradingBot:
         self.htf_memory  = HTFMemory()
 
         # ── Phase 2: canonical signal engine ─────────────────────────────────
+        from tradingbot.infra.news.news_filter import NewsFilter
+        from config.settings import FINNHUB_API_KEY
+
         self.signal_engine = SignalEngine(SignalEngineConfig())
+        self.signal_engine.news_filter = NewsFilter(api_key=FINNHUB_API_KEY)
 
         # ── Phase 4: Risk + Audit ─────────────────────────────────────────────
         self.challenge_policy = ChallengePolicy(
@@ -250,23 +257,24 @@ class XAUUSDTradingBot:
             symbol="XAUUSD",
             timeframe="M5",
         )
-        self._peak_balance: float = 0.0
-        self._daily_pnl_pct: float = 0.0
-        self._trades_today: int = 0
+        self.magic_number            = BOT_MAGIC_NUMBER  # ← wired here, used in order requests
+        self._peak_balance: float    = 0.0
+        self._daily_pnl_pct: float   = 0.0
+        self._trades_today: int      = 0
         self._consecutive_losses: int = 0
         self._last_trade_time: Optional[datetime] = None
-        self._session_date: Optional[date] = None  # tracks current trading day
+        self._session_date: Optional[date] = None
 
         # ── State ─────────────────────────────────────────────────────────────
-        self.running                 = False
-        self.trade_log: list         = []
-        self.open_positions: list    = []
-        self.manual_positions: list  = []
-        self.max_positions           = 3
-        self.max_lot_size            = 2.0
-        self.risk_per_trade_percent  = 0.5
-        self.current_session         = "UNKNOWN"
-        self.dry_run                 = DRY_RUN
+        self.running                  = False
+        self.trade_log: list          = []
+        self.open_positions: list     = []
+        self.manual_positions: list   = []
+        self.max_positions            = 3
+        self.max_lot_size             = 2.0
+        self.risk_per_trade_percent   = 0.5
+        self.current_session          = "UNKNOWN"
+        self.dry_run                  = DRY_RUN
         self.waiting_for_confirmation = False
 
     # ── MT5 wrappers ──────────────────────────────────────────────────────────
@@ -442,12 +450,89 @@ class XAUUSDTradingBot:
         return market_data, current_price
 
     def sync_closed_positions(self) -> None:
+        """
+        Detect positions that have closed since last cycle.
+        For each closed position:
+        - Calls challenge_policy.log_trade_result() to update
+            consecutive_losses, daily_pnl, peak_balance.
+        - Updates bot-level counters (_consecutive_losses, _daily_pnl_pct).
+        """
         live_tickets = {p["ticket"] for p in self.mt5_get_all_positions()}
         before = len(self.open_positions)
-        self.open_positions = [p for p in self.open_positions if p.get("ticket") in live_tickets]
-        removed = before - len(self.open_positions)
-        if removed > 0:
-            print(f"\U0001f504 Synced: removed {removed} closed position(s)")
+
+        still_open = []
+        closed = []
+
+        for p in self.open_positions:
+            if p.get("ticket") in live_tickets:
+                still_open.append(p)
+            else:
+                closed.append(p)
+
+        self.open_positions = still_open
+        removed = len(closed)
+
+        if removed == 0:
+            return
+
+        print(f"\U0001f504 Synced: removed {removed} closed position(s)")
+
+        # ── Fetch current account balance for peak tracking ──────────────────
+        acct = self.mt5_get_account()
+        current_balance = float(getattr(acct, "balance", 0.0)) if acct else 0.0
+
+        for pos in closed:
+            ticket  = pos.get("ticket")
+            entry   = float(pos.get("entry_price", 0.0))
+            sl      = float(pos.get("sl", 0.0))
+            tp      = float(pos.get("tp", 0.0))
+            side    = pos.get("signal", "BUY")
+
+            # ── Determine PnL ────────────────────────────────────────────────
+            # Best case: MT5 gave us a live profit field when we stored the pos.
+            # Fallback: estimate from SL/TP distance (direction-aware).
+            raw_pnl = pos.get("profit", None)
+
+            if raw_pnl is None or raw_pnl == 0.0:
+                # Estimate: did price reach TP or SL?
+                # We don't know for certain so we skip was_win logic here —
+                # better to not count it than to count it wrong.
+                print(f"  ⚠️  Ticket {ticket}: no profit field — skipping policy update")
+                continue
+
+            pnl      = float(raw_pnl)
+            was_win  = pnl > 0
+
+            # ── Update challenge policy internal state ────────────────────────
+            self.challenge_policy.log_trade_result(
+                was_win=was_win,
+                pnl=pnl,
+                current_balance=current_balance,
+            )
+
+            # ── Sync bot-level shadow counters ────────────────────────────────
+            self._consecutive_losses = self.challenge_policy.consecutive_losses
+            self._peak_balance       = self.challenge_policy.peak_balance
+
+            if current_balance > 0 and self.challenge_policy.starting_balance > 0:
+                self._daily_pnl_pct = (
+                    self.challenge_policy.daily_pnl
+                    / self.challenge_policy.starting_balance
+                ) * 100
+
+            result_icon = "✅ WIN" if was_win else "❌ LOSS"
+            print(
+                f"  {result_icon} Ticket {ticket} | PnL: ${pnl:+.2f} | "
+                f"Consecutive losses: {self._consecutive_losses} | "
+                f"Peak: ${self._peak_balance:,.2f}"
+            )
+            post_trade_result(
+                symbol="XAUUSD",
+                direction=side,
+                result="win" if was_win else "loss",
+                pnl=round(pnl, 2),
+                note=f"Ticket {ticket} | Session: {self.current_session}",
+            )
 
     # ── Manual trade observation ──────────────────────────────────────────────
     def detect_and_manage_manual_trades(self, analysis_context: dict) -> None:
@@ -556,21 +641,60 @@ class XAUUSDTradingBot:
     # ── Main analysis cycle ───────────────────────────────────────────────────
 
     def _maybe_reset_daily_state(self) -> None:
-        """Reset daily counters at 08:00 IST (02:30 UTC) on a new calendar day."""
+        """
+        Reset daily counters at 08:00 IST on a new calendar day.
+
+        Persists _session_date to disk so bot restarts mid-session
+        do NOT trigger a false daily reset.
+        """
         try:
             import pytz
+            import json
+            from pathlib import Path
+
+            STATE_FILE = Path("logs/session_state.json")
+
             ist_tz  = pytz.timezone("Asia/Kolkata")
             now_ist = datetime.now(pytz.utc).astimezone(ist_tz)
             today   = now_ist.date()
+
+            # ── Load persisted session date on first call ─────────────────────
+            if self._session_date is None:
+                if STATE_FILE.exists():
+                    try:
+                        saved = json.loads(STATE_FILE.read_text())
+                        saved_date_str = saved.get("session_date", "")
+                        if saved_date_str:
+                            from datetime import date
+                            self._session_date = date.fromisoformat(saved_date_str)
+                            print(f"📂 Restored session_date from disk: {self._session_date}")
+                    except Exception as load_err:
+                        print(f"⚠️ Could not load session state: {load_err}")
+
+            # ── Only reset if it's genuinely a new calendar day AND past 08:00 IST
             if self._session_date != today and now_ist.hour >= 8:
-                print(f"\U0001f504 New trading day ({today}) — resetting daily counters")
+                print(f"🔄 New trading day ({today}) — resetting daily counters")
                 self.challenge_policy.reset_daily_state()
                 self._trades_today       = 0
                 self._daily_pnl_pct      = 0.0
                 self._consecutive_losses = self.challenge_policy.consecutive_losses
                 self._session_date       = today
+
+                # ── Persist new session date so restarts don't re-trigger ─────
+                try:
+                    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    STATE_FILE.write_text(
+                        json.dumps({
+                            "session_date": today.isoformat(),
+                            "reset_at_ist": now_ist.isoformat(),
+                        })
+                    )
+                    print(f"💾 session_date persisted: {today}")
+                except Exception as save_err:
+                    print(f"⚠️ Could not persist session state: {save_err}")
+
         except Exception as e:
-            print(f"\u26a0\ufe0f Daily reset error: {e}")
+            print(f"⚠️ Daily reset error: {e}")
 
     def _build_policy_state_snapshot(self, account_balance: float) -> dict:
         """Return a serialisable policy-state dict for audit records."""
@@ -586,11 +710,98 @@ class XAUUSDTradingBot:
             "max_trades_per_day":     self.challenge_policy.max_trades_per_day,
         }
 
+    def _manage_open_positions_trailing(self, current_bid: float) -> None:
+        """
+        Breakeven + trailing stop logic. Called every cycle.
+
+        Rules (SMC-aligned, funded challenge safe):
+        - BREAKEVEN: When price moves 1.0× risk in our favour,
+        move SL to entry + 2 pips (locks 0 loss).
+        - TRAILING:  When price moves 2.0× risk in our favour,
+        trail SL at 50% of the current profit distance
+        (locks partial profit, lets winners run).
+
+        All SL modifications go through mt5_modify_position().
+        Dry-run: prints the action but does not call MT5.
+        """
+        if not self.open_positions:
+            return
+
+        for pos in self.open_positions:
+            try:
+                ticket     = pos.get("ticket")
+                entry      = float(pos.get("entry_price", 0.0))
+                current_sl = float(pos.get("sl", 0.0))
+                tp         = float(pos.get("tp", 0.0))
+                side       = pos.get("signal", "BUY")
+
+                if not entry or not current_sl or not tp:
+                    continue
+
+                # ── Risk distance at entry ────────────────────────────────────
+                risk_pips = abs(entry - current_sl)
+                if risk_pips <= 0:
+                    continue
+
+                if side == "BUY":
+                    profit_pips = current_bid - entry
+                else:
+                    profit_pips = entry - current_bid
+
+                if profit_pips <= 0:
+                    continue  # still in drawdown — do nothing
+
+                # ── BREAKEVEN: 1R in profit → SL to entry + 2 pips ───────────
+                breakeven_sl = (entry + 2.0) if side == "BUY" else (entry - 2.0)
+                at_1r        = profit_pips >= risk_pips * 1.0
+
+                if at_1r and (
+                    (side == "BUY"  and current_sl < breakeven_sl) or
+                    (side == "SELL" and current_sl > breakeven_sl)
+                ):
+                    new_sl = round(breakeven_sl, 2)
+                    print(f"  🔒 BREAKEVEN Ticket {ticket}: SL {current_sl} → {new_sl} (entry+2)")
+                    if not self.dry_run:
+                        self.mt5_modify_position(ticket, sl=new_sl)
+                    pos["sl"] = new_sl
+                    continue  # don't also trail in same cycle
+
+                # ── TRAILING: 2R in profit → trail at 50% profit distance ─────
+                at_2r = profit_pips >= risk_pips * 2.0
+
+                if at_2r:
+                    trail_sl = (
+                        round(current_bid - (profit_pips * 0.5), 2)
+                        if side == "BUY"
+                        else round(current_bid + (profit_pips * 0.5), 2)
+                    )
+                    sl_improved = (
+                        (side == "BUY"  and trail_sl > current_sl) or
+                        (side == "SELL" and trail_sl < current_sl)
+                    )
+                    if sl_improved:
+                        print(f"  📈 TRAILING Ticket {ticket}: SL {current_sl} → {trail_sl}")
+                        if not self.dry_run:
+                            self.mt5_modify_position(ticket, sl=trail_sl)
+                        pos["sl"] = trail_sl
+
+            except Exception as e:
+                print(f"  ⚠️ Trailing stop error for ticket {pos.get('ticket')}: {e}")
+
     def analyze_once(self) -> None:
         # ── Daily reset (08:00 IST) ───────────────────────────────────────────
         self._maybe_reset_daily_state()
 
         self.sync_closed_positions()
+
+        # ── Trailing stop / breakeven management ──────────────────────────────
+        if self.open_positions:
+            acct_trail  = self.mt5_get_account()
+            price_trail = self.mt5_get_current_price()
+            if price_trail is not None:
+                bid_trail = float(price_trail.get("bid", 0.0)) if isinstance(price_trail, dict) else float(price_trail)
+                if bid_trail > 0:
+                    self._manage_open_positions_trailing(bid_trail)
 
         # ── Lockdown gate ─────────────────────────────────────────────────────
         _acct_early = self.mt5_get_account()
@@ -903,6 +1114,14 @@ class XAUUSDTradingBot:
                 f"SL: {final_sl} | TP: {final_tp}\n"
                 f"RR: {exec_result.rr_ratio:.2f}x | Lot: {lot_size} | Risk: ${exec_result.risk_amount:.2f}\n"
                 f"Confidence: {result.confidence_score}% | Session: {self.current_session}"
+            )
+            post_signal(
+                symbol="XAUUSD",
+                direction=trade_side,
+                entry=float(result.entry_price or 0.0),
+                sl=float(final_sl or 0.0),
+                tp=float(final_tp or 0.0),
+                gate_summary=str(getattr(result, "gate_summary", "") or ""),
             )
         else:
             print("\u274c Order placement failed")
