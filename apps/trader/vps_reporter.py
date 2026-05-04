@@ -1,8 +1,22 @@
 import requests
 from datetime import datetime
 
-VPS_BASE_URL = "http://68.233.99.145:8000"
+
+VPS_BASE_URL = "http://127.0.0.1:8000"
 TIMEOUT = 5
+
+
+def _post(endpoint: str, payload: dict) -> bool:
+    try:
+        resp = requests.post(f"{VPS_BASE_URL}{endpoint}", json=payload, timeout=TIMEOUT)
+        if resp.status_code == 200:
+            print(f"✅ VPS {endpoint} posted")
+            return True
+        print(f"⚠️ VPS {endpoint} returned {resp.status_code}: {resp.text}")
+        return False
+    except Exception as e:
+        print(f"⚠️ VPS {endpoint} failed (bot continues): {e}")
+        return False
 
 
 def ping_health() -> bool:
@@ -40,7 +54,7 @@ def post_signal(
         if resp.status_code == 200:
             print(f"✅ VPS signal posted: {direction} {symbol} @ {entry}")
             return True
-        print(f"⚠️ VPS /signal returned {resp.status_code}")
+        print(f"⚠️ VPS /signal returned {resp.status_code}: {resp.text}")
         return False
     except Exception as e:
         print(f"⚠️ VPS post_signal failed (bot continues): {e}")
@@ -67,11 +81,12 @@ def post_trade_result(
         if resp.status_code == 200:
             print(f"✅ VPS trade result posted: {result.upper()} PnL={pnl}")
             return True
-        print(f"⚠️ VPS /trade-result returned {resp.status_code}")
+        print(f"⚠️ VPS /trade-result returned {resp.status_code}: {resp.text}")
         return False
     except Exception as e:
         print(f"⚠️ VPS post_trade_result failed (bot continues): {e}")
         return False
+
 
 def post_daily_summary(
     total_trades: int,
@@ -81,7 +96,6 @@ def post_daily_summary(
     max_drawdown: float,
     session: str = "ALL",
 ) -> bool:
-    """POST end-of-day summary to VPS → Telegram."""
     payload = {
         "total_trades": total_trades,
         "wins": wins,
@@ -93,10 +107,14 @@ def post_daily_summary(
     }
     return _post("/daily-summary", payload)
 
+
 def check_bot_active() -> bool:
-    """Returns True if VPS says bot is active, False if paused."""
     try:
         resp = requests.get(f"{VPS_BASE_URL}/bot/status", timeout=3)
-        return resp.json().get("trading", True)
-    except Exception:
-        return True  # fail-safe: keep trading if VPS unreachable
+        if resp.status_code == 200:
+            return resp.json().get("trading", True)
+        print(f"⚠️ VPS /bot/status returned {resp.status_code}")
+        return True
+    except Exception as e:
+        print(f"⚠️ VPS bot status check failed (bot continues): {e}")
+        return True
