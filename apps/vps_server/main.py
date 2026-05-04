@@ -6,6 +6,7 @@ from apps.vps_server.routes.daily_summary import router as daily_summary_router
 from apps.vps_server.routes.health import router as health_router
 from apps.vps_server.routes.signals import router as signals_router
 from apps.vps_server.routes.trade_results import router as trade_results_router
+from apps.vps_server.routes.legacy_webhook import router as legacy_webhook_router
 
 app = FastAPI(
     title="TradingBOt VPS Receiver",
@@ -25,6 +26,7 @@ app.include_router(bot_control_router)
 app.include_router(signals_router)
 app.include_router(trade_results_router)
 app.include_router(daily_summary_router)
+app.include_router(legacy_webhook_router)
 
 
 @app.get("/")
