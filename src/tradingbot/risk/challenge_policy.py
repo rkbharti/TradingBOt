@@ -76,6 +76,8 @@ class ChallengePolicy:
         """Initialize logger and internal peak balance tracker."""
         # Internal high-water-mark — owned by the policy, not the caller
         self.peak_balance: float = self.starting_balance
+        self.daily_wins: int = 0      
+        self.daily_losses: int = 0
 
         logger.info(
             f"ChallengePolicy initialized:\n"
@@ -319,12 +321,16 @@ class ChallengePolicy:
 
             if was_win:
                 self.consecutive_losses = 0
+                self.daily_wins += 1          # ← ADD THIS
+                self.trades_today += 1        # ← ADD THIS
                 logger.info(
                     f"Trade WIN: +${pnl:.2f} | Consecutive losses reset to 0 | "
                     f"Peak balance: ${self.peak_balance:.2f}"
                 )
             else:
                 self.consecutive_losses += 1
+                self.daily_losses += 1        # ← ADD THIS
+                self.trades_today += 1        # ← ADD THIS
                 logger.info(
                     f"Trade LOSS: -${abs(pnl):.2f} | "
                     f"Consecutive losses: {self.consecutive_losses} | "
@@ -369,6 +375,8 @@ class ChallengePolicy:
             self.trades_today = 0
             self.daily_pnl = 0.0
             self.daily_pnl_pct = 0.0
+            self.daily_wins = 0      # ← ADD THIS
+            self.daily_losses = 0 
             # Note: consecutive_losses is intentionally NOT reset
 
         except Exception as e:

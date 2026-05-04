@@ -280,12 +280,16 @@ class XAUUSDTradingBot:
         self.waiting_for_confirmation = False
 
     # ── MT5 wrappers ──────────────────────────────────────────────────────────
+    MT5_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
+
     def mt5_initialize(self) -> bool:
         try:
-            if hasattr(self.mt5, "initialize_mt5"): return self.mt5.initialize_mt5()
-            if hasattr(self.mt5, "initialize"):      return self.mt5.initialize()
+            if hasattr(self.mt5, "initialize_mt5"):
+                return self.mt5.initialize_mt5()
+            if hasattr(self.mt5, "initialize"):
+                return self.mt5.initialize(path=MT5_PATH)  # ← add path here
         except Exception as e:
-            print(f"\u274c MT5 init error: {e}")
+            print(f"❌ MT5 init error: {e}")
         return False
 
     def mt5_get_account(self):

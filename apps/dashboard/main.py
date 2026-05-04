@@ -783,5 +783,16 @@ async def webhook(payload: dict = Body(...)):
         traceback.print_exc()
         return {"status": "error", "reason": str(e)}
 
+@app.get('/bot/logs')
+def get_logs():
+    try:
+        with open(r'C:\Python_Project\tradingbot\TradingBOt\logs\bot.log', 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        return {'logs': lines[-50:]}
+    except Exception as e:
+        return {'error': str(e)}
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+
+
