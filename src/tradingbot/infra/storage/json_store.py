@@ -9,10 +9,16 @@ class IdeaMemory:
     Persists data to 'ideamemory.json' to survive restarts.
     """
     def __init__(self, expiry_minutes=30, memory_file='ideamemory.json'):
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+        data_path = os.path.join(base_dir, "data")
+
+        if not os.path.exists(data_path):
+            os.makedirs(data_path)
+
         self.expiry_minutes = expiry_minutes
-        self.memory_file = memory_file
+        self.memory_file = os.path.join(data_path, memory_file)
         self.short_term_memory = {}
-        self.load_memory()  # <--- Loads previous state on startup
+        self.load_memory()
         self.save_memory()
     def load_memory(self):
         """Load memory from file so we don't forget losses on restart"""

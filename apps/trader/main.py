@@ -44,7 +44,7 @@ from tradingbot.strategy.smc.signal_engine import SignalEngine, SignalEngineConf
 
 # ── Config ────────────────────────────────────────────────────────────────────
 from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ENABLE_TELEGRAM
-from vps_reporter import ping_health, post_signal, post_trade_result
+from apps.trader.vps_reporter import ping_health, post_signal, post_trade_result
 
 # ── Globals ───────────────────────────────────────────────────────────────────
 DRY_RUN = True  # Set to False for live trading
@@ -151,7 +151,7 @@ def map_session_for_filter(session_name: str) -> str:
 def send_to_dashboard(
     bot_data: dict,
     analysis: dict,
-    endpoint: str = "http://localhost:8000/webhook",
+    endpoint: str = "http://127.0.0.1:8001/webhook",
     timeout: float = 3.0,
 ) -> bool:
     """
@@ -1031,6 +1031,12 @@ class XAUUSDTradingBot:
                 "closed_trades":    [],
                 "chart_data":       market_data.tail(300).to_dict(orient="records"),
                 "current_session":  self.current_session,
+                "account": {
+                    "login": getattr(acct, "login", None) if acct else None,
+                    "server": getattr(acct, "server", None) if acct else None,
+                    "balance": float(getattr(acct, "balance", 0.0)) if acct else 0.0,
+                    "equity": float(getattr(acct, "equity", 0.0)) if acct else 0.0,
+                }
             },
             analysis_snapshot,
         )

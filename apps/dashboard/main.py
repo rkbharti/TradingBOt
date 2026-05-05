@@ -22,6 +22,7 @@ import math
 
 active_connections = []
 bot_state = {}
+bot_paused = False
 
 # --- ENHANCED PnL TRACKER ---
 class DailyPnLTracker:
@@ -157,6 +158,21 @@ html_content = """
         .pulse { animation: pulse 2s infinite; }
         @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
         .pos-footer { margin-top: 8px; display:flex; justify-content:space-between; align-items:center; font-size:12px; color:var(--text-sub); }
+        /* Feed rows */
+        .feed-row { display:flex; justify-content:space-between; align-items:center; padding:5px 8px; margin-bottom:4px; background:rgba(255,255,255,0.03); border-radius:6px; border-left:3px solid; }
+        .feed-row.BUY { border-left-color: var(--green); }
+        .feed-row.SELL { border-left-color: var(--red); }
+        .feed-row.WIN { border-left-color: var(--green); }
+        .feed-row.LOSS { border-left-color: var(--red); }
+        /* Bot control */
+        .bot-status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+        .bot-status-dot.ACTIVE { background: var(--green); animation: pulse 2s infinite; }
+        .bot-status-dot.PAUSED { background: var(--red); }
+        .bot-status-dot.OFFLINE { background: #636366; }
+        .ctrl-btn { border: none; border-radius: 8px; padding: 8px 16px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: 'SF Pro Display', sans-serif; letter-spacing: 0.5px; transition: opacity 0.15s; }
+        .ctrl-btn:active { opacity: 0.7; }
+        .ctrl-btn.pause { background: rgba(255,69,58,0.2); color: var(--red); border: 1px solid rgba(255,69,58,0.4); }
+        .ctrl-btn.resume { background: rgba(48,209,88,0.2); color: var(--green); border: 1px solid rgba(48,209,88,0.4); }
     </style>
 </head>
 <body x-data="dashboardStore()">
@@ -295,6 +311,105 @@ html_content = """
                 <div id="chart-container"></div>
             </div>
         </div>
+
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <!-- SIGNAL FEED PANEL                                           -->
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <div class="grid-stack-item" gs-id="signals" gs-w="4" gs-h="3">
+            <div class="grid-stack-item-content">
+                <div class="w-header">
+                    <span class="w-title"><i class="ph-fill ph-lightning"></i> Signal Feed</span>
+                    <span class="badge" x-text="signals.length + ' signals'">0 signals</span>
+                </div>
+                <div class="w-body" style="padding:8px;">
+                    <template x-for="(s, idx) in signals.slice(0, 10)" :key="idx">
+                        <div class="feed-row" :class="s.direction">
+                            <div>
+                                <div class="mono" style="font-size:10px; color:var(--text-sub);" x-text="s.time || '--'"></div>
+                                <div style="font-weight:700; font-size:12px;" :class="s.direction === 'BUY' ? 'text-green' : 'text-red'" x-text="s.direction || '--'"></div>
+                            </div>
+                            <div class="mono" style="font-size:10px; text-align:right; line-height:1.6;">
+                                <div><span style="color:var(--text-sub)">E </span><span style="color:var(--text-main);" x-text="s.entry ?? '--'"></span></div>
+                                <div><span style="color:var(--red)">SL </span><span x-text="s.sl ?? '--'"></span></div>
+                                <div><span style="color:var(--green)">TP </span><span x-text="s.tp ?? '--'"></span></div>
+                            </div>
+                        </div>
+                    </template>
+                    <div x-show="signals.length === 0" style="text-align:center; padding:24px; color:var(--text-sub); font-size:12px;">
+                        <i class="ph ph-broadcast" style="font-size:24px; margin-bottom:6px; display:block;"></i>
+                        Awaiting signals...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <!-- TRADE RESULTS PANEL                                         -->
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <div class="grid-stack-item" gs-id="trade_results" gs-w="4" gs-h="3">
+            <div class="grid-stack-item-content">
+                <div class="w-header">
+                    <span class="w-title"><i class="ph-fill ph-flag-checkered"></i> Trade Results</span>
+                    <span class="badge" x-text="trade_results.length + ' trades'">0 trades</span>
+                </div>
+                <div class="w-body" style="padding:8px;">
+                    <template x-for="(r, idx) in trade_results.slice(0, 10)" :key="idx">
+                        <div class="feed-row" :class="r.result">
+                            <div>
+                                <div class="mono" style="font-size:10px; color:var(--text-sub);" x-text="r.time || '--'"></div>
+                                <div style="font-size:12px; font-weight:700;" :class="r.direction === 'BUY' ? 'text-green' : 'text-red'" x-text="r.direction || '--'"></div>
+                            </div>
+                            <div style="text-align:right;">
+                                <div style="font-size:11px; font-weight:800; letter-spacing:0.5px;" :class="r.result === 'WIN' ? 'text-green' : 'text-red'" x-text="r.result || '--'"></div>
+                                <div class="mono" style="font-size:11px;" :class="r.pnl >= 0 ? 'text-green' : 'text-red'" x-text="(r.pnl >= 0 ? '+' : '') + fmt(r.pnl)"></div>
+                            </div>
+                        </div>
+                    </template>
+                    <div x-show="trade_results.length === 0" style="text-align:center; padding:24px; color:var(--text-sub); font-size:12px;">
+                        <i class="ph ph-trophy" style="font-size:24px; margin-bottom:6px; display:block;"></i>
+                        No closed trades yet...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <!-- BOT CONTROL PANEL                                           -->
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <div class="grid-stack-item" gs-id="bot_control" gs-w="4" gs-h="2">
+            <div class="grid-stack-item-content">
+                <div class="w-header">
+                    <span class="w-title"><i class="ph-fill ph-robot"></i> Bot Control</span>
+                    <div style="display:flex; align-items:center;">
+                        <span class="bot-status-dot" :class="bot_status"></span>
+                        <span class="mono" style="font-size:11px; font-weight:700;"
+                            :class="bot_status === 'ACTIVE' ? 'text-green' : bot_status === 'PAUSED' ? 'text-red' : ''"
+                            :style="bot_status === 'OFFLINE' ? 'color:#636366' : ''"
+                            x-text="bot_status">OFFLINE</span>
+                    </div>
+                </div>
+                <div class="w-body" style="display:flex; flex-direction:column; justify-content:center; gap:10px; padding:14px;">
+                    <div style="display:flex; gap:10px;">
+                        <button class="ctrl-btn pause" style="flex:1;"
+                            :disabled="bot_status === 'OFFLINE' || bot_status === 'PAUSED'"
+                            :style="(bot_status === 'OFFLINE' || bot_status === 'PAUSED') ? 'opacity:0.4; cursor:not-allowed;' : ''"
+                            @click="pauseBot()">
+                            <i class="ph-fill ph-pause"></i> PAUSE
+                        </button>
+                        <button class="ctrl-btn resume" style="flex:1;"
+                            :disabled="bot_status === 'OFFLINE' || bot_status === 'ACTIVE'"
+                            :style="(bot_status === 'OFFLINE' || bot_status === 'ACTIVE') ? 'opacity:0.4; cursor:not-allowed;' : ''"
+                            @click="resumeBot()">
+                            <i class="ph-fill ph-play"></i> RESUME
+                        </button>
+                    </div>
+                    <div class="mono" style="font-size:10px; color:var(--text-sub); text-align:center;">
+                        Auto-refresh every 5s &nbsp;·&nbsp; Last check: <span x-text="bot_status_ts">--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <div style="position:fixed; bottom:10px; right:10px; z-index:99; opacity:0.3; transition:opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.3">
@@ -328,9 +443,17 @@ html_content = """
                 news: { title: 'Scanning...', time: '--' },
                 trades: [], flipCapital: false,
                 pnl_today: 0, pnl_week: 0, pnl_total: 0, open_pnl: 0,
+                signals: [],
+                trade_results: [],
+                bot_status: 'OFFLINE',
+                bot_status_ts: '--',
 
                 fmt(n) { return (n !== null && n !== undefined) ? '$' + Number(n).toLocaleString(undefined,{minimumFractionDigits:2}) : '$0.00' },
-                init() { this.connect(); },
+                init() {
+                    this.connect();
+                    this.fetchBotStatus();
+                    setInterval(() => this.fetchBotStatus(), 5000);
+                },
                 connect() {
                     const ws = new WebSocket((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws');
                     ws.onmessage = (event) => {
@@ -354,6 +477,9 @@ html_content = """
                         this.zone_strength = data.zone_strength || 0; this.zone = data.zone || '--';
                         this.session = data.session || '--'; this.news = data.news_event || this.news;
                         this.trades = data.trades || [];
+
+                        if (Array.isArray(data.signals)) this.signals = data.signals;
+                        if (Array.isArray(data.trade_results)) this.trade_results = data.trade_results;
 
                         if (data.chart_data?.length) {
                             const unique = [...new Map(data.chart_data.map(i => [i['time'], i])).values()].sort((a, b) => a.time - b.time);
@@ -484,6 +610,53 @@ html_content = """
                         }
                     };
                     ws.onclose = () => setTimeout(() => this.connect(), 3000);
+                },
+
+                async fetchBotStatus() {
+                    try {
+                        const r = await fetch('http://127.0.0.1:8000/bot/status', { signal: AbortSignal.timeout(4000) });
+
+                        if (!r.ok) {
+                            this.bot_status = 'OFFLINE';
+                        } else {
+                            const d = await r.json();
+
+                            // 🔥 HANDLE YOUR VPS FORMAT
+                            if (typeof d.trading === 'boolean') {
+                                this.bot_status = d.trading ? 'ACTIVE' : 'PAUSED';
+                            } else {
+                                this.bot_status = 'OFFLINE';
+                            }
+                        }
+
+                    } catch (e) {
+                        this.bot_status = 'OFFLINE';
+                    }
+
+                    const now = new Date();
+                    this.bot_status_ts = now.toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit'
+                    });
+                },
+
+                async pauseBot() {
+                    try {
+                        await fetch('http://127.0.0.1:8000/bot/pause', { method: 'POST', signal: AbortSignal.timeout(4000) });
+                        await this.fetchBotStatus();
+                    } catch (e) {
+                        this.bot_status = 'OFFLINE';
+                    }
+                },
+
+                async resumeBot() {
+                    try {
+                        await fetch('http://127.0.0.1:8000/bot/resume', { method: 'POST', signal: AbortSignal.timeout(4000) });
+                        await this.fetchBotStatus();
+                    } catch (e) {
+                        this.bot_status = 'OFFLINE';
+                    }
                 }
             }
         }
@@ -718,6 +891,66 @@ def update_bot_state_v2(bot_instance, analysis_data):
     except Exception as e:
         print(f"⚠️ closed_trades ingestion error: {e}")
 
+    # --- SIGNALS INGESTION ---
+    formatted_signals = []
+    try:
+        raw_signals = get_val(bot_instance, "signals", []) or []
+        if not isinstance(raw_signals, list):
+            raw_signals = []
+        for sig in raw_signals[-10:]:
+            ts_raw = get_val(sig, "time", get_val(sig, "timestamp", None))
+            ts_str = str(ts_raw) if ts_raw is not None else "--"
+            direction = str(get_val(sig, "direction", get_val(sig, "signal", get_val(sig, "type", "N/A")))).upper()
+            entry_val = get_val(sig, "entry", get_val(sig, "price", None))
+            sl_val = get_val(sig, "sl", get_val(sig, "stop_loss", None))
+            tp_val = get_val(sig, "tp", get_val(sig, "take_profit", None))
+            formatted_signals.append({
+                "time": ts_str,
+                "direction": direction,
+                "entry": round(float(entry_val), 5) if entry_val is not None else None,
+                "sl": round(float(sl_val), 5) if sl_val is not None else None,
+                "tp": round(float(tp_val), 5) if tp_val is not None else None,
+            })
+    except Exception as e:
+        print(f"⚠️ signals ingestion error: {e}")
+
+    # --- TRADE RESULTS INGESTION ---
+    formatted_results = []
+    try:
+        raw_results = get_val(bot_instance, "trade_results", []) or []
+        if not isinstance(raw_results, list):
+            raw_results = []
+        # Fall back to closed_trades if trade_results not explicitly provided
+        if not raw_results:
+            raw_results = get_val(bot_instance, "closed_trades", []) or []
+            if not isinstance(raw_results, list):
+                raw_results = []
+        for tr in raw_results[-10:]:
+            pnl_raw = None
+            for k in ("pnl", "profit", "profit_usd", "deal_profit"):
+                pnl_raw = get_val(tr, k, None)
+                if pnl_raw is not None:
+                    break
+            pnl_val = parse_profit(pnl_raw)
+            direction = str(get_val(tr, "direction", get_val(tr, "signal", get_val(tr, "type", "N/A")))).upper()
+            ts_raw = get_val(tr, "time", get_val(tr, "close_time", get_val(tr, "timestamp", None)))
+            ts_str = str(ts_raw) if ts_raw is not None else "--"
+            result_raw = get_val(tr, "result", None)
+            if result_raw is not None:
+                result = str(result_raw).upper()
+            else:
+                result = "WIN" if pnl_val >= 0 else "LOSS"
+            if abs(pnl_val) < 0.01:
+                continue
+            formatted_results.append({
+                "time": ts_str,
+                "direction": direction,
+                "result": result,
+                "pnl": round(float(pnl_val), 2),
+            })
+    except Exception as e:
+        print(f"⚠️ trade_results ingestion error: {e}")
+
     try:
         pdh_val = analysis_data.get("pdh") if isinstance(analysis_data, dict) else getattr(analysis_data, "pdh", None)
         pdl_val = analysis_data.get("pdl") if isinstance(analysis_data, dict) else getattr(analysis_data, "pdl", None)
@@ -751,7 +984,9 @@ def update_bot_state_v2(bot_instance, analysis_data):
             "poi_overlays": poi_overlays,
             "chart_objects": chart_objects,  # <-- Added key for chart_objects
             "news_event": {"title": "No major events scheduled", "time": "Market Calm"},
-            "chart_data": get_val(bot_instance, "chart_data", [])[-300:]
+            "chart_data": get_val(bot_instance, "chart_data", [])[-300:],
+            "signals": formatted_signals,
+            "trade_results": formatted_results,
         })
     except Exception as e:
         print(f"⚠️ Error building bot_state: {e}")
@@ -783,6 +1018,26 @@ async def webhook(payload: dict = Body(...)):
         traceback.print_exc()
         return {"status": "error", "reason": str(e)}
 
+# --- BOT CONTROL ENDPOINTS ---
+@app.get("/bot/status")
+async def bot_status():
+    global bot_paused
+    return {"status": "PAUSED" if bot_paused else "ACTIVE"}
+
+@app.post("/bot/pause")
+async def pause_bot():
+    global bot_paused
+    bot_paused = True
+    print("⏸️  Bot PAUSED via dashboard")
+    return {"status": "PAUSED"}
+
+@app.post("/bot/resume")
+async def resume_bot():
+    global bot_paused
+    bot_paused = False
+    print("▶️  Bot RESUMED via dashboard")
+    return {"status": "ACTIVE"}
+
 @app.get('/bot/logs')
 def get_logs():
     try:
@@ -793,6 +1048,4 @@ def get_logs():
         return {'error': str(e)}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
-
-
+    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="warning")

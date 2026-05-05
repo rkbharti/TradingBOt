@@ -3,7 +3,13 @@ import os
 
 class HTFMemory:
     def __init__(self, file="htf_memory.json"):
-        self.file = file
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+        data_path = os.path.join(base_dir, "data")
+
+        if not os.path.exists(data_path):
+            os.makedirs(data_path)
+
+        self.file = os.path.join(data_path, file)
         self.state = {}
         self.load()
 
