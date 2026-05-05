@@ -2,7 +2,7 @@ import requests
 from datetime import datetime
 
 
-VPS_BASE_URL = "http://127.0.0.1:8000"
+VPS_BASE_URL = "http://68.233.99.145:8000"
 TIMEOUT = 5
 
 

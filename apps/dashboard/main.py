@@ -10,6 +10,12 @@ from datetime import datetime, date, timedelta
 import hashlib
 import traceback
 import math
+# from dotenv import load_dotenv
+# import os
+
+# load_dotenv()
+
+# VPS_BASE_URL = os.getenv("VPS_BASE_URL", "http://127.0.0.1:8000")
 
 # ============================================================================== 
 # 🎨 DASHBOARD v3 - Webhook Bridge ready FastAPI server
@@ -112,6 +118,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+from fastapi.responses import HTMLResponse
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+    return html_content
 
 # ---------------------------------------------------------------------------
 # Keep the dashboard HTML/CSS content intact below (unchanged semantics/style)
@@ -614,48 +625,68 @@ html_content = """
 
                 async fetchBotStatus() {
                     try {
-                        const r = await fetch('http://127.0.0.1:8000/bot/status', { signal: AbortSignal.timeout(4000) });
+                        const r = await fetch("http://68.233.99.145:8000/bot/status");
 
                         if (!r.ok) {
-                            this.bot_status = 'OFFLINE';
-                        } else {
-                            const d = await r.json();
+                            this.bot_status = "OFFLINE";
+                            return;
+                        }
 
-                            // 🔥 HANDLE YOUR VPS FORMAT
-                            if (typeof d.trading === 'boolean') {
-                                this.bot_status = d.trading ? 'ACTIVE' : 'PAUSED';
-                            } else {
-                                this.bot_status = 'OFFLINE';
-                            }
+                        const d = await r.json();
+
+                        // ✅ Correct mapping for YOUR VPS response
+                        if (typeof d.trading === "boolean") {
+                            this.bot_status = d.trading ? "ACTIVE" : "PAUSED";
+                        } else {
+                            this.bot_status = "OFFLINE";
                         }
 
                     } catch (e) {
-                        this.bot_status = 'OFFLINE';
+                        console.error("VPS ERROR:", e);
+                        this.bot_status = "OFFLINE";
                     }
 
                     const now = new Date();
                     this.bot_status_ts = now.toLocaleTimeString([], {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        second: '2-digit'
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit"
                     });
                 },
 
                 async pauseBot() {
                     try {
-                        await fetch('http://127.0.0.1:8000/bot/pause', { method: 'POST', signal: AbortSignal.timeout(4000) });
-                        await this.fetchBotStatus();
+                        const r = await fetch("http://68.233.99.145:8000/bot/pause", {
+                            method: "POST"
+                        });
+
+                        if (r.ok) {
+                            await this.fetchBotStatus();
+                        } else {
+                            this.bot_status = "OFFLINE";
+                        }
+
                     } catch (e) {
-                        this.bot_status = 'OFFLINE';
+                        console.error("PAUSE ERROR:", e);
+                        this.bot_status = "OFFLINE";
                     }
                 },
 
                 async resumeBot() {
                     try {
-                        await fetch('http://127.0.0.1:8000/bot/resume', { method: 'POST', signal: AbortSignal.timeout(4000) });
-                        await this.fetchBotStatus();
+                        const r = await fetch("http://68.233.99.145:8000/bot/resume", {
+                            method: "POST"
+                        });
+
+                        if (r.ok) {
+                            await this.fetchBotStatus();
+                        } else {
+                            this.bot_status = "OFFLINE";
+                        }
+
                     } catch (e) {
-                        this.bot_status = 'OFFLINE';
+                        console.error("RESUME ERROR:", e);
+                        this.bot_status = "OFFLINE";
                     }
                 }
             }
@@ -683,10 +714,11 @@ html_content = """
 </html>
 """
 
-@app.get("/dashboard")
-async def dashboard():
-    return HTMLResponse(content=html_content)
+from fastapi.responses import HTMLResponse
 
+@app.get("/", response_class=HTMLResponse)
+async def dashboard():
+    return html_content
 # WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -1048,4 +1080,5 @@ def get_logs():
         return {'error': str(e)}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="warning")
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
