@@ -1063,6 +1063,12 @@ async def bot_status():
 async def pause_bot():
     global bot_paused
     bot_paused = True
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post("http://localhost:8000/bot/pause")
+    except Exception:
+        pass
     print("⏸️  Bot PAUSED via dashboard")
     return {"status": "PAUSED"}
 
@@ -1070,6 +1076,12 @@ async def pause_bot():
 async def resume_bot():
     global bot_paused
     bot_paused = False
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post("http://localhost:8000/bot/resume")
+    except Exception:
+        pass
     print("▶️  Bot RESUMED via dashboard")
     return {"status": "ACTIVE"}
 
