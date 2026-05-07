@@ -2,8 +2,8 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-ROOT_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT_DIR / ".env")
+BASE_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(BASE_DIR / "config" / ".env")
 
 MT5_LOGIN    = os.getenv("MT5_LOGIN")
 MT5_PASSWORD = os.getenv("MT5_PASSWORD")

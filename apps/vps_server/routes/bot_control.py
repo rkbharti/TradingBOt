@@ -4,6 +4,8 @@ from fastapi import APIRouter
 
 from apps.vps_server.state import bot_state
 
+from apps.vps_server.telegram_utils import send_telegram
+
 router = APIRouter(tags=["bot-control"])
 
 
@@ -18,6 +20,7 @@ def get_bot_status():
 @router.post("/bot/pause")
 def pause_bot():
     bot_state.set_trading(False)
+    send_telegram("⏸️ <b>Trading Bot Paused</b>")
     return {
         "ok": True,
         "message": "Bot paused",
@@ -29,6 +32,7 @@ def pause_bot():
 @router.post("/bot/resume")
 def resume_bot():
     bot_state.set_trading(True)
+    send_telegram("▶️ <b>Trading Bot Resumed</b>")
     return {
         "ok": True,
         "message": "Bot resumed",
