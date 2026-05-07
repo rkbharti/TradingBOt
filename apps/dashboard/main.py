@@ -776,6 +776,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
 # Core state ingestion used by webhook
 def update_bot_state_v2(bot_instance, analysis_data):
+    global bot_paused
+
     global bot_state, pnl_tracker
 
     def get_val(obj, key, default=0.0):
@@ -1019,6 +1021,7 @@ def update_bot_state_v2(bot_instance, analysis_data):
             "chart_data": get_val(bot_instance, "chart_data", [])[-300:],
             "signals": formatted_signals,
             "trade_results": formatted_results,
+            "trading": not bot_paused,
         })
     except Exception as e:
         print(f"⚠️ Error building bot_state: {e}")
