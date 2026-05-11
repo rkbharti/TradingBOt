@@ -1,10 +1,11 @@
-import sys, pathlib
+import sys
+import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
+
 import MetaTrader5 as mt5
 import json
 from datetime import datetime
 import pytz
-import time
 from config.settings import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
 
 
@@ -14,7 +15,7 @@ class MT5Connection:
     All trading, lifecycle, and sync logic must go through this class.
     """
 
-    def __init__(self, config_path="config.json"):
+    def __init__(self, config_path: str = "config.json"):
         self.config_path = config_path
         self.config = self._load_config()
 
@@ -84,6 +85,22 @@ class MT5Connection:
     def get_account_info(self):
         return mt5.account_info()
 
+    def get_symbol_info(self, symbol: str = None):
+        """
+        Wrapper used by OrderExecutor for spread checks.
+
+        Returns MetaTrader5.symbol_info(symbol) result or None on error.
+        """
+        try:
+            symbol = symbol or self.symbol
+            info = mt5.symbol_info(symbol)
+            if info is None:
+                print(f"❌ symbol_info() returned None for {symbol}")
+            return info
+        except Exception as e:
+            print(f"❌ get_symbol_info error for {symbol}: {e}")
+            return None
+
     def get_current_price(self):
         tick = mt5.symbol_info_tick(self.symbol)
         if not tick:
@@ -94,26 +111,25 @@ class MT5Connection:
             "spread": tick.ask - tick.bid,
         }
 
-    def get_historical_data(self, bars=300):
+    def get_historical_data(self, bars: int = 300):
         return mt5.copy_rates_from_pos(
             self.symbol, self.timeframe, 0, bars
         )
 
     # -------------------------------------------------
-    # 🔥 CRITICAL LIFECYCLE WRAPPERS (FIXED)
+    # 🔥 CRITICAL LIFECYCLE WRAPPERS
     # -------------------------------------------------
 
     def positions_get(self, symbol: str = None, ticket: int = None):
         """
-        REQUIRED by sync_closed_positions().
-        This is the missing piece that caused your runtime error.
+        REQUIRED by sync_closed_positions() and OrderExecutor.sync_open_positions().
         """
         try:
             return mt5.positions_get(symbol=symbol, ticket=ticket)
         except Exception as e:
             print(f"❌ positions_get error: {e}")
             return None
-        
+
     def get_open_positions(self):
         """
         High-level helper used by main.py and dashboard.
@@ -126,22 +142,23 @@ class MT5Connection:
 
             result = []
             for pos in positions:
-                result.append({
-                    "ticket": pos.ticket,
-                    "symbol": pos.symbol,
-                    "type": "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL",
-                    "volume": pos.volume,
-                    "open_price": pos.price_open,
-                    "sl": pos.sl,
-                    "tp": pos.tp,
-                })
+                result.append(
+                    {
+                        "ticket": pos.ticket,
+                        "symbol": pos.symbol,
+                        "type": "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL",
+                        "volume": pos.volume,
+                        "open_price": pos.price_open,
+                        "sl": pos.sl,
+                        "tp": pos.tp,
+                    }
+                )
 
             return result
 
         except Exception as e:
             print(f"❌ get_open_positions error: {e}")
             return []
-
 
     def history_deals_get(self, ticket: int = None, from_date=None, to_date=None):
         """
@@ -162,6 +179,7 @@ class MT5Connection:
     # -------------------------------------------------
     # ORDER EXECUTION
     # -------------------------------------------------
+
     def place_order(self, signal, lot_size, stop_loss, take_profit):
         symbol = self.symbol
         symbol_info = mt5.symbol_info(symbol)
@@ -244,42 +262,50 @@ class MT5Connection:
         }
 
         result = mt5.order_send(request)
-        return result and result.retcode == mt5.TRADE_RETCODE_DONE
-    
+        return bool(result and result.retcode == mt5.TRADE_RETCODE_DONE)
+
     def modify_position(self, ticket, new_sl=None, new_tp=None):
         """Modify existing position's SL/TP"""
         position = mt5.positions_get(ticket=ticket)
         if not position:
             return False
-        
+
         position = position[0]
-        
+
         request = {
             "action": mt5.TRADE_ACTION_SLTP,
             "position": ticket,
-            "sl": new_sl if new_sl else position.sl,
-            "tp": new_tp if new_tp else position.tp,
+            "sl": new_sl if new_sl is not None else position.sl,
+            "tp": new_tp if new_tp is not None else position.tp,
         }
-        
+
         result = mt5.order_send(request)
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             print(f"❌ Modify failed: {result.comment}")
             return False
-        
+
         return True
-    
-    def close_position_partial(self, ticket, volume_to_close, comment="Partial Close"):
+
+    def close_position_partial(self, ticket, volume_to_close, comment: str = "Partial Close"):
         """Close a specific volume of an open position"""
-        if not mt5.initialize(): return {'success': False, 'message': "No connection"}
-        
+        if not mt5.initialize():
+            return {"success": False, "message": "No connection"}
+
         pos = mt5.positions_get(ticket=ticket)
-        if not pos: return {'success': False, 'message': "Position not found"}
+        if not pos:
+            return {"success": False, "message": "Position not found"}
         pos = pos[0]
-        
+
         # Action is opposite of position type
-        action_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
-        price = mt5.symbol_info_tick(pos.symbol).bid if action_type == mt5.ORDER_TYPE_SELL else mt5.symbol_info_tick(pos.symbol).ask
-        
+        action_type = (
+            mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        )
+        tick = mt5.symbol_info_tick(pos.symbol)
+        if not tick:
+            return {"success": False, "message": "No tick data"}
+
+        price = tick.bid if action_type == mt5.ORDER_TYPE_SELL else tick.ask
+
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": pos.symbol,
@@ -291,12 +317,11 @@ class MT5Connection:
             "magic": pos.magic,
             "comment": comment,
         }
-        
+
         res = mt5.order_send(request)
         if res.retcode != mt5.TRADE_RETCODE_DONE:
             print(f"❌ Partial close failed: {res.comment}")
-            return {'success': False}
-            
-        print(f"✅ Closed {volume_to_close} lots")
-        return {'success': True, 'remaining_volume': pos.volume - volume_to_close}
+            return {"success": False}
 
+        print(f"✅ Closed {volume_to_close} lots")
+        return {"success": True, "remaining_volume": pos.volume - volume_to_close}
