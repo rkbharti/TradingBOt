@@ -528,180 +528,123 @@ class SignalEngine:
         m15_df: pd.DataFrame,
     ) -> Tuple[Dict[str, Any], Optional[StructureBreak]]:
 
-
-        # ── STEP 1: Map sweep → M5 ──────────────────────────────────────────
-        sweep_time   = self._get_candle_time(m15_df, sweep.candle_index)
+        sweep_time = self._get_candle_time(m15_df, sweep.candle_index)
         m5_sweep_idx = self._find_bar_at_or_after(m5_df, sweep_time)
 
         if m5_sweep_idx is None:
             return {"passed": False, "reason": "SWEEP_MAPPING_FAILED"}, None
 
-        # 200 bars (~16.5 hrs) post-sweep scan window
         end_idx = min(len(m5_df), m5_sweep_idx + 200)
-
-        # ── STEP 2: Find pivot level — mirrors Pine Script's up.p / dn.p ────
-        # Pine Script stores ALL confirmed pivots in a persistent var array.
-        # We replicate this by scanning a wider lookback window WITHOUT
-        # requiring IDM confirmation (Pine Script never requires it here).
-        lookback = max(50, self.config.internal_swing_window * 6)
-        start    = max(0, m5_sweep_idx - lookback)
-
-        if (m5_sweep_idx - start) < 3:
-            return {"passed": False, "reason": "INSUFFICIENT_STRUCTURE"}, None
-
-        pre_sweep_slice = m5_df.iloc[start:m5_sweep_idx]
-
-        if pre_sweep_slice.empty:
-            return {"passed": False, "reason": "INSUFFICIENT_STRUCTURE"}, None
-
-        # ── STEP 3: Select CHoCH reference level (matches Pine up.p.first()) 
-        # Pine Script: up.p.first() = most recently confirmed internal pivot HIGH
-        # We find all raw pivot highs (no IDM filter) and take the most recent.
         w = self.config.internal_swing_window
 
+        if len(m5_df) < (w * 2 + 1):
+            return {"passed": False, "reason": "INSUFFICIENT_STRUCTURE"}, None
+
+        raw_highs, raw_lows = self._find_m5_choch_pivots(m5_df, w)
+
+        up_p, up_n = [], []
+        dn_p, dn_n = [], []
+
+        for pivot_idx in raw_highs:
+            if pivot_idx < m5_sweep_idx:
+                up_p.insert(0, float(m5_df["high"].iat[pivot_idx]))
+                up_n.insert(0, pivot_idx)
+
+        for pivot_idx in raw_lows:
+            if pivot_idx < m5_sweep_idx:
+                dn_p.insert(0, float(m5_df["low"].iat[pivot_idx]))
+                dn_n.insert(0, pivot_idx)
+
         if sweep.direction == "BULLISH":
-            # Scan for raw pivot highs in pre-sweep window
-            choch_idx   = None
-            choch_level = None
+            if not up_p or len(dn_p) < 2:
+                return {"passed": False, "reason": "INSUFFICIENT_STRUCTURE"}, None
+        else:
+            if not dn_p or len(up_p) < 2:
+                return {"passed": False, "reason": "INSUFFICIENT_STRUCTURE"}, None
 
-            # Walk backwards from sweep to find the most recent pivot high
-            # (mirrors up.p.first() — the newest entry in Pine's array)
-            for k in range(len(pre_sweep_slice) - w - 1, w - 1, -1):
-                is_pivot_high = True
-                center_high   = float(pre_sweep_slice["high"].iat[k])
-                for j in range(k - w, k + w + 1):
-                    if j == k:
-                        continue
-                    if j < 0 or j >= len(pre_sweep_slice):
-                        is_pivot_high = False
-                        break
-                    if float(pre_sweep_slice["high"].iat[j]) >= center_high:
-                        is_pivot_high = False
-                        break
-                if is_pivot_high:
-                    choch_idx   = start + k
-                    choch_level = center_high
-                    self._prev_highs.append(choch_level)
-                    break  # Most recent pivot high found — stop (matches up.p.first())
-
-            # Fallback: no pivot found → use raw highest high in window
-            if choch_level is None:
-                choch_idx   = start + int(pre_sweep_slice["high"].values.argmax())
-                choch_level = float(pre_sweep_slice["high"].max())
-
-        else:  # BEARISH
-            # Walk backwards for most recent pivot LOW (mirrors dn.p.first())
-            choch_idx   = None
-            choch_level = None
-
-            for k in range(len(pre_sweep_slice) - w - 1, w - 1, -1):
-                is_pivot_low = True
-                center_low   = float(pre_sweep_slice["low"].iat[k])
-                for j in range(k - w, k + w + 1):
-                    if j == k:
-                        continue
-                    if j < 0 or j >= len(pre_sweep_slice):
-                        is_pivot_low = False
-                        break
-                    if float(pre_sweep_slice["low"].iat[j]) <= center_low:
-                        is_pivot_low = False
-                        break
-                if is_pivot_low:
-                    choch_idx   = start + k
-                    choch_level = center_low
-                    self._prev_lows.append(choch_level)
-                    break  # Most recent pivot low — stop
-
-            # Fallback: use raw lowest low in window
-            if choch_level is None:
-                choch_idx   = start + int(pre_sweep_slice["low"].values.argmin())
-                choch_level = float(pre_sweep_slice["low"].min())
-
-        # ✅ FIX #6 — ATR-BASED TOLERANCE FOR CHOCH DETECTION
-        # Pine Script's ta.crossover(close, level) has implicit tolerance.
-        # We replicate this by adding a small ATR-based buffer to handle market noise.
-        atr_at_m5_sweep = self._calc_atr(m5_df, m5_sweep_idx, self.config.atr_period)
-        # print(f"DEBUG: ATR at M5 sweep = {atr_at_m5_sweep:.6f}")
-        # print(f"DEBUG: Tolerance = {atr_at_m5_sweep * 0.02:.6f}")
-        choch_tolerance = atr_at_m5_sweep * self.config.sweep_atr_tolerance  # 2% of ATR
-        choch_tolerance = max(choch_tolerance, 0.001)  # Minimum noise buffer: 0.001 pips
-
-        # ── STEP 4: Scan for BODY CLOSE break (ta.crossover in Pine Script) ─
-        # Pine Script: 
-        #   if ta.crossover(b.c, up.p.first()) → close crosses above level
-        #   if itrend <= 0 → CHoCH (was bearish/neutral, now bullish)
-        #   else → BOS (was already bullish, this is continuation)
-        # 
-        # Then check CHoCH+ condition:
-        #   if dn.l.first() < dn.l.get(1) → CHoCH+ (lower low confirms reversal)
-        #   else → plain CHoCH
         for i in range(m5_sweep_idx + 1, end_idx):
+            close_now = float(m5_df["close"].iat[i])
+            close_prev = float(m5_df["close"].iat[i - 1])
 
-            close_price = float(m5_df["close"].iat[i])
+            for pivot_idx in raw_highs:
+                if m5_sweep_idx <= pivot_idx < i:
+                    px = float(m5_df["high"].iat[pivot_idx])
+                    if not up_n or pivot_idx > up_n[0]:
+                        up_p.insert(0, px)
+                        up_n.insert(0, pivot_idx)
+
+            for pivot_idx in raw_lows:
+                if m5_sweep_idx <= pivot_idx < i:
+                    px = float(m5_df["low"].iat[pivot_idx])
+                    if not dn_n or pivot_idx > dn_n[0]:
+                        dn_p.insert(0, px)
+                        dn_n.insert(0, pivot_idx)
 
             if sweep.direction == "BULLISH":
-                # ✅ PINE SCRIPT: if ta.crossover(b.c, up.p.first())
-                # Bullish CHoCH: close crosses ABOVE level (with tolerance)
-                if close_price > (choch_level - choch_tolerance):
-                    
-                    # ✅ PINE SCRIPT: itrend state machine (BOS vs CHoCH distinction)
-                    # Get the structure break label (BOS, CHOCH, or CHOCH+)
+                if not up_p or len(dn_p) < 2:
+                    continue
+
+                level = up_p[0]
+                crossed = close_prev <= level and close_now > level
+
+                if crossed:
                     choch_label = self._classify_structure_break("BULLISH")
-                    
-                    # ✅ PINE SCRIPT: CHoCH+ detection via pivot comparison
-                    # if dn.l.first() < dn.l.get(1) → CHoCH+ (lower low confirms reversal)
-                    # This checks if the most recent swing low is lower than the previous one
-                    if choch_label == "CHOCH" and len(self._prev_lows) >= 2:
-                        if self._prev_lows[-1] < self._prev_lows[-2]:
-                            choch_label = "CHOCH+"
-                    
+
+                    if choch_label == "CHOCH" and dn_p[0] > dn_p[1]:
+                        choch_label = "CHOCH+"
+
                     sb = StructureBreak(
-                        direction   = "BULLISH",
-                        choch_label = choch_label,
-                        level       = choch_level,
-                        candle_index= i,
-                        close_price = close_price,
+                        direction="BULLISH",
+                        choch_label=choch_label,
+                        level=level,
+                        candle_index=i,
+                        close_price=close_now,
                     )
+
+                    up_p.clear()
+                    up_n.clear()
+
                     return {
-                        "passed"       : True,
-                        "reason"       : f"VALID_BULLISH_{choch_label}",
-                        "level"        : self._r(choch_level),
-                        "close_price"  : self._r(close_price),
+                        "passed": True,
+                        "reason": f"VALID_BULLISH_{choch_label}",
+                        "level": self._r(level),
+                        "close_price": self._r(close_now),
                         "m5_candle_index": i,
-                        "choch_label"  : choch_label,
+                        "choch_label": choch_label,
                     }, sb
 
-            else:  # BEARISH
-                # ✅ PINE SCRIPT: if ta.crossunder(b.c, dn.p.first())
-                # Bearish CHoCH: close crosses BELOW level (with tolerance)
-                if close_price < (choch_level + choch_tolerance):
-                    
-                    # ✅ PINE SCRIPT: itrend state machine
+            else:
+                if not dn_p or len(up_p) < 2:
+                    continue
+
+                level = dn_p[0]
+                crossed = close_prev >= level and close_now < level
+
+                if crossed:
                     choch_label = self._classify_structure_break("BEARISH")
-                    
-                    # ✅ PINE SCRIPT: CHoCH+ detection
-                    # if up.l.first() > up.l.get(1) → CHoCH+ (higher low confirms reversal)
-                    if choch_label == "CHOCH" and len(self._prev_highs) >= 2:
-                        if self._prev_highs[-1] > self._prev_highs[-2]:
-                            choch_label = "CHOCH+"
-                    
+
+                    if choch_label == "CHOCH" and up_p[0] < up_p[1]:
+                        choch_label = "CHOCH+"
+
                     sb = StructureBreak(
-                        direction   = "BEARISH",
-                        choch_label = choch_label,
-                        level       = choch_level,
-                        candle_index= i,
-                        close_price = close_price,
+                        direction="BEARISH",
+                        choch_label=choch_label,
+                        level=level,
+                        candle_index=i,
+                        close_price=close_now,
                     )
+
+                    dn_p.clear()
+                    dn_n.clear()
+
                     return {
-                        "passed"       : True,
-                        "reason"       : f"VALID_BEARISH_{choch_label}",
-                        "level"        : self._r(choch_level),
-                        "close_price"  : self._r(close_price),
+                        "passed": True,
+                        "reason": f"VALID_BEARISH_{choch_label}",
+                        "level": self._r(level),
+                        "close_price": self._r(close_now),
                         "m5_candle_index": i,
-                        "choch_label"  : choch_label,
+                        "choch_label": choch_label,
                     }, sb
-                    print(f"DEBUG: Scanned {end_idx - m5_sweep_idx} bars post-sweep, found NO close break")
-                    print(f"DEBUG: choch_level = {choch_level}, tolerance = {choch_tolerance}")
 
         return {"passed": False, "reason": "NO_CHOCH"}, None
 
@@ -1260,29 +1203,10 @@ class SignalEngine:
         window: int,
         use_m5_pivot_detector: bool = False,
     ) -> Tuple[List[int], List[int]]:
-
         if use_m5_pivot_detector:
-            raw_highs, raw_lows = self._find_m5_choch_pivots(df, window)
-        else:
-            raw_highs, raw_lows = self._find_pivots_debug(df, window)
+            return self._find_m5_choch_pivots(df, window)
 
-        confirmed_highs: List[int] = []
-        confirmed_lows:  List[int] = []
-
-        last_raw_high = raw_highs[-1] if raw_highs else None
-        last_raw_low  = raw_lows[-1]  if raw_lows  else None
-
-        for sh_idx in raw_highs:
-            following_lows = [sl for sl in raw_lows if sl > sh_idx]
-            if following_lows or sh_idx == last_raw_high:
-                confirmed_highs.append(sh_idx)
-
-        for sl_idx in raw_lows:
-            following_highs = [sh for sh in raw_highs if sh > sl_idx]
-            if following_highs or sl_idx == last_raw_low:
-                confirmed_lows.append(sl_idx)
-
-        return confirmed_highs, confirmed_lows
+        return self._find_pivots_debug(df, window)
 
     def is_displacement_after_poi(self, poi: POI, df: pd.DataFrame, direction: str) -> bool:
 
