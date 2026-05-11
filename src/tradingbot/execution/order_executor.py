@@ -152,7 +152,10 @@ class OrderExecutor:
         """
         self.mt5_client = mt5_client
         self.challenge_policy = challenge_policy
-        self.position_sizer = position_sizer or PositionSizer()
+        if position_sizer is None:
+            raise ValueError("OrderExecutor requires a configured PositionSizer instance")
+
+        self.position_sizer = position_sizer
         self.dry_run = dry_run
 
         logger.info(
@@ -179,13 +182,13 @@ class OrderExecutor:
     ) -> ExecutionResult:
         """
         Execute a trading signal through all policy and validation checks.
-        
+
         Steps:
         1. Check ChallengePolicy.check_can_trade()
         2. Validate current spread < threshold
-        3. Recalculate SL using structural levels
-        4. Recalculate TP using liquidity levels
-        5. Validate RR >= 2.5
+        3. Resolve SL (prefer engine SL, fallback to structural)
+        4. Resolve TP (prefer engine TP, fallback to liquidity)
+        5. Validate RR >= configured minimum
         6. Calculate optimal lot size
         7. Build MT5 order request
         8. Send to MT5 (or log in dry-run)
@@ -224,19 +227,18 @@ class OrderExecutor:
             # =========================================================================
             # STEP 1.5: SPREAD CHECK (CRITICAL FOR XAUUSD)
             # =========================================================================
-            
+
             try:
-                # Fetch live spread from MT5 client
                 # Assumes mt5_client has a get_symbol_info or similar wrapper
                 symbol_info = self.mt5_client.get_symbol_info(self.mt5_client.symbol)
-                
+
                 if symbol_info is None:
                     raise ValueError(f"Could not fetch info for {self.mt5_client.symbol}")
 
                 # MT5 spread is in points. For Gold (XAUUSD), 10 points = 1 pip ($0.10)
                 current_spread_points = symbol_info.spread
                 current_spread_pips = current_spread_points / 10.0
-                
+
                 if current_spread_pips > max_spread_pips:
                     reason = f"SPREAD_TOO_HIGH: {current_spread_pips} pips (Max: {max_spread_pips})"
                     logger.warning(reason)
@@ -245,7 +247,7 @@ class OrderExecutor:
                         rejection_reason=reason,
                         timestamp=timestamp,
                     )
-                
+
                 logger.info(f"✓ Spread check passed: {current_spread_pips} pips")
 
             except Exception as e:
@@ -259,20 +261,38 @@ class OrderExecutor:
                     )
 
             # =========================================================================
-            # STEP 2: RECALCULATE SL (STRUCTURAL)
+            # STEP 2: RESOLVE FINAL SL (PREFER ENGINE, FALLBACK TO STRUCTURAL)
             # =========================================================================
 
+            final_sl: Optional[float] = None
+
             try:
-                structural_sl = self.position_sizer.get_structural_sl(
-                    direction=signal.direction,
-                    poi_zone=signal.poi_zone,
-                    buffer_pips=2.0,
-                )
-                logger.info(f"Structural SL recalculated: {signal.sl_price:.2f} → {structural_sl:.2f}")
-                final_sl = structural_sl
+                # 2a) Prefer SL from signal engine if present and positive
+                if signal.sl_price is not None and signal.sl_price > 0:
+                    final_sl = float(signal.sl_price)
+                    logger.info(f"Using engine SL: {final_sl:.2f}")
+                else:
+                    logger.info("Signal SL missing/invalid, falling back to structural SL")
+
+                # 2b) Fallback: structural SL from POI zone (only if needed)
+                if final_sl is None:
+                    poi_zone = getattr(signal, "poi_zone", None)
+                    if poi_zone is None:
+                        raise ValueError("No poi_zone provided for structural SL fallback")
+
+                    structural_sl = self.position_sizer.get_structural_sl(
+                        direction=signal.direction,
+                        poi_zone=poi_zone,
+                        buffer_pips=2.0,
+                    )
+                    logger.info(f"Structural SL recalculated from POI: {structural_sl:.2f}")
+                    final_sl = structural_sl
+
+                if final_sl is None or final_sl <= 0:
+                    raise ValueError(f"Final SL invalid: {final_sl}")
 
             except ValueError as e:
-                logger.error(f"SL recalculation failed: {str(e)}")
+                logger.error(f"SL resolution failed: {str(e)}")
                 return ExecutionResult(
                     success=False,
                     rejection_reason=f"SL calculation error: {str(e)}",
@@ -280,19 +300,37 @@ class OrderExecutor:
                 )
 
             # =========================================================================
-            # STEP 3: RECALCULATE TP (LIQUIDITY)
+            # STEP 3: RESOLVE FINAL TP (PREFER ENGINE, FALLBACK TO LIQUIDITY)
             # =========================================================================
 
+            final_tp: Optional[float] = None
+
             try:
-                liquidity_tp = self.position_sizer.get_liquidity_tp(
-                    direction=signal.direction,
-                    liquidity_levels=signal.liquidity_levels,
-                )
-                logger.info(f"Liquidity TP recalculated: {signal.tp_price:.2f} → {liquidity_tp:.2f}")
-                final_tp = liquidity_tp
+                # 3a) Prefer TP from signal engine if present and positive
+                if signal.tp_price is not None and signal.tp_price > 0:
+                    final_tp = float(signal.tp_price)
+                    logger.info(f"Using engine TP: {final_tp:.2f}")
+                else:
+                    logger.info("Signal TP missing/invalid, falling back to liquidity TP")
+
+                # 3b) Fallback: liquidity-based TP (only if needed and levels exist)
+                if final_tp is None:
+                    liquidity_levels = getattr(signal, "liquidity_levels", None)
+                    if not liquidity_levels:
+                        raise ValueError("No liquidity_levels provided for TP fallback")
+
+                    liquidity_tp = self.position_sizer.get_liquidity_tp(
+                        direction=signal.direction,
+                        liquidity_levels=liquidity_levels,
+                    )
+                    logger.info(f"Liquidity TP recalculated: {liquidity_tp:.2f}")
+                    final_tp = liquidity_tp
+
+                if final_tp is None or final_tp <= 0:
+                    raise ValueError(f"Final TP invalid: {final_tp}")
 
             except ValueError as e:
-                logger.error(f"TP recalculation failed: {str(e)}")
+                logger.error(f"TP resolution failed: {str(e)}")
                 return ExecutionResult(
                     success=False,
                     rejection_reason=f"TP calculation error: {str(e)}",
@@ -304,11 +342,14 @@ class OrderExecutor:
             # =========================================================================
 
             try:
+                # Use PositionSizer's configured minimum RR
+                min_rr_required = getattr(self.position_sizer, "min_rr", 2.5)
+
                 rr_validation: RiskRewardValidation = self.position_sizer.validate_rr(
                     entry_price=signal.entry_price,
                     sl_price=final_sl,
                     tp_price=final_tp,
-                    min_rr=2.5,
+                    min_rr=min_rr_required,
                 )
 
                 if not rr_validation.is_valid:
@@ -323,7 +364,10 @@ class OrderExecutor:
                         timestamp=timestamp,
                     )
 
-                logger.info(f"✓ RR validation passed: {rr_validation.actual_rr:.2f}x")
+                logger.info(
+                    f"✓ RR validation passed: {rr_validation.actual_rr:.2f}x "
+                    f"(min {rr_validation.min_rr_required}x)"
+                )
 
             except ValueError as e:
                 logger.error(f"RR validation error: {str(e)}")
@@ -431,7 +475,6 @@ class OrderExecutor:
                 rejection_reason=f"Execution error: {str(e)}",
                 timestamp=timestamp,
             )
-
     # =========================================================================
     # HELPER: BUILD ORDER REQUEST
     # =========================================================================

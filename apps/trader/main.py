@@ -46,8 +46,16 @@ from tradingbot.strategy.smc.signal_engine import SignalEngine, SignalEngineConf
 from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ENABLE_TELEGRAM
 from apps.trader.vps_reporter import ping_health, post_signal, post_trade_result
 
+from tradingbot.risk.position_sizing import (
+    PositionSizer,
+    MIN_LOT,
+    MAX_LOT,
+    DEFAULT_CONTRACT_SIZE,
+    DEFAULT_PIP_VALUE,
+)
+
 # ── Globals ───────────────────────────────────────────────────────────────────
-DRY_RUN = True  # Set to False for live trading
+DRY_RUN = False  # Set to False for live trading
 BOT_MAGIC_NUMBER = 20250101
 
 obs_logger = ObservationLogger()
@@ -241,7 +249,8 @@ class XAUUSDTradingBot:
         from tradingbot.infra.news.news_filter import NewsFilter
         from config.settings import FINNHUB_API_KEY
 
-        self.signal_engine = SignalEngine(SignalEngineConfig())
+        self.signal_engine_config = SignalEngineConfig()
+        self.signal_engine = SignalEngine(self.signal_engine_config)
         self.signal_engine.news_filter = NewsFilter(api_key=FINNHUB_API_KEY)
 
         # ── Phase 4: Risk + Audit ─────────────────────────────────────────────
@@ -253,31 +262,42 @@ class XAUUSDTradingBot:
             min_trade_gap_minutes=90,
             risk_per_trade_pct=0.25,
         )
-        self.order_executor: Optional[OrderExecutor] = None  # created after MT5 init
+
+        self.position_sizer = PositionSizer(
+            min_lot=MIN_LOT,
+            max_lot=MAX_LOT,
+            contract_size=DEFAULT_CONTRACT_SIZE,
+            pip_value=DEFAULT_PIP_VALUE,
+            min_rr=self.signal_engine.config.rr_min,
+        )
+
+        self.order_executor: Optional[OrderExecutor] = None
+
         self.audit_logger = AuditLogger(
             log_path="logs/decisions/audit.jsonl",
             symbol="XAUUSD",
             timeframe="M5",
         )
-        self.magic_number            = BOT_MAGIC_NUMBER  # ← wired here, used in order requests
-        self._peak_balance: float    = 0.0
-        self._daily_pnl_pct: float   = 0.0
-        self._trades_today: int      = 0
-        self._consecutive_losses: int = 0
+
+        self.magic_number              = BOT_MAGIC_NUMBER
+        self._peak_balance: float      = 0.0
+        self._daily_pnl_pct: float     = 0.0
+        self._trades_today: int        = 0
+        self._consecutive_losses: int  = 0
         self._last_trade_time: Optional[datetime] = None
         self._session_date: Optional[date] = None
 
         # ── State ─────────────────────────────────────────────────────────────
-        self.running                  = False
-        self.trade_log: list          = []
-        self.open_positions: list     = []
-        self.manual_positions: list   = []
-        self.max_positions            = 3
-        self.max_lot_size             = 2.0
-        self.risk_per_trade_percent   = 0.5
-        self.current_session          = "UNKNOWN"
-        self.dry_run                  = DRY_RUN
-        self.waiting_for_confirmation = False
+        self.running                   = False
+        self.trade_log: list           = []
+        self.open_positions: list      = []
+        self.manual_positions: list    = []
+        self.max_positions             = 3
+        self.max_lot_size              = 2.0
+        self.risk_per_trade_percent    = 0.5
+        self.current_session           = "UNKNOWN"
+        self.dry_run                   = DRY_RUN
+        self.waiting_for_confirmation  = False
 
     # ── MT5 wrappers ──────────────────────────────────────────────────────────
     MT5_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
@@ -426,6 +446,7 @@ class XAUUSDTradingBot:
         # Wire OrderExecutor now that MT5 client is ready
         self.order_executor = OrderExecutor(
             mt5_client=self.mt5,
+            position_sizer=self.position_sizer,
             challenge_policy=self.challenge_policy,
             dry_run=self.dry_run,
         )
@@ -1058,27 +1079,56 @@ class XAUUSDTradingBot:
 
         policy_snap = self._build_policy_state_snapshot(account_balance)
 
-        # Build a minimal SignalResult-compatible dict for the executor
-        # (OrderExecutor.execute_signal expects a SignalResult with poi_zone /
-        #  liquidity_levels; when those are unavailable we pass safe defaults)
+        # Build executor signal from engine result.
+        # IMPORTANT:
+        # - Preserve None for missing SL/TP instead of coercing to 0.0
+        # - Use engine-computed SL/TP as primary truth
+        # - Only provide fallback POI/liquidity payloads when they are genuinely available
         try:
+            action = result.action or "ENTER"
+            direction = result.direction or "BULLISH"
+
+            # Map signal-engine action to executor action model
+            if action == "ENTER":
+                action = "BUY" if direction == "BULLISH" else "SELL"
+
+            entry_price = float(result.entry_price) if result.entry_price is not None else 0.0
+            sl_price = float(result.sl_price) if result.sl_price is not None else None
+            tp_price = float(result.tp_price) if result.tp_price is not None else None
+
+            # Preserve real metadata if present; do not fabricate liquidity from zero values
+            poi_zone = getattr(result, "poi_zone", None)
+            liquidity_levels = getattr(result, "liquidity_levels", None)
+
+            # Executor still expects these fields, so provide structural fallback only when needed.
+            # These fallback values are only a compatibility bridge and should not override engine SL/TP.
+            if poi_zone is None:
+                poi_zone = {
+                    "top": entry_price + 5.0,
+                    "bottom": entry_price,
+                    "mt": entry_price + 2.5,
+                }
+
+            if liquidity_levels is None:
+                liquidity_levels = {}
+
+                # Only populate levels from known valid prices
+                if tp_price is not None and tp_price > 0:
+                    liquidity_levels["pdh"] = tp_price
+                    liquidity_levels["weekly_high"] = tp_price
+
+                if sl_price is not None and sl_price > 0:
+                    liquidity_levels["pdl"] = sl_price
+                    liquidity_levels["weekly_low"] = sl_price
+
             executor_signal = ExecutorSignalResult(
-                action=result.action or "BUY",
-                direction=result.direction or "BULLISH",
-                entry_price=float(result.entry_price or 0),
-                sl_price=float(result.sl_price or 0),
-                tp_price=float(result.tp_price or 0),
-                poi_zone=getattr(result, "poi_zone", None) or {
-                    "top":    float(result.entry_price or 0) + 5,
-                    "bottom": float(result.entry_price or 0),
-                    "mt":     float(result.entry_price or 0) + 2.5,
-                },
-                liquidity_levels=getattr(result, "liquidity_levels", None) or {
-                    "pdh":         float(result.tp_price or 0),
-                    "pdl":         float(result.sl_price or 0),
-                    "weekly_high": float(result.tp_price or 0),
-                    "weekly_low":  float(result.sl_price or 0),
-                },
+                action=action,
+                direction=direction,
+                entry_price=entry_price,
+                sl_price=sl_price,
+                tp_price=tp_price,
+                poi_zone=poi_zone,
+                liquidity_levels=liquidity_levels,
             )
 
             exec_result = self.order_executor.execute_signal(
@@ -1090,9 +1140,11 @@ class XAUUSDTradingBot:
                 consecutive_losses=self._consecutive_losses,
                 last_trade_time=self._last_trade_time,
             )
+
         except Exception as e:
-            print(f"\u274c OrderExecutor error: {e}")
-            import traceback; traceback.print_exc()
+            print(f"❌ OrderExecutor error: {e}")
+            import traceback
+            traceback.print_exc()
             return
 
         # ── Audit log every evaluation ────────────────────────────────────────
