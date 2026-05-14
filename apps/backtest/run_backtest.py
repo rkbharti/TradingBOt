@@ -82,27 +82,29 @@ def run_backtest(df):
     print("=" * 60)
 
     start_idx = 200
+    cfg = engine.config
 
     for i in range(start_idx, len(df_m5)):
         current_time = df_m5.index[i]
         candle = df_m5.iloc[i]
 
-        # ===== TIMEFRAME SLICING =====
-        m5 = df_m5.iloc[max(0, i - 300) : i]
-
         m15_idx = bisect_left(m15_index, current_time)
         h4_idx = bisect_left(h4_index, current_time)
         d1_idx = bisect_left(d1_index, current_time)
 
-        m15 = df_m15.iloc[max(0, m15_idx - 100) : m15_idx]
-        h4 = df_h4.iloc[max(0, h4_idx - 50) : h4_idx]
-        d1 = df_d1.iloc[max(0, d1_idx - 30) : d1_idx]
+        if (
+            i < cfg.min_m5_candles
+            or m15_idx < cfg.min_m15_candles
+            or h4_idx < cfg.min_h4_candles
+            or d1_idx < cfg.min_d1_candles
+        ):
+            continue
 
-        # ===== DATA QUALITY WARNING =====
-        if len(d1) < 20:
-            print(f"⚠️ Weak D1 data: {len(d1)} candles")
+        m5 = df_m5.iloc[max(0, i - 500): i + 1]
+        m15 = df_m15.iloc[max(0, m15_idx - 100): m15_idx]
+        h4 = df_h4.iloc[max(0, h4_idx - 50): h4_idx]
+        d1 = df_d1.iloc[max(0, d1_idx - 30): d1_idx]
 
-        # ===== ENGINE CALL =====
         result = engine.evaluate(
             m5_df=m5,
             m15_df=m15,
@@ -166,7 +168,6 @@ def run_backtest(df):
             tp = active_trade["tp"]
             risk = active_trade["risk"]
 
-            # ===== STOP LOSS =====
             if (direction == "BULLISH" and candle["low"] <= sl) or (
                 direction == "BEARISH" and candle["high"] >= sl
             ):
@@ -189,7 +190,6 @@ def run_backtest(df):
                 active_trade = None
                 continue
 
-            # ===== TAKE PROFIT =====
             if (direction == "BULLISH" and candle["high"] >= tp) or (
                 direction == "BEARISH" and candle["low"] <= tp
             ):
@@ -211,9 +211,6 @@ def run_backtest(df):
                 )
                 active_trade = None
 
-    # =========================================================
-    # 📊 FINAL SUMMARY (after loop)
-    # =========================================================
     summary = logger.finalize_run(capital, INITIAL_CAPITAL, max_dd)
 
     print("\n" + "=" * 60)
@@ -226,14 +223,10 @@ def run_backtest(df):
 
     engine.print_gate_summary()
 
-    # =========================================================
-    # 📁 HTF BIAS DEBUG EXPORT
-    # =========================================================
     out_dir = Path("output")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     bias_path = out_dir / "htf_bias_debug_2023.csv"
-
     rows = getattr(engine, "_bias_debug_rows", [])
 
     if rows:
@@ -251,6 +244,7 @@ def run_backtest(df):
 
 if __name__ == "__main__":
     import argparse
+    import time
 
     parser = argparse.ArgumentParser(description="Run TradingBot backtest")
 
@@ -273,4 +267,6 @@ if __name__ == "__main__":
 
     print(f"✅ Loaded {len(df)} candles")
 
+    t0 = time.time()
     run_backtest(df)
+    print(f"\n⏱ Total runtime: {time.time() - t0:.2f}s")
