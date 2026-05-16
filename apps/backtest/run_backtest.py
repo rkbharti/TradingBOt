@@ -100,7 +100,7 @@ def run_backtest(df):
         ):
             continue
 
-        m5 = df_m5.iloc[max(0, i - 500): i + 1]
+        m5 = df_m5.iloc[max(0, i - 500): i + 50]
         m15 = df_m15.iloc[max(0, m15_idx - 100): m15_idx]
         h4 = df_h4.iloc[max(0, h4_idx - 50): h4_idx]
         d1 = df_d1.iloc[max(0, d1_idx - 30): d1_idx]

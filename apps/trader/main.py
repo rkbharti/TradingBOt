@@ -843,7 +843,7 @@ class XAUUSDTradingBot:
 
         # ── Trailing stop / breakeven management ──────────────────────────────
         if self.open_positions:
-            acct_trail  = self.mt5_get_account()
+            acct_trail = self.mt5_get_account()
             price_trail = self.mt5_get_current_price()
             if price_trail is not None:
                 bid_trail = float(price_trail.get("bid", 0.0)) if isinstance(price_trail, dict) else float(price_trail)
@@ -852,7 +852,7 @@ class XAUUSDTradingBot:
 
         # ── Lockdown gate ─────────────────────────────────────────────────────
         _acct_early = self.mt5_get_account()
-        _bal_early  = float(getattr(_acct_early, "balance", self._peak_balance or 100000.0)) if _acct_early else (self._peak_balance or 100000.0)
+        _bal_early = float(getattr(_acct_early, "balance", self._peak_balance or 100000.0)) if _acct_early else (self._peak_balance or 100000.0)
         lockdown_reason = self.challenge_policy.get_lockdown_reason(
             daily_pnl_pct=self._daily_pnl_pct,
             peak_balance=self._peak_balance or _bal_early,
@@ -860,39 +860,39 @@ class XAUUSDTradingBot:
             consecutive_losses=self._consecutive_losses,
         )
         if lockdown_reason:
-            print(f"\U0001f6d1 LOCKDOWN: {lockdown_reason} — skipping cycle (wait 60s)")
+            print(f"🛑 LOCKDOWN: {lockdown_reason} — skipping cycle (wait 60s)")
             try:
                 self.audit_logger.log_lockdown(
                     lockdown_reason,
                     self._build_policy_state_snapshot(_bal_early),
                 )
             except Exception as _e:
-                print(f"\u26a0\ufe0f Audit lockdown log failed: {_e}")
+                print(f"⚠️ Audit lockdown log failed: {_e}")
             time.sleep(60)
             return
 
         is_active, session_name = is_trading_session()
         session_norm = map_session_for_filter(session_name)
         self.current_session = session_norm
-        print(f"\n\U0001f552 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Session: {self.current_session}")
+        print(f"\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Session: {self.current_session}")
 
-        stored_bias = self.htf_memory.get("htf_bias", "NEUTRAL")
-        print("HTF MEMORY BIAS:", stored_bias)
+        previous_bias = self.htf_memory.get("htf_bias", "NEUTRAL")
+        print("HTF MEMORY BIAS (previous cycle):", previous_bias)
 
         # ── Weekend / market closed ───────────────────────────────────────────
         if not is_active:
-            print(f"\u23f8\ufe0f Market session '{session_norm}' not active — heartbeat only")
-            acct    = self.mt5_get_account()
-            equity  = float(getattr(acct, "equity",  0.0)) if acct else 0.0
+            print(f"⏸️ Market session '{session_norm}' not active — heartbeat only")
+            acct = self.mt5_get_account()
+            equity = float(getattr(acct, "equity", 0.0)) if acct else 0.0
             balance = float(getattr(acct, "balance", 0.0)) if acct else 0.0
 
             log_record = {
-                "time":            datetime.now().isoformat(),
+                "time": datetime.now().isoformat(),
                 "narrative_state": "MARKET_CLOSED",
-                "entry_allowed":   False,
+                "entry_allowed": False,
                 "structure_state": {"current_trend": "MARKET CLOSED"},
-                "bias":            "NEUTRAL",
-                "reason":          f"Market session '{session_norm}' not active",
+                "bias": "NEUTRAL",
+                "reason": f"Market session '{session_norm}' not active",
             }
             self.trade_log.append(log_record)
             self.save_trade_log()
@@ -904,10 +904,10 @@ class XAUUSDTradingBot:
             send_to_dashboard(
                 {
                     "equity": equity, "balance": balance, "last_price": 0,
-                    "open_positions":   self.open_positions,
+                    "open_positions": self.open_positions,
                     "manual_positions": self.manual_positions,
                     "closed_trades": [], "chart_data": [],
-                    "current_session":  session_norm,
+                    "current_session": session_norm,
                 },
                 {
                     "market_structure": {"current_trend": "MARKET CLOSED"},
@@ -920,29 +920,38 @@ class XAUUSDTradingBot:
         market_data, current_price = self.fetch_and_prepare()
         if market_data is None or current_price is None:
             return
-
-        bid    = float(current_price.get("bid", current_price))
-        ask    = float(current_price.get("ask", bid))
+        latest = market_data.iloc[-1]
+        bid = float(current_price.get("bid", current_price))
+        ask = float(current_price.get("ask", bid))
         spread = abs(ask - bid)
 
+        # ── LIVE CANDLE SYNC VERIFICATION ─────────────────────────────────────
+        try:
+            _vc = market_data.iloc[-1]
+            print("\n🕯️  LIVE CANDLE SYNC CHECK")
+            print(f"   Time  : {_vc.get('time', _vc.name)}")
+            print(f"   Open  : {_vc['open']}")
+            print(f"   High  : {_vc['high']}")
+            print(f"   Low   : {_vc['low']}")
+            print(f"   Close : {_vc['close']}")
+            print(f"   Bid   : {bid}  |  Ask: {ask}  |  Spread: {round(spread, 2)}")
+            print(f"   ⚡ Close vs Bid delta: {round(abs(float(_vc['close']) - bid), 2)} pts")
+        except Exception as _ve:
+            print(f"⚠️ Candle sync check failed: {_ve}")
+
         # ── Fetch all timeframe DataFrames ────────────────────────────────────
-        m5_df  = self.mtf.fetch_data("M5")
+        m5_df = self.mtf.fetch_data("M5")
+        latest = m5_df.iloc[-1]
         m15_df = self.mtf.fetch_data("M15")
-        h4_df  = self.mtf.fetch_data("H4")
-        d1_df  = self.mtf.fetch_data("D1")
+        h4_df = self.mtf.fetch_data("H4")
+        d1_df = self.mtf.fetch_data("D1")
 
         if any(df is None or len(df) == 0 for df in [m5_df, m15_df, h4_df, d1_df]):
-            print("\u274c One or more timeframe DataFrames unavailable — skipping cycle")
+            print("❌ One or more timeframe DataFrames unavailable — skipping cycle")
             return
 
-        # ── Manual trade observation ──────────────────────────────────────────
-        self.detect_and_manage_manual_trades({
-            "market_structure": {"current_trend": stored_bias},
-            "current_zone":     "UNKNOWN",
-        })
-
         # ── CANONICAL SIGNAL ENGINE ───────────────────────────────────────────
-        print("\n\U0001f52c Running SMC Signal Engine (8-gate sequential check)...")
+        print("\n🔬 Running SMC Signal Engine (8-gate sequential check)...")
         try:
             result = self.signal_engine.evaluate(
                 m5_df=m5_df,
@@ -952,45 +961,53 @@ class XAUUSDTradingBot:
                 now_utc=datetime.now(timezone.utc),
             )
         except Exception as e:
-            print(f"\u274c SignalEngine error: {e}")
+            print(f"❌ SignalEngine error: {e}")
             import traceback; traceback.print_exc()
             return
 
-        # Update HTF memory from engine-confirmed direction
+        current_bias = result.direction or previous_bias or "NEUTRAL"
+
         if result.direction:
             self.htf_memory.update("htf_bias", result.direction)
-            stored_bias = result.direction
+
+        print("HTF LIVE BIAS (current cycle):", current_bias)
+
+        # ── Manual trade observation ──────────────────────────────────────────
+        self.detect_and_manage_manual_trades({
+            "market_structure": {"current_trend": current_bias},
+            "current_zone": "UNKNOWN",
+        })
 
         # ── Print gate results ────────────────────────────────────────────────
-        print("\n\U0001f4ca SIGNAL ENGINE — GATE RESULTS")
+        print("\n📊 SIGNAL ENGINE — GATE RESULTS")
         print("=" * 58)
         for gate_name, gate_data in result.gates.items():
-            icon   = "\u2705" if gate_data.get("passed") else "\u274c"
+            icon = "✅" if gate_data.get("passed") else "❌"
             reason = gate_data.get("reason", "")
             print(f"  {icon}  {gate_name:<40} {reason}")
         print("=" * 58)
-        print(f"  \U0001f3af ACTION:     {result.action}")
-        print(f"  \U0001f4cc DIRECTION:  {result.direction}")
-        print(f"  \U0001f511 REASON:     {result.reason}")
-        print(f"  \U0001f4af CONFIDENCE: {result.confidence_score}%")
+        print(f"  🎯 ACTION:     {result.action}")
+        print(f"  📌 DIRECTION:  {result.direction}")
+        print(f"  🔑 REASON:     {result.reason}")
+        print(f"  💯 CONFIDENCE: {result.confidence_score}%")
         if result.entry_price:
-            print(f"  \U0001f4b0 ENTRY: {result.entry_price}  SL: {result.sl_price}  TP: {result.tp_price}")
+            print(f"  💰 ENTRY: {result.entry_price}  SL: {result.sl_price}  TP: {result.tp_price}")
         print("=" * 58 + "\n")
 
         # ── Log cycle ─────────────────────────────────────────────────────────
         log_record = {
-            "time":             datetime.now().isoformat(),
-            "narrative_state":  result.reason,
-            "entry_allowed":    result.action == "ENTER",
-            "action":           result.action,
-            "direction":        result.direction,
-            "entry_price":      result.entry_price,
-            "sl_price":         result.sl_price,
-            "tp_price":         result.tp_price,
+            "time": datetime.now().isoformat(),
+            "narrative_state": result.reason,
+            "entry_allowed": result.action == "ENTER",
+            "action": result.action,
+            "direction": result.direction,
+            "entry_price": result.entry_price,
+            "sl_price": result.sl_price,
+            "tp_price": result.tp_price,
             "confidence_score": result.confidence_score,
-            "gates":            result.gates,
-            "bias":             result.direction or "NEUTRAL",
-            "session":          session_norm,
+            "gates": result.gates,
+            "bias": current_bias,
+            "session": session_norm,
         }
         self.trade_log.append(log_record)
         self.save_trade_log()
@@ -1000,12 +1017,11 @@ class XAUUSDTradingBot:
             pass
 
         # ── Dashboard payload ─────────────────────────────────────────────────
-        acct     = self.mt5_get_account()
-        htf_gate = result.gates.get("step_1_htf_bias",       {})
-        dr_gate  = result.gates.get("step_6_dealing_range",  {})
-        rr_gate  = result.gates.get("step_8_risk_reward",    {})
+        acct = self.mt5_get_account()
+        htf_gate = result.gates.get("step_1_htf_bias", {})
+        dr_gate = result.gates.get("step_6_dealing_range", {})
+        rr_gate = result.gates.get("step_8_risk_reward", {})
 
-        # Build chart_objects using existing module (keep dashboard overlay working)
         try:
             chart_objects = build_chart_objects({}, {}, {}, bid)
         except Exception:
@@ -1013,45 +1029,44 @@ class XAUUSDTradingBot:
 
         analysis_snapshot = {
             "market_structure": {
-                "current_trend": result.direction or htf_gate.get("h4_bias", "NEUTRAL"),
-                "d1_bias":       htf_gate.get("d1_bias", "NEUTRAL"),
-                "h4_bias":       htf_gate.get("h4_bias", "NEUTRAL"),
+                "current_trend": current_bias,
+                "d1_bias": htf_gate.get("d1_bias", "NEUTRAL"),
+                "h4_bias": htf_gate.get("h4_bias", "NEUTRAL"),
             },
             "zone_strength": result.confidence_score,
-            "current_zone":  dr_gate.get("zone", "UNKNOWN"),
+            "current_zone": dr_gate.get("zone", "UNKNOWN"),
             "zones": {
-                "dealing_low":  dr_gate.get("dealing_low"),
+                "dealing_low": dr_gate.get("dealing_low"),
                 "dealing_high": dr_gate.get("dealing_high"),
-                "equilibrium":  dr_gate.get("equilibrium"),
+                "equilibrium": dr_gate.get("equilibrium"),
             },
-            "pdh":           float(market_data["high"].max()),
-            "pdl":           float(market_data["low"].min()),
-            "ltf_pois":      {},
+            "pdh": float(market_data["high"].max()),
+            "pdl": float(market_data["low"].min()),
+            "ltf_pois": {},
             "chart_objects": chart_objects,
-            # Full engine output for dashboard drill-down panel
             "signal_engine": {
-                "action":           result.action,
-                "direction":        result.direction,
-                "entry_price":      result.entry_price,
-                "sl_price":         result.sl_price,
-                "tp_price":         result.tp_price,
-                "reason":           result.reason,
+                "action": result.action,
+                "direction": result.direction,
+                "entry_price": result.entry_price,
+                "sl_price": result.sl_price,
+                "tp_price": result.tp_price,
+                "reason": result.reason,
                 "confidence_score": result.confidence_score,
-                "rr":               rr_gate.get("rr"),
-                "gates":            result.gates,
+                "rr": rr_gate.get("rr"),
+                "gates": result.gates,
             },
         }
 
         send_to_dashboard(
             {
-                "equity":           float(getattr(acct, "equity",  0.0)) if acct else 0.0,
-                "balance":          float(getattr(acct, "balance", 0.0)) if acct else 0.0,
-                "last_price":       bid,
-                "open_positions":   self.open_positions,
+                "equity": float(getattr(acct, "equity", 0.0)) if acct else 0.0,
+                "balance": float(getattr(acct, "balance", 0.0)) if acct else 0.0,
+                "last_price": bid,
+                "open_positions": self.open_positions,
                 "manual_positions": self.manual_positions,
-                "closed_trades":    [],
-                "chart_data":       market_data.tail(300).to_dict(orient="records"),
-                "current_session":  self.current_session,
+                "closed_trades": [],
+                "chart_data": market_data.tail(300).to_dict(orient="records"),
+                "current_session": self.current_session,
                 "account": {
                     "login": getattr(acct, "login", None) if acct else None,
                     "server": getattr(acct, "server", None) if acct else None,
@@ -1064,31 +1079,25 @@ class XAUUSDTradingBot:
 
         # ── Execution gate ────────────────────────────────────────────────────
         if len(self.open_positions) > 0:
-            print(f"\u26d4 BLOCKED: POSITION_ALREADY_OPEN ({len(self.open_positions)} open)")
+            print(f"⛔ BLOCKED: POSITION_ALREADY_OPEN ({len(self.open_positions)} open)")
             return
 
         if result.action != "ENTER":
-            print(f"\u26d4 NO_TRADE: {result.reason}")
+            print(f"⛔ NO_TRADE: {result.reason}")
             return
 
         # ── All 8 gates passed — execute via OrderExecutor ───────────────────
-        acct           = self.mt5_get_account()
+        acct = self.mt5_get_account()
         account_balance = float(getattr(acct, "balance", 100000.0)) if acct else 100000.0
         if account_balance > self._peak_balance:
             self._peak_balance = account_balance
 
         policy_snap = self._build_policy_state_snapshot(account_balance)
 
-        # Build executor signal from engine result.
-        # IMPORTANT:
-        # - Preserve None for missing SL/TP instead of coercing to 0.0
-        # - Use engine-computed SL/TP as primary truth
-        # - Only provide fallback POI/liquidity payloads when they are genuinely available
         try:
             action = result.action or "ENTER"
             direction = result.direction or "BULLISH"
 
-            # Map signal-engine action to executor action model
             if action == "ENTER":
                 action = "BUY" if direction == "BULLISH" else "SELL"
 
@@ -1096,12 +1105,9 @@ class XAUUSDTradingBot:
             sl_price = float(result.sl_price) if result.sl_price is not None else None
             tp_price = float(result.tp_price) if result.tp_price is not None else None
 
-            # Preserve real metadata if present; do not fabricate liquidity from zero values
             poi_zone = getattr(result, "poi_zone", None)
             liquidity_levels = getattr(result, "liquidity_levels", None)
 
-            # Executor still expects these fields, so provide structural fallback only when needed.
-            # These fallback values are only a compatibility bridge and should not override engine SL/TP.
             if poi_zone is None:
                 poi_zone = {
                     "top": entry_price + 5.0,
@@ -1112,7 +1118,6 @@ class XAUUSDTradingBot:
             if liquidity_levels is None:
                 liquidity_levels = {}
 
-                # Only populate levels from known valid prices
                 if tp_price is not None and tp_price > 0:
                     liquidity_levels["pdh"] = tp_price
                     liquidity_levels["weekly_high"] = tp_price
@@ -1147,54 +1152,53 @@ class XAUUSDTradingBot:
             traceback.print_exc()
             return
 
-        # ── Audit log every evaluation ────────────────────────────────────────
         try:
             self.audit_logger.log_evaluation(result, exec_result, policy_snap)
         except Exception as e:
-            print(f"\u26a0\ufe0f Audit log failed: {e}")
+            print(f"⚠️ Audit log failed: {e}")
 
         if not exec_result.success:
-            print(f"\u26d4 OrderExecutor rejected: {exec_result.rejection_reason}")
+            print(f"⛔ OrderExecutor rejected: {exec_result.rejection_reason}")
             return
 
-        lot_size   = exec_result.lot_size
-        trade_side = result.action  # "BUY" / "SELL"
-        final_sl   = exec_result.sl_price
-        final_tp   = exec_result.tp_price
+        lot_size = exec_result.lot_size
+        trade_side = action
+        final_sl = exec_result.sl_price
+        final_tp = exec_result.tp_price
 
-        print(f"\U0001f680 ENTERING {trade_side} | Entry={result.entry_price} | SL={final_sl} | TP={final_tp} | RR={exec_result.rr_ratio:.2f}x | Lot={lot_size}")
+        print(f"🚀 ENTERING {trade_side} | Entry={result.entry_price} | SL={final_sl} | TP={final_tp} | RR={exec_result.rr_ratio:.2f}x | Lot={lot_size}")
 
-        ticket = self.mt5_place_order(trade_side, lot_size, final_sl, final_tp)
+        ticket = exec_result.ticket
 
         if ticket:
-            print(f"\u2705 Order placed | Ticket: {ticket}")
+            print(f"✅ Order placed | Ticket: {ticket}")
             self._trades_today += 1
             self._last_trade_time = datetime.now()
 
             position_record = {
-                "ticket":           ticket,
-                "signal":           trade_side,
-                "lot_size":         lot_size,
-                "sl":               final_sl,
-                "tp":               final_tp,
-                "entry_price":      result.entry_price,
-                "rr_ratio":         exec_result.rr_ratio,
-                "risk_amount":      exec_result.risk_amount,
-                "entry_time":       datetime.now().isoformat(),
-                "status":           "OPEN",
-                "source":           "SIGNAL_ENGINE",
+                "ticket": ticket,
+                "signal": trade_side,
+                "lot_size": lot_size,
+                "sl": final_sl,
+                "tp": final_tp,
+                "entry_price": result.entry_price,
+                "rr_ratio": exec_result.rr_ratio,
+                "risk_amount": exec_result.risk_amount,
+                "entry_time": datetime.now().isoformat(),
+                "status": "OPEN",
+                "source": "SIGNAL_ENGINE",
                 "confidence_score": result.confidence_score,
             }
             self.open_positions.append(position_record)
             self.trade_log.append({
                 "timestamp": datetime.now().isoformat(),
-                "action":    "ORDER_PLACED",
+                "action": "ORDER_PLACED",
                 **position_record,
             })
             self.save_trade_log()
 
             send_telegram(
-                f"\U0001f680 <b>{trade_side}</b> entered @ {result.entry_price}\n"
+                f"🚀 <b>{trade_side}</b> entered @ {result.entry_price}\n"
                 f"SL: {final_sl} | TP: {final_tp}\n"
                 f"RR: {exec_result.rr_ratio:.2f}x | Lot: {lot_size} | Risk: ${exec_result.risk_amount:.2f}\n"
                 f"Confidence: {result.confidence_score}% | Session: {self.current_session}"
@@ -1208,63 +1212,127 @@ class XAUUSDTradingBot:
                 gate_summary=str(getattr(result, "gate_summary", "") or ""),
             )
         else:
-            print("\u274c Order placement failed")
+            print("❌ Order placement failed")
 
     # ── Diagnostics ───────────────────────────────────────────────────────────
-    def signal_diagnostics(self) -> None:
+    def signal_diagnostics(self):
         """
-        Runs full 8-gate check against live market data and prints structured output.
-        Replaces the old manual gate-by-gate diagnostic that called legacy modules.
+        Runs full live diagnostic flow against MT5 + closed-candle MTF data.
+
+        Behavior:
+        - Active session + missing TF data -> FAIL
+        - Active session + stale TF data   -> FAIL
+        - Inactive session + stale TF data -> WARN + heartbeat skip
+        - Inactive session + fetched TFs   -> INFO/WARN only, no forced failure
         """
         print("\n" + "=" * 65)
-        print("\U0001f52c  SMC SIGNAL ENGINE — LIVE DIAGNOSTICS")
+        print("🔬  SMC SIGNAL ENGINE — LIVE DIAGNOSTICS")
         print("=" * 65)
+
+        result = None
 
         # GATE 0: MT5
         print("\n[GATE 0] MT5 Connection")
         try:
             if not self.mt5_initialize():
-                print("  \u274c FAIL — MT5 could not initialize"); return
-            print("  \u2705 PASS — MT5 connected")
+                print("  ❌ FAIL — MT5 could not initialize")
+                return None
+            print("  ✅ PASS — MT5 connected")
         except Exception as e:
-            print(f"  \u274c FAIL — {e}"); return
+            print(f"  ❌ FAIL — {e}")
+            return None
 
         # GATE 1: Market data
         print("\n[GATE 1] Market Data Fetch")
         try:
             market_data, current_price = self.fetch_and_prepare()
             if market_data is None or current_price is None:
-                print("  \u274c FAIL — Could not fetch market data"); return
+                print("  ❌ FAIL — Could not fetch market data")
+                return None
             bid = float(current_price.get("bid", current_price))
-            print(f"  \u2705 PASS — {len(market_data)} bars | Price: {bid}")
+            print(f"  ✅ PASS — {len(market_data)} bars | Price: {bid}")
         except Exception as e:
-            print(f"  \u274c FAIL — {e}"); return
+            print(f"  ❌ FAIL — {e}")
+            return None
 
         # GATE 2: Session
         print("\n[GATE 2] Session Check")
+        session_norm = "UNKNOWN"
+        is_active = False
         try:
             is_active, session_name = is_trading_session()
             session_norm = map_session_for_filter(session_name)
             allowed = session_norm in ["ASIAN_KZ", "LONDON_KZ", "NY_KZ"]
-            status  = "\u2705 PASS" if allowed else "\u26a0\ufe0f  WARN (outside killzone)"
+            status = "✅ PASS" if allowed else "⚠️  WARN (outside killzone)"
             print(f"  {status} — Session: {session_norm} | Active: {is_active}")
         except Exception as e:
-            print(f"  \u274c FAIL — {e}")
+            print(f"  ❌ FAIL — {e}")
+            return None
 
         # GATE 3: Multi-TF DataFrames
         print("\n[GATE 3] Multi-Timeframe DataFrames")
-        m5_df = m15_df = h4_df = d1_df = None
         try:
-            m5_df  = self.mtf.fetch_data("M5")
-            m15_df = self.mtf.fetch_data("M15")
-            h4_df  = self.mtf.fetch_data("H4")
-            d1_df  = self.mtf.fetch_data("D1")
-            for name, df in [("M5", m5_df), ("M15", m15_df), ("H4", h4_df), ("D1", d1_df)]:
-                if df is None or len(df) == 0:
-                    print(f"  \u274c FAIL — {name} DataFrame empty or None"); return
-                print(f"  \u2705  {name}: {len(df)} bars")
+            mtf_map = {
+                "M5": self.mtf.fetch_data("M5", debug=False),
+                "M15": self.mtf.fetch_data("M15", debug=False),
+                "H4": self.mtf.fetch_data("H4", debug=False),
+                "D1": self.mtf.fetch_data("D1", debug=False),
+            }
+
+            missing = []
+            stale = []
+            valid = []
+
+            for name, info in mtf_map.items():
+                df = info.get("df")
+                is_stale = info.get("is_stale", False)
+                error = info.get("error")
+                latest_closed_time = info.get("latest_closed_time")
+                latest_visible_time = info.get("latest_visible_time")
+
+                closed_str = str(latest_closed_time)[:16] if latest_closed_time is not None else "N/A"
+                visible_str = str(latest_visible_time)[:16] if latest_visible_time is not None else "N/A"
+
+                if df is None:
+                    missing.append(name)
+                    reason = error or "unknown fetch failure"
+                    print(f"  ❌ {name} | fetch failed | reason={reason}")
+                    continue
+
+                if is_stale:
+                    stale.append(name)
+                    print(f"  ⚠️ {name} | closed={closed_str} | visible={visible_str} | stale")
+                else:
+                    valid.append(name)
+                    print(f"  ✅ {name} | closed={closed_str} | visible={visible_str} | fresh")
+
+            # Inactive session: stale is expected, but true fetch failures still matter
+            if not is_active:
+                if missing:
+                    print(f"  ⚠️ WARN — Missing TFs while market inactive: {', '.join(missing)}")
+                if stale:
+                    print(f"  ⚠️ WARN — Stale TFs while market inactive: {', '.join(stale)}")
+                print("  ⏸️ Heartbeat mode — skipping signal-engine evaluation because session is inactive")
+                print("=" * 65 + "\n")
+                return None
+
+            # Active session: missing or stale is a hard failure
+            if missing:
+                print(f"  ❌ FAIL — Missing TFs during active session: {', '.join(missing)}")
+                return None
+
+            if stale:
+                print(f"  ❌ FAIL — Stale TFs during active session: {', '.join(stale)}")
+                return None
+
+            m5_df = mtf_map["M5"]["df"]
+            m15_df = mtf_map["M15"]["df"]
+            h4_df = mtf_map["H4"]["df"]
+            d1_df = mtf_map["D1"]["df"]
+
         except Exception as e:
-            print(f"  \u274c FAIL — {e}"); return
+            print(f"  ❌ FAIL — {e}")
+            return None
 
         # GATES 4-11: Signal Engine evaluation
         print("\n[GATES 4-11] Signal Engine — 8-Gate Sequential Check")
@@ -1279,7 +1347,7 @@ class XAUUSDTradingBot:
             )
 
             for gate_name, gate_data in result.gates.items():
-                icon   = "  \u2705" if gate_data.get("passed") else "  \u274c"
+                icon = "  ✅" if gate_data.get("passed") else "  ❌"
                 reason = gate_data.get("reason", "")
                 detail = {k: v for k, v in gate_data.items() if k not in ("passed", "reason")}
                 print(f"{icon}  {gate_name:<40} [{reason}]")
@@ -1288,18 +1356,24 @@ class XAUUSDTradingBot:
                         print(f"         {dk}: {dv}")
 
             print("\n" + "-" * 65)
-            print(f"  \U0001f3af DECISION:    {result.action}")
-            print(f"  \U0001f4cc DIRECTION:   {result.direction}")
-            print(f"  \U0001f511 BLOCKED BY:  {result.reason}")
-            print(f"  \U0001f4af CONFIDENCE:  {result.confidence_score}%")
+            print(f"  🎯 DECISION:    {result.action}")
+            print(f"  📌 DIRECTION:   {result.direction}")
+            print(f"  🔑 BLOCKED BY:  {result.reason}")
+            print(f"  💯 CONFIDENCE:  {result.confidence_score}%")
             if result.entry_price:
-                print(f"  \U0001f4b0 ENTRY={result.entry_price}  SL={result.sl_price}  TP={result.tp_price}")
+                print(f"  💰 ENTRY={result.entry_price}  SL={result.sl_price}  TP={result.tp_price}")
+
+            if result.direction:
+                self.htf_memory.update("htf_bias", result.direction)
 
         except Exception as e:
-            print(f"  \u274c FAIL — Signal Engine error: {e}")
-            import traceback; traceback.print_exc()
+            print(f"  ❌ FAIL — Signal Engine error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
         print("=" * 65 + "\n")
+        return result
 
     # ── Persistence ───────────────────────────────────────────────────────────
     def save_trade_log(self, filename: str = "tradelog.json") -> None:
@@ -1336,32 +1410,38 @@ def main():
     bot = XAUUSDTradingBot()
 
     if not bot.initialize():
-        print("\u274c Bot initialization failed — exiting")
+        print("❌ Bot initialization failed — exiting")
         return
 
     bot.load_trade_log()
 
-    print("\U0001f52c Running diagnostics...")
-    bot.signal_diagnostics()
+    print("🔬 Running diagnostics...")
+    diag_result = bot.signal_diagnostics()
+
+    try:
+        if diag_result is not None and getattr(diag_result, "direction", None):
+            bot.htf_memory.update("htf_bias", diag_result.direction)
+            print(f"🧭 Synced HTF memory from diagnostics: {diag_result.direction}")
+    except Exception as e:
+        print(f"⚠️ Failed to sync diagnostic HTF bias into runtime memory: {e}")
 
     bot.running = True
-    print(f"\U0001f680 Bot started (DRY_RUN={bot.dry_run}). Press Ctrl+C to stop.")
+    print(f"🚀 Bot started (DRY_RUN={bot.dry_run}). Press Ctrl+C to stop.")
 
     try:
         while bot.running:
             try:
                 bot.analyze_once()
             except Exception as e:
-                print(f"\u26a0\ufe0f Analysis exception (continuing): {e}")
+                print(f"⚠️ Analysis exception (continuing): {e}")
 
-            # 60-second interval with interrupt-aware sleep
             for _ in range(60):
                 time.sleep(1)
                 if not bot.running:
                     break
 
     except KeyboardInterrupt:
-        print("\n\U0001f6d1 Stopped by user")
+        print("\n🛑 Stopped by user")
     finally:
         bot.running = False
         try:

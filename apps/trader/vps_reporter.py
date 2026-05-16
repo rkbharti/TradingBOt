@@ -21,13 +21,19 @@ def _post(endpoint: str, payload: dict) -> bool:
 
 def ping_health() -> bool:
     try:
-        resp = requests.get(f"{VPS_BASE_URL}/health", timeout=TIMEOUT)
+        resp = requests.get(f"{VPS_BASE_URL}/health", timeout=(2, 8))
         if resp.status_code == 200:
             print(f"✅ VPS health OK: {resp.json()}")
             return True
         print(f"⚠️ VPS health returned {resp.status_code}")
         return False
-    except Exception as e:
+    except requests.exceptions.ConnectTimeout as e:
+        print(f"⚠️ VPS health connect timeout (bot continues): {e}")
+        return False
+    except requests.exceptions.ReadTimeout as e:
+        print(f"⚠️ VPS health read timeout (bot continues): {e}")
+        return False
+    except requests.exceptions.RequestException as e:
         print(f"⚠️ VPS unreachable at startup (bot continues): {e}")
         return False
 
