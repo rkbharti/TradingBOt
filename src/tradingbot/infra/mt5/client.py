@@ -113,7 +113,7 @@ class MT5Connection:
 
     def get_historical_data(self, bars: int = 300):
         return mt5.copy_rates_from_pos(
-            self.symbol, self.timeframe, 0, bars
+            self.symbol, self.timeframe, 1, bars
         )
 
     # -------------------------------------------------
@@ -225,6 +225,68 @@ class MT5Connection:
 
         print(f"❌ Order failed: {result.comment if result else 'None'}")
         return None
+
+    def send_order(self, order_request: dict):
+        """
+        Compatibility wrapper for OrderExecutor.
+        Sends normalized live MT5 market order.
+        """
+
+        try:
+            symbol = order_request["symbol"]
+
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                raise Exception(f"No tick data for {symbol}")
+
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                raise Exception(f"No symbol info for {symbol}")
+
+            # =========================================================
+            # USE LIVE MARKET PRICE
+            # =========================================================
+
+            if order_request["type"] == mt5.ORDER_TYPE_BUY:
+                live_price = tick.ask
+            else:
+                live_price = tick.bid
+
+            digits = symbol_info.digits
+
+            order_request["price"] = round(live_price, digits)
+            order_request["sl"] = round(order_request["sl"], digits)
+            order_request["tp"] = round(order_request["tp"], digits)
+
+            # =========================================================
+            # DEBUG LOG
+            # =========================================================
+
+            print("\n📤 FINAL MT5 REQUEST")
+            print(order_request)
+
+            # =========================================================
+            # SEND ORDER
+            # =========================================================
+
+            result = mt5.order_send(order_request)
+
+            if result is None:
+                raise Exception("mt5.order_send() returned None")
+
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                raise Exception(
+                    f"MT5 order failed | Retcode: {result.retcode} | "
+                    f"Comment: {result.comment}"
+                )
+
+            print(f"✅ Order executed successfully | Ticket: {result.order}")
+
+            return result.order
+
+        except Exception as e:
+            print(f"❌ send_order() error: {e}")
+            raise
 
     # -------------------------------------------------
     # POSITION MANAGEMENT

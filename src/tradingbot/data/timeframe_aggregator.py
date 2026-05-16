@@ -25,22 +25,129 @@ class MultiTimeframeFractal:
             'D1': mt5.TIMEFRAME_D1
         }
     
-    def fetch_data(self, timeframe_name: str, bars=300) -> pd.DataFrame:
-        """Fetch OHLC data for a specific timeframe"""
+    def fetch_data(self, timeframe_name: str, bars=300, debug=False):
+        """Fetch recent OHLC data for a specific timeframe using CLOSED candles only."""
         try:
             tf = self.timeframes[timeframe_name]
-            rates = mt5.copy_rates_from_pos(self.symbol, tf, 0, bars)
-            
+
+            if not mt5.symbol_select(self.symbol, True):
+                return {
+                    "df": None,
+                    "is_stale": False,
+                    "error": f"symbol_select failed for {self.symbol}",
+                    "latest_closed_time": None,
+                    "latest_visible_time": None,
+                }
+
+            tick = mt5.symbol_info_tick(self.symbol)
+            if tick is None:
+                return {
+                    "df": None,
+                    "is_stale": False,
+                    "error": "symbol_info_tick returned None",
+                    "latest_closed_time": None,
+                    "latest_visible_time": None,
+                }
+
+            rates = mt5.copy_rates_from_pos(self.symbol, tf, 0, bars + 3)
             if rates is None or len(rates) == 0:
-                return None
-            
+                return {
+                    "df": None,
+                    "is_stale": False,
+                    "error": f"copy_rates_from_pos returned no data for {timeframe_name}",
+                    "latest_closed_time": None,
+                    "latest_visible_time": None,
+                }
+
             df = pd.DataFrame(rates)
-            df['time'] = pd.to_datetime(df['time'], unit='s')
-            return df
-            
+            df["time"] = pd.to_datetime(df["time"], unit="s", utc=True).dt.tz_convert(None)
+            df = df.drop_duplicates(subset=["time"]).sort_values("time", ascending=True).reset_index(drop=True)
+
+            if len(df) < 2:
+                return {
+                    "df": None,
+                    "is_stale": False,
+                    "error": f"not enough bars for {timeframe_name}",
+                    "latest_closed_time": None,
+                    "latest_visible_time": None,
+                }
+
+            tick_time = pd.to_datetime(tick.time, unit="s", utc=True).tz_convert(None) if hasattr(tick, "time") else None
+
+            latest_visible = df.iloc[-1]
+            closed_df = df.iloc[:-1].copy().reset_index(drop=True)
+
+            if closed_df.empty:
+                return {
+                    "df": None,
+                    "is_stale": False,
+                    "error": f"closed_df empty for {timeframe_name}",
+                    "latest_closed_time": None,
+                    "latest_visible_time": latest_visible["time"],
+                }
+
+            latest_closed = closed_df.iloc[-1]
+
+            tf_minutes = {
+                "M1": 1,
+                "M5": 5,
+                "M15": 15,
+                "M30": 30,
+                "H1": 60,
+                "H4": 240,
+                "D1": 1440,
+            }.get(timeframe_name)
+
+            is_stale = False
+            if tf_minutes is not None:
+                now_utc = pd.Timestamp.utcnow().tz_localize(None)
+                max_allowed_age = pd.Timedelta(minutes=tf_minutes * 2)
+                is_stale = (now_utc - latest_closed["time"]) > max_allowed_age
+
+            if debug:
+                print(f"\n[MT5 DATA CHECK] {self.symbol} {timeframe_name}")
+                print(f"  Tick time              : {tick_time}")
+                print("  Recent MT5 bars        :")
+                for _, row in df.tail(3).iterrows():
+                    print(
+                        f"    {row['time']} | "
+                        f"O={row['open']} H={row['high']} L={row['low']} C={row['close']}"
+                    )
+
+                print(
+                    f"  DF latest visible row  : {latest_visible['time']} | "
+                    f"O={latest_visible['open']} H={latest_visible['high']} "
+                    f"L={latest_visible['low']} C={latest_visible['close']}"
+                )
+
+                print(
+                    f"  DF latest closed row   : {latest_closed['time']} | "
+                    f"O={latest_closed['open']} H={latest_closed['high']} "
+                    f"L={latest_closed['low']} C={latest_closed['close']}"
+                )
+
+                if is_stale:
+                    print(
+                        f"   ⚠️ Stale {timeframe_name} data for {self.symbol}: "
+                        f"last_closed_bar={latest_closed['time']}"
+                    )
+
+            return {
+                "df": closed_df.tail(bars).reset_index(drop=True),
+                "is_stale": is_stale,
+                "error": None,
+                "latest_closed_time": latest_closed["time"],
+                "latest_visible_time": latest_visible["time"],
+            }
+
         except Exception as e:
-            print(f"   ❌ Error fetching {timeframe_name}: {e}")
-            return None
+            return {
+                "df": None,
+                "is_stale": False,
+                "error": str(e),
+                "latest_closed_time": None,
+                "latest_visible_time": None,
+            }
     
     
     def detect_swing_points(self, df: pd.DataFrame, sensitivity=5) -> tuple:
