@@ -354,7 +354,7 @@ class OrderExecutor:
 
                 if not rr_validation.is_valid:
                     reason = (
-                        f"RR ratio {rr_validation.actual_rr:.2f}x below minimum "
+                        f"RR ratio {rr_validation.actual_rr:.6f}x below minimum "
                         f"{rr_validation.min_rr_required}x"
                     )
                     logger.warning(f"RR validation failed: {reason}")

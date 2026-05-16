@@ -244,8 +244,27 @@ class PositionSizer:
 
             actual_rr = reward_distance / risk_distance
 
-            # Determine validity
-            is_valid = actual_rr >= required_min_rr
+            # =========================================================================
+            # FLOAT-SAFE RR VALIDATION
+            # =========================================================================
+            # MT5 / broker floating precision can produce values like:
+            # 1.999999999 instead of 2.00
+            #
+            # Since trading decisions visually operate on 2 decimal precision,
+            # we validate using rounded RR values to avoid false rejections.
+            # =========================================================================
+
+            actual_rr_rounded = round(actual_rr, 2)
+            required_rr_rounded = round(required_min_rr, 2)
+
+            is_valid = actual_rr_rounded >= required_rr_rounded
+
+            logger.debug(
+                f"RR Precision Check | "
+                f"Raw RR: {actual_rr:.10f} | "
+                f"Rounded RR: {actual_rr_rounded:.2f} | "
+                f"Required: {required_rr_rounded:.2f}"
+            )
 
             logger.info(
                 f"RR Validation: {actual_rr:.2f}x (required: {required_min_rr}x) | "
