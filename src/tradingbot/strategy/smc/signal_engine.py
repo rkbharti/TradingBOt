@@ -86,7 +86,7 @@ class SignalEngineConfig:
     d1_weight: int = 4
     h4_weight: int = 3
 
-    external_swing_window: int = 5
+    external_swing_window: int = 3
     # ✅ FIX #1 — Pine Script internal_r_lookback defaults to 5 (iLen=5).
     # Was incorrectly set to 2, producing hyper-sensitive micro-pivots on every
     # minor wiggle and flooding CHoCH detection with false structure breaks.
@@ -253,7 +253,7 @@ class SignalEngine:
             return _reject(gates, step3["reason"], direction=direction)
 
         # ─── Step 4: Valid POI ───────────────────────────────────────────────
-        step4, poi_candidates = self._step_valid_poi(m15_df, m5_df, h4_df, sweep, structure_break)
+        step4, poi_candidates = self._step_valid_poi(m15_df, m5_df, h4_df, d1_df, sweep, structure_break)
         gates["step_4_valid_poi"] = step4
         if not step4["passed"] or not poi_candidates:
             return _reject(gates, step4["reason"], direction=direction)
@@ -434,35 +434,87 @@ class SignalEngine:
         if len(df) < 50:
             return {"passed": False, "reason": "INSUFFICIENT_DATA"}, None
 
-        confirmed_highs, confirmed_lows = self.detect_swing_points(df, cfg.external_swing_window)
+        confirmed_highs, confirmed_lows = self.detect_swing_points(
+            df,
+            cfg.external_swing_window
+        )
 
-        start_idx = cfg.external_swing_window + 2
+        recent_window = 120
+        start_idx = max(
+            cfg.external_swing_window + 2,
+            len(df) - recent_window
+        )
+
+        now_ts = None
+        if "time" in df.columns:
+            try:
+                now_ts = pd.to_datetime(df["time"].iloc[-1])
+            except Exception:
+                now_ts = None
+
+        max_sweep_age = 24
+        max_sweep_age_minutes = 24 * 15  # M15 sweep logic = 6 hours max wall-clock age
 
         for i in range(len(df) - 1, start_idx - 1, -1):
-            curr_high  = float(df["high"].iat[i])
-            curr_low   = float(df["low"].iat[i])
+
+            curr_high = float(df["high"].iat[i])
+            curr_low = float(df["low"].iat[i])
             curr_close = float(df["close"].iat[i])
-            atr        = self._calc_atr(df, i, cfg.atr_period)
-            tolerance  = atr * cfg.sweep_atr_tolerance
+
+            atr = self._calc_atr(df, i, cfg.atr_period)
+            if atr is None:
+                continue
+            tolerance = atr * cfg.sweep_atr_tolerance
+
+            sweep_ts = None
+            if now_ts is not None and "time" in df.columns:
+                try:
+                    sweep_ts = pd.to_datetime(df["time"].iat[i])
+                except Exception:
+                    sweep_ts = None
+
+            candles_ago = (len(df) - 1) - i
+            if candles_ago > max_sweep_age:
+                continue
+
+            if now_ts is not None and sweep_ts is not None:
+                sweep_age_minutes = (now_ts - sweep_ts).total_seconds() / 60.0
+                if sweep_age_minutes > max_sweep_age_minutes:
+                    continue
 
             if direction == "BULLISH":
-                prior_lows = [idx for idx in confirmed_lows if idx < i]
+
+                prior_lows = [
+                    idx for idx in confirmed_lows
+                    if start_idx <= idx < i
+                ]
+
                 if not prior_lows:
                     continue
 
                 for ref_idx in reversed(prior_lows[-2:]):
+
                     ref_level = float(df["low"].iat[ref_idx])
 
-                    wick_break = curr_low   < (ref_level - tolerance)
+                    wick_break = curr_low < (ref_level - tolerance)
                     close_back = curr_close > ref_level
 
                     if wick_break and close_back:
-                        left_highs = [idx for idx in confirmed_highs if idx < i]
+                        left_highs = [
+                            idx for idx in confirmed_highs
+                            if start_idx <= idx < i
+                        ]
+
                         tp = (
                             float(df["high"].iat[left_highs[-1]])
                             if left_highs
-                            else float(df["high"].iloc[max(0, i - cfg.liquidity_lookback):i].max())
+                            else float(
+                                df["high"]
+                                .iloc[max(start_idx, i - cfg.liquidity_lookback):i]
+                                .max()
+                            )
                         )
+
                         return {
                             "passed": True,
                             "reason": "VALID_BULLISH_SWEEP",
@@ -483,23 +535,38 @@ class SignalEngine:
                         )
 
             else:
-                prior_highs = [idx for idx in confirmed_highs if idx < i]
+
+                prior_highs = [
+                    idx for idx in confirmed_highs
+                    if start_idx <= idx < i
+                ]
+
                 if not prior_highs:
                     continue
 
                 for ref_idx in reversed(prior_highs[-2:]):
+
                     ref_level = float(df["high"].iat[ref_idx])
 
-                    wick_break = curr_high  > (ref_level + tolerance)
+                    wick_break = curr_high > (ref_level + tolerance)
                     close_back = curr_close < ref_level
 
                     if wick_break and close_back:
-                        left_lows = [idx for idx in confirmed_lows if idx < i]
+                        left_lows = [
+                            idx for idx in confirmed_lows
+                            if start_idx <= idx < i
+                        ]
+
                         tp = (
                             float(df["low"].iat[left_lows[-1]])
                             if left_lows
-                            else float(df["low"].iloc[max(0, i - cfg.liquidity_lookback):i].min())
+                            else float(
+                                df["low"]
+                                .iloc[max(start_idx, i - cfg.liquidity_lookback):i]
+                                .min()
+                            )
                         )
+
                         return {
                             "passed": True,
                             "reason": "VALID_BEARISH_SWEEP",
@@ -534,7 +601,15 @@ class SignalEngine:
         if m5_sweep_idx is None:
             return {"passed": False, "reason": "SWEEP_MAPPING_FAILED"}, None
 
-        end_idx = min(len(m5_df), m5_sweep_idx + 200)
+        structure_confirmation_window = 24  # ~2 hours on M5
+        pre_sweep_pivot_window = 48         # ~4 hours of local pre-sweep structure only
+
+        end_idx = min(
+            len(m5_df),
+            m5_sweep_idx + structure_confirmation_window
+        )
+        start_pivot_idx = max(0, m5_sweep_idx - pre_sweep_pivot_window)
+
         w = self.config.internal_swing_window
 
         if len(m5_df) < (w * 2 + 1):
@@ -545,21 +620,28 @@ class SignalEngine:
         up_p, up_n = [], []
         dn_p, dn_n = [], []
 
-        for pivot_idx in raw_highs:
-            if pivot_idx < m5_sweep_idx:
-                up_p.insert(0, float(m5_df["high"].iat[pivot_idx]))
-                up_n.insert(0, pivot_idx)
+        pre_highs = sorted(
+            [idx for idx in raw_highs if start_pivot_idx <= idx < m5_sweep_idx],
+            reverse=True
+        )
+        pre_lows = sorted(
+            [idx for idx in raw_lows if start_pivot_idx <= idx < m5_sweep_idx],
+            reverse=True
+        )
 
-        for pivot_idx in raw_lows:
-            if pivot_idx < m5_sweep_idx:
-                dn_p.insert(0, float(m5_df["low"].iat[pivot_idx]))
-                dn_n.insert(0, pivot_idx)
+        for pivot_idx in pre_highs:
+            up_p.append(float(m5_df["high"].iat[pivot_idx]))
+            up_n.append(pivot_idx)
+
+        for pivot_idx in pre_lows:
+            dn_p.append(float(m5_df["low"].iat[pivot_idx]))
+            dn_n.append(pivot_idx)
 
         if sweep.direction == "BULLISH":
-            if not up_p or len(dn_p) < 2:
+            if not up_p:
                 return {"passed": False, "reason": "INSUFFICIENT_STRUCTURE"}, None
         else:
-            if not dn_p or len(up_p) < 2:
+            if not dn_p:
                 return {"passed": False, "reason": "INSUFFICIENT_STRUCTURE"}, None
 
         for i in range(m5_sweep_idx + 1, end_idx):
@@ -581,7 +663,7 @@ class SignalEngine:
                         dn_n.insert(0, pivot_idx)
 
             if sweep.direction == "BULLISH":
-                if not up_p or len(dn_p) < 2:
+                if not up_p:
                     continue
 
                 level = up_p[0]
@@ -590,7 +672,7 @@ class SignalEngine:
                 if crossed:
                     choch_label = self._classify_structure_break("BULLISH")
 
-                    if choch_label == "CHOCH" and dn_p[0] > dn_p[1]:
+                    if choch_label == "CHOCH" and len(dn_p) >= 2 and dn_p[0] > dn_p[1]:
                         choch_label = "CHOCH+"
 
                     sb = StructureBreak(
@@ -614,7 +696,7 @@ class SignalEngine:
                     }, sb
 
             else:
-                if not dn_p or len(up_p) < 2:
+                if not dn_p:
                     continue
 
                 level = dn_p[0]
@@ -623,7 +705,7 @@ class SignalEngine:
                 if crossed:
                     choch_label = self._classify_structure_break("BEARISH")
 
-                    if choch_label == "CHOCH" and up_p[0] < up_p[1]:
+                    if choch_label == "CHOCH" and len(up_p) >= 2 and up_p[0] < up_p[1]:
                         choch_label = "CHOCH+"
 
                     sb = StructureBreak(
@@ -653,91 +735,208 @@ class SignalEngine:
         m15_df: pd.DataFrame,
         m5_df: pd.DataFrame,
         h4_df: pd.DataFrame,
+        d1_df: pd.DataFrame,
         sweep: SweepEvent,
         structure_break: StructureBreak,
     ) -> Tuple[Dict[str, Any], List[POI]]:
 
-        # -------------------------
-        # STEP 1: Build M15 POI candidates
-        # -------------------------
-        break_time    = self._get_candle_time(m5_df, structure_break.candle_index)
+        break_time = self._get_candle_time(m5_df, structure_break.candle_index)
         break_m15_idx = self._find_bar_at_or_before(m15_df, break_time)
         if break_m15_idx is None:
             break_m15_idx = len(m15_df) - 1
 
         lookback = 20
-        start    = max(0, sweep.candle_index - lookback)
-        end      = min(len(m15_df) - 1, break_m15_idx)
-        segment  = m15_df.iloc[start:end + 1]
+        start = max(0, sweep.candle_index - lookback)
+        end = min(len(m15_df) - 1, break_m15_idx)
+        if end < start:
+            return {"passed": False, "reason": "NO_VALID_M15_POI"}, []
 
-        # ✅ FIX #5 — Pine Script OB candle selection (confirmed from drawVOB):
-        #   Bull OB: iU = obj.l.indexof(obj.l.min()) → candle with the LOWEST LOW in the range
-        #   Bear OB: iD = obj.h.indexof(obj.h.max()) → candle with the HIGHEST HIGH in the range
-        #
-        # The previous code used opposite_mask = (close < open) which selected ALL bearish-colored
-        # candles for a bull OB. That is wrong — Pine Script picks ONE specific candle per structure event.
-        # H4 OB below uses the same logic: same bug was present there too (audit missed H4 case).
+        segment = m15_df.iloc[start:end + 1]
+        if segment.empty:
+            return {"passed": False, "reason": "NO_VALID_M15_POI"}, []
+
+        candidates: List[POI] = []
+
         if sweep.direction == "BULLISH":
-            # Lowest-low candle in the M15 segment = demand zone anchor
-            rel_min_idx = int(segment["low"].to_numpy().argmin())
-            abs_min_idx = start + rel_min_idx
-            ob_m15 = self._build_poi(m15_df, "OB", abs_min_idx)
-            candidates = [ob_m15]
+            candidate_indices = (
+                segment["low"]
+                .nsmallest(min(3, len(segment)))
+                .index.tolist()
+            )
         else:
-            # Highest-high candle in the M15 segment = supply zone anchor
-            rel_max_idx = int(segment["high"].to_numpy().argmax())
-            abs_max_idx = start + rel_max_idx
-            ob_m15 = self._build_poi(m15_df, "OB", abs_max_idx)
-            candidates = [ob_m15]
+            candidate_indices = (
+                segment["high"]
+                .nlargest(min(3, len(segment)))
+                .index.tolist()
+            )
 
-        # -------------------------
-        # STEP 2: H4 OB detection
-        # -------------------------
-        if len(h4_df) < 10:
-            return {"passed": False, "reason": "NO_H4_DATA"}, []
+        for idx_label in candidate_indices:
+            abs_idx = m15_df.index.get_loc(idx_label)
+            candidates.append(self._build_poi(m15_df, "OB", int(abs_idx)))
 
-        h4_segment = h4_df.iloc[-20:]
+        candidates = self._dedupe_pois(candidates)
+        if not candidates:
+            return {"passed": False, "reason": "NO_VALID_M15_POI"}, []
 
-        # ✅ FIX #5b — H4 OB has the same bug as M15 (audit missed this).
-        # Previously used all opposite-color H4 candles; now use the single lowest-low / highest-high.
+        if len(d1_df) < 10:
+            return {"passed": False, "reason": "NO_D1_DATA"}, []
+
+        d1_segment = d1_df.iloc[-20:] if len(d1_df) >= 20 else d1_df
+        d1_segment_wide = d1_df.iloc[-40:] if len(d1_df) >= 40 else d1_df
+        h4_segment = h4_df.iloc[-20:] if len(h4_df) >= 20 else h4_df
+        h4_segment_wide = h4_df.iloc[-40:] if len(h4_df) >= 40 else h4_df
+
+        if d1_segment.empty:
+            return {"passed": False, "reason": "NO_HTF_POI"}, []
+
+        htf_pois: List[POI] = []
+
         if sweep.direction == "BULLISH":
-            rel_h4_min = int(h4_segment["low"].to_numpy().argmin())
-            last_h4_idx = h4_segment.index[rel_h4_min]
+            rel_idx = int(d1_segment["low"].to_numpy().argmin())
+            d1_idx = d1_segment.index[rel_idx]
         else:
-            rel_h4_max = int(h4_segment["high"].to_numpy().argmax())
-            last_h4_idx = h4_segment.index[rel_h4_max]
+            rel_idx = int(d1_segment["high"].to_numpy().argmax())
+            d1_idx = d1_segment.index[rel_idx]
 
-        h4_candidates_df = h4_df.loc[[last_h4_idx]]
-        if h4_candidates_df.empty:
-            return {"passed": False, "reason": "NO_HTF_OB"}, []
+        d1_abs_idx = d1_df.index.get_loc(d1_idx)
+        htf_pois.append(self._build_poi(d1_df, "HTF_OB", int(d1_abs_idx)))
 
-        h4_low      = float(h4_df.loc[last_h4_idx]["low"])
-        h4_high     = float(h4_df.loc[last_h4_idx]["high"])
+        if not d1_segment_wide.empty:
+            if sweep.direction == "BULLISH":
+                rel_idx_w = int(d1_segment_wide["low"].to_numpy().argmin())
+                d1_idx_w = d1_segment_wide.index[rel_idx_w]
+            else:
+                rel_idx_w = int(d1_segment_wide["high"].to_numpy().argmax())
+                d1_idx_w = d1_segment_wide.index[rel_idx_w]
+
+            d1_abs_idx_w = d1_df.index.get_loc(d1_idx_w)
+            htf_pois.append(self._build_poi(d1_df, "HTF_OB_WIDE", int(d1_abs_idx_w)))
+
+        if not h4_segment.empty:
+            if sweep.direction == "BULLISH":
+                h4_rel_idx = int(h4_segment["low"].to_numpy().argmin())
+                h4_idx = h4_segment.index[h4_rel_idx]
+            else:
+                h4_rel_idx = int(h4_segment["high"].to_numpy().argmax())
+                h4_idx = h4_segment.index[h4_rel_idx]
+
+            h4_abs_idx = h4_df.index.get_loc(h4_idx)
+            htf_pois.append(self._build_poi(h4_df, "HTF_H4_OB", int(h4_abs_idx)))
+
+        if not h4_segment_wide.empty:
+            if sweep.direction == "BULLISH":
+                h4_rel_idx_w = int(h4_segment_wide["low"].to_numpy().argmin())
+                h4_idx_w = h4_segment_wide.index[h4_rel_idx_w]
+            else:
+                h4_rel_idx_w = int(h4_segment_wide["high"].to_numpy().argmax())
+                h4_idx_w = h4_segment_wide.index[h4_rel_idx_w]
+
+            h4_abs_idx_w = h4_df.index.get_loc(h4_idx_w)
+            htf_pois.append(self._build_poi(h4_df, "HTF_H4_OB_WIDE", int(h4_abs_idx_w)))
+
+        d1_fvgs = self._find_fvgs(
+            d1_df,
+            sweep.direction,
+            start=max(2, len(d1_df) - 40),
+            end=len(d1_df) - 2,
+        )
+
+        current_price = float(m15_df["close"].iloc[-1])
+
+        if sweep.direction == "BULLISH":
+            ranked_d1_fvgs = sorted(
+                d1_fvgs,
+                key=lambda fvg: abs(min(fvg.low, fvg.high) - current_price)
+            )
+        else:
+            ranked_d1_fvgs = sorted(
+                d1_fvgs,
+                key=lambda fvg: abs(max(fvg.low, fvg.high) - current_price)
+            )
+
+        for fvg in ranked_d1_fvgs[:3]:
+            htf_pois.append(
+                POI(
+                    poi_type="HTF_FVG",
+                    candle_index=fvg.candle_index,
+                    low=min(fvg.low, fvg.high),
+                    high=max(fvg.low, fvg.high),
+                )
+            )
+
+        piv_window = max(2, self.config.external_swing_window)
+        ph, pl = self._find_pivots_debug(d1_segment_wide, piv_window)
+
+        if sweep.direction == "BULLISH" and len(pl) >= 1:
+            liq_rel_idx = pl[-1]
+            liq_abs_idx = (len(d1_df) - len(d1_segment_wide)) + liq_rel_idx
+            htf_pois.append(self._build_poi(d1_df, "HTF_LIQUIDITY", int(liq_abs_idx)))
+
+        elif sweep.direction == "BEARISH" and len(ph) >= 1:
+            liq_rel_idx = ph[-1]
+            liq_abs_idx = (len(d1_df) - len(d1_segment_wide)) + liq_rel_idx
+            htf_pois.append(self._build_poi(d1_df, "HTF_LIQUIDITY", int(liq_abs_idx)))
+
+        htf_pois = self._dedupe_pois(htf_pois)
+        if not htf_pois:
+            return {"passed": False, "reason": "NO_HTF_POI"}, []
 
         # -------------------------
-        # STEP 3: Filter M15 POIs inside H4 OB
+        # STEP 2.5: Keep only HTF POIs near the live setup
+        # Prevent distant HTF zones from blocking current structure
         # -------------------------
+        current_price = float(m15_df["close"].iloc[-1])
+
+        if sweep.direction == "BULLISH":
+            nearby_htf_pois = [
+                poi for poi in htf_pois
+                if poi.high >= current_price and (poi.high - current_price) <= 40.0
+            ]
+        else:
+            nearby_htf_pois = [
+                poi for poi in htf_pois
+                if poi.low >= current_price and (poi.low - current_price) <= 40.0
+            ]
+
+        if nearby_htf_pois:
+            htf_pois = nearby_htf_pois
+
         htf_aligned: List[POI] = []
+        matched_zone: Optional[Tuple[float, float]] = None
+        matched_type: Optional[str] = None
+
         for poi in candidates:
-            # ✅ FIX #2 — Check if this POI has been breached (zombie POI check)
             if self.poi_mitigation.is_breached(poi):
                 continue
-            
-            overlap = not (poi.high < h4_low or poi.low > h4_high)
-            if overlap:
-                htf_aligned.append(poi)
+
+            for htf_poi in htf_pois:
+                overlap = not (poi.high < htf_poi.low or poi.low > htf_poi.high)
+                if overlap:
+                    htf_aligned.append(poi)
+                    matched_zone = (htf_poi.low, htf_poi.high)
+                    matched_type = htf_poi.poi_type
+                    break
+
+        # print("\n[POI DEBUG] M15 candidates:")
+        # for poi in candidates:
+        #     print(f"  - {poi.poi_type} idx={poi.candle_index} low={poi.low} high={poi.high} breached={self.poi_mitigation.is_breached(poi)}")
+
+        # print("[POI DEBUG] HTF POIs:")
+        # for htf_poi in htf_pois:
+        #     print(f"  - {htf_poi.poi_type} idx={htf_poi.candle_index} low={htf_poi.low} high={htf_poi.high}")
+
+        # print("[POI DEBUG] Overlap checks:")
+        # for poi in candidates:
+        #     for htf_poi in htf_pois:
+        #         overlap = not (poi.high < htf_poi.low or poi.low > htf_poi.high)
+        #         print(f"  - M15 idx={poi.candle_index} vs {htf_poi.poi_type} idx={htf_poi.candle_index} => overlap={overlap}")
 
         if not htf_aligned:
-            return {"passed": False, "reason": "NO_POI_IN_HTF_OB"}, []
+            return {"passed": False, "reason": "NO_POI_IN_HTF_POI"}, []
 
-        # -------------------------
-        # STEP 4: Extreme OB rule — filter out middle OBs (HIGH-9)
-        # Sort by candle_index ascending = closest to CHoCH origin first
-        # -------------------------
         htf_aligned.sort(key=lambda p: p.candle_index)
 
-        extreme_ob = htf_aligned[0]   # closest to CHoCH/sweep origin
-
+        extreme_ob = htf_aligned[0]
         extreme_tagged = POI(
             poi_type="EXTREME_OB",
             candle_index=extreme_ob.candle_index,
@@ -746,7 +945,7 @@ class SignalEngine:
         )
 
         if len(htf_aligned) > 1:
-            first_ob = htf_aligned[-1]   # furthest from origin = First OB after sweep
+            first_ob = htf_aligned[-1]
             first_tagged = POI(
                 poi_type="FIRST_OB_AFTER_IDM",
                 candle_index=first_ob.candle_index,
@@ -757,13 +956,30 @@ class SignalEngine:
         else:
             valid_pois = [extreme_tagged]
 
+        zone_low, zone_high = matched_zone if matched_zone is not None else (extreme_tagged.low, extreme_tagged.high)
+
         return {
             "passed": True,
             "reason": "HTF_ALIGNED_POI",
-            "h4_zone": (self._r(h4_low), self._r(h4_high)),
+            "htf_zone": (self._r(zone_low), self._r(zone_high)),
+            "htf_poi_type": matched_type,
             "poi_count": len(valid_pois),
             "poi_types": [p.poi_type for p in valid_pois],
         }, valid_pois
+
+    # def _has_fvg_after_poi(self, df: pd.DataFrame, poi_idx: int, direction: str) -> bool:
+    #     """Doctrine Q3: POI must have FVG directly after it."""
+    #     if poi_idx < 0 or poi_idx + 2 >= len(df):
+    #         return False
+
+    #     c0 = df.iloc[poi_idx]
+    #     c1 = df.iloc[poi_idx + 1]
+    #     c2 = df.iloc[poi_idx + 2]
+
+    #     if direction == "BULLISH":
+    #         return float(c0["high"]) < float(c2["low"])
+    #     else:
+    #         return float(c0["low"]) > float(c2["high"])
 
     def _step_ob_fvg_confluence(
         self,
@@ -1050,12 +1266,33 @@ class SignalEngine:
                     return float(structure_break.level) + sl_buf, "CHOCH_LEVEL"
                 return float(selected_poi.high) + sl_buf, "POI_OB_HIGH"
 
-        def _compute_tp_primary() -> float:
+        def _compute_tp_primary(sl: float, setup_type: str) -> float:
             """
-            Primary TP currently = external liquidity target (ERL).
-            This matches your existing behavior and mentor's "major target".
+            TP selection:
+            - Counter-trend / engineering-liquidity style: keep conservative target at first ERL.
+            - Trend-following: allow farther target if first ERL is too close.
             """
-            return float(sweep.target_external_liquidity)
+            tp_erl = float(sweep.target_external_liquidity)
+
+            risk, reward_to_erl = _risk_reward(sl, tp_erl)
+            rr_min = float(self.config.rr_min)
+
+            # Minimum projected TP needed to satisfy RR threshold
+            if direction == "BULLISH":
+                tp_rr_min = float(entry_price + (risk * rr_min))
+            else:
+                tp_rr_min = float(entry_price - (risk * rr_min))
+
+            # Conservative setups keep the nearest target
+            if setup_type == "ENGINEERING_LIQ":
+                return tp_erl
+
+            # Trend / POI / sweep setups:
+            # if ERL already satisfies RR, use it; otherwise stretch to minimum RR target
+            if risk > 0 and reward_to_erl / risk >= rr_min:
+                return tp_erl
+
+            return tp_rr_min
 
         def _risk_reward(sl: float, tp: float) -> Tuple[float, float]:
             if direction == "BULLISH":
@@ -1071,7 +1308,7 @@ class SignalEngine:
         setup_type = _infer_setup_type()
         sl_buffer = _sl_buffer()
         sl, sl_model = _compute_sl(setup_type, sl_buffer)
-        tp = _compute_tp_primary()
+        tp = _compute_tp_primary(sl, setup_type)
 
         # Geometry sanity
         risk, reward = _risk_reward(sl, tp)
@@ -1093,7 +1330,8 @@ class SignalEngine:
         rr = reward / risk
         rr_min = float(self.config.rr_min)
 
-        if rr < rr_min:
+        EPS = 1e-9
+        if rr + EPS < rr_min:
             return {
                 "passed": False,
                 "reason": "RR_BELOW_MINIMUM",
@@ -1177,7 +1415,9 @@ class SignalEngine:
         pl: List[int] = []
 
         # STRICT: require full window on both sides — no asymmetric right_bars shortcut
-        for i in range(effective_window, n - effective_window):
+        for i in range(effective_window, n):
+            if i + effective_window >= n:
+                break
             h = highs[i]
             l = lows[i]
 
@@ -1239,8 +1479,8 @@ class SignalEngine:
             # STRICT: strong directional body AND size relative to ATR
             is_bullish_body = close_p > open_p
             is_bearish_body = close_p < open_p
-            is_strong_body  = body_ratio >= 0.60     # at least 60% body-to-range
-            is_large_candle = body >= atr * 0.40     # at least 40% of ATR in body size
+            is_strong_body  = body_ratio >= 0.50     # at least 50% body-to-range
+            is_large_candle = body >= atr * 0.25    # at least 75% of ATR in body size
 
             if direction == "BULLISH" and is_bullish_body and is_strong_body and is_large_candle:
                 return True
@@ -1389,9 +1629,27 @@ class SignalEngine:
         return fvgs
 
     def _build_poi(self, df: pd.DataFrame, poi_type: str, idx: int) -> POI:
+        o = float(df["open"].iat[idx]) if "open" in df.columns else float(df["low"].iat[idx])
+        c = float(df["close"].iat[idx]) if "close" in df.columns else float(df["high"].iat[idx])
         h = float(df["high"].iat[idx])
         l = float(df["low"].iat[idx])
-        return POI(poi_type=poi_type, candle_index=idx, low=min(l, h), high=max(l, h))
+
+        body_low = min(o, c)
+        body_high = max(o, c)
+
+        if "FVG" in poi_type or "LIQUIDITY" in poi_type:
+            low = min(l, h)
+            high = max(l, h)
+        else:
+            low = body_low
+            high = body_high
+
+        return POI(
+            poi_type=poi_type,
+            candle_index=idx,
+            low=min(low, high),
+            high=max(low, high),
+        )
 
     def _dedupe_pois(self, pois: List[POI]) -> List[POI]:
         seen: set = set()
