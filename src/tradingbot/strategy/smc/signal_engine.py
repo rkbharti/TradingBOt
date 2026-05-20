@@ -745,7 +745,7 @@ class SignalEngine:
         if break_m15_idx is None:
             break_m15_idx = len(m15_df) - 1
 
-        lookback = 20
+        lookback = 30
         start = max(0, sweep.candle_index - lookback)
         end = min(len(m15_df) - 1, break_m15_idx)
         if end < start:
@@ -760,13 +760,13 @@ class SignalEngine:
         if sweep.direction == "BULLISH":
             candidate_indices = (
                 segment["low"]
-                .nsmallest(min(3, len(segment)))
+                .nsmallest(min(5, len(segment)))
                 .index.tolist()
             )
         else:
             candidate_indices = (
                 segment["high"]
-                .nlargest(min(3, len(segment)))
+                .nlargest(min(5, len(segment)))
                 .index.tolist()
             )
 
@@ -778,128 +778,16 @@ class SignalEngine:
         if not candidates:
             return {"passed": False, "reason": "NO_VALID_M15_POI"}, []
 
-        if len(d1_df) < 10:
-            return {"passed": False, "reason": "NO_D1_DATA"}, []
-
-        d1_segment = d1_df.iloc[-20:] if len(d1_df) >= 20 else d1_df
-        d1_segment_wide = d1_df.iloc[-40:] if len(d1_df) >= 40 else d1_df
-        h4_segment = h4_df.iloc[-20:] if len(h4_df) >= 20 else h4_df
-        h4_segment_wide = h4_df.iloc[-40:] if len(h4_df) >= 40 else h4_df
-
-        if d1_segment.empty:
-            return {"passed": False, "reason": "NO_HTF_POI"}, []
-
-        htf_pois: List[POI] = []
-
-        if sweep.direction == "BULLISH":
-            rel_idx = int(d1_segment["low"].to_numpy().argmin())
-            d1_idx = d1_segment.index[rel_idx]
-        else:
-            rel_idx = int(d1_segment["high"].to_numpy().argmax())
-            d1_idx = d1_segment.index[rel_idx]
-
-        d1_abs_idx = d1_df.index.get_loc(d1_idx)
-        htf_pois.append(self._build_poi(d1_df, "HTF_OB", int(d1_abs_idx)))
-
-        if not d1_segment_wide.empty:
-            if sweep.direction == "BULLISH":
-                rel_idx_w = int(d1_segment_wide["low"].to_numpy().argmin())
-                d1_idx_w = d1_segment_wide.index[rel_idx_w]
-            else:
-                rel_idx_w = int(d1_segment_wide["high"].to_numpy().argmax())
-                d1_idx_w = d1_segment_wide.index[rel_idx_w]
-
-            d1_abs_idx_w = d1_df.index.get_loc(d1_idx_w)
-            htf_pois.append(self._build_poi(d1_df, "HTF_OB_WIDE", int(d1_abs_idx_w)))
-
-        if not h4_segment.empty:
-            if sweep.direction == "BULLISH":
-                h4_rel_idx = int(h4_segment["low"].to_numpy().argmin())
-                h4_idx = h4_segment.index[h4_rel_idx]
-            else:
-                h4_rel_idx = int(h4_segment["high"].to_numpy().argmax())
-                h4_idx = h4_segment.index[h4_rel_idx]
-
-            h4_abs_idx = h4_df.index.get_loc(h4_idx)
-            htf_pois.append(self._build_poi(h4_df, "HTF_H4_OB", int(h4_abs_idx)))
-
-        if not h4_segment_wide.empty:
-            if sweep.direction == "BULLISH":
-                h4_rel_idx_w = int(h4_segment_wide["low"].to_numpy().argmin())
-                h4_idx_w = h4_segment_wide.index[h4_rel_idx_w]
-            else:
-                h4_rel_idx_w = int(h4_segment_wide["high"].to_numpy().argmax())
-                h4_idx_w = h4_segment_wide.index[h4_rel_idx_w]
-
-            h4_abs_idx_w = h4_df.index.get_loc(h4_idx_w)
-            htf_pois.append(self._build_poi(h4_df, "HTF_H4_OB_WIDE", int(h4_abs_idx_w)))
-
-        d1_fvgs = self._find_fvgs(
-            d1_df,
-            sweep.direction,
-            start=max(2, len(d1_df) - 40),
-            end=len(d1_df) - 2,
+        htf_pois = self._select_htf_institutional_pois(
+            m15_df=m15_df,
+            h4_df=h4_df,
+            d1_df=d1_df,
+            sweep=sweep,
+            structure_break=structure_break,
         )
 
-        current_price = float(m15_df["close"].iloc[-1])
-
-        if sweep.direction == "BULLISH":
-            ranked_d1_fvgs = sorted(
-                d1_fvgs,
-                key=lambda fvg: abs(min(fvg.low, fvg.high) - current_price)
-            )
-        else:
-            ranked_d1_fvgs = sorted(
-                d1_fvgs,
-                key=lambda fvg: abs(max(fvg.low, fvg.high) - current_price)
-            )
-
-        for fvg in ranked_d1_fvgs[:3]:
-            htf_pois.append(
-                POI(
-                    poi_type="HTF_FVG",
-                    candle_index=fvg.candle_index,
-                    low=min(fvg.low, fvg.high),
-                    high=max(fvg.low, fvg.high),
-                )
-            )
-
-        piv_window = max(2, self.config.external_swing_window)
-        ph, pl = self._find_pivots_debug(d1_segment_wide, piv_window)
-
-        if sweep.direction == "BULLISH" and len(pl) >= 1:
-            liq_rel_idx = pl[-1]
-            liq_abs_idx = (len(d1_df) - len(d1_segment_wide)) + liq_rel_idx
-            htf_pois.append(self._build_poi(d1_df, "HTF_LIQUIDITY", int(liq_abs_idx)))
-
-        elif sweep.direction == "BEARISH" and len(ph) >= 1:
-            liq_rel_idx = ph[-1]
-            liq_abs_idx = (len(d1_df) - len(d1_segment_wide)) + liq_rel_idx
-            htf_pois.append(self._build_poi(d1_df, "HTF_LIQUIDITY", int(liq_abs_idx)))
-
-        htf_pois = self._dedupe_pois(htf_pois)
         if not htf_pois:
             return {"passed": False, "reason": "NO_HTF_POI"}, []
-
-        # -------------------------
-        # STEP 2.5: Keep only HTF POIs near the live setup
-        # Prevent distant HTF zones from blocking current structure
-        # -------------------------
-        current_price = float(m15_df["close"].iloc[-1])
-
-        if sweep.direction == "BULLISH":
-            nearby_htf_pois = [
-                poi for poi in htf_pois
-                if poi.high >= current_price and (poi.high - current_price) <= 40.0
-            ]
-        else:
-            nearby_htf_pois = [
-                poi for poi in htf_pois
-                if poi.low >= current_price and (poi.low - current_price) <= 40.0
-            ]
-
-        if nearby_htf_pois:
-            htf_pois = nearby_htf_pois
 
         htf_aligned: List[POI] = []
         matched_zone: Optional[Tuple[float, float]] = None
@@ -967,19 +855,193 @@ class SignalEngine:
             "poi_types": [p.poi_type for p in valid_pois],
         }, valid_pois
 
-    # def _has_fvg_after_poi(self, df: pd.DataFrame, poi_idx: int, direction: str) -> bool:
-    #     """Doctrine Q3: POI must have FVG directly after it."""
-    #     if poi_idx < 0 or poi_idx + 2 >= len(df):
-    #         return False
+    def _select_htf_institutional_pois(
+        self,
+        m15_df: pd.DataFrame,
+        h4_df: pd.DataFrame,
+        d1_df: pd.DataFrame,
+        sweep: SweepEvent,
+        structure_break: StructureBreak,
+    ) -> List[POI]:
+        """
+        Phase B HTF institutional-origin selector.
 
-    #     c0 = df.iloc[poi_idx]
-    #     c1 = df.iloc[poi_idx + 1]
-    #     c2 = df.iloc[poi_idx + 2]
+        Doctrine-confirmed core:
+        - scan the structural leg between IDM and Protected Extreme,
+        - keep only the first OB after IDM and the Extreme OB,
+        - require displacement and immediate FVG,
+        - apply shift rule when the exact anchor candle lacks the valid immediate FVG.
 
-    #     if direction == "BULLISH":
-    #         return float(c0["high"]) < float(c2["low"])
-    #     else:
-    #         return float(c0["low"]) > float(c2["high"])
+        Engineering approximations:
+        - derive IDM / Protected Extreme from pivot lists,
+        - reuse current displacement helper,
+        - keep optional near-price preference with fallback.
+
+        DEBUG TOTALS VERSION:
+        - preserves current behavior
+        - accumulates totals across the whole backtest on self._htf_poi_debug_totals
+        """
+        htf_pois: List[POI] = []
+
+        if not hasattr(self, "_htf_poi_debug_totals"):
+            self._htf_poi_debug_totals = {
+                "calls": 0,
+                "timeframes_checked": 0,
+                "too_short_df": 0,
+                "not_enough_pivots": 0,
+                "bad_anchor_order": 0,
+                "empty_leg": 0,
+                "first_no_shift_fvg": 0,
+                "first_failed_displacement": 0,
+                "extreme_no_shift_fvg": 0,
+                "extreme_failed_displacement": 0,
+                "pois_added": 0,
+                "returned_empty": 0,
+                "returned_nonempty": 0,
+            }
+
+        debug_counts = self._htf_poi_debug_totals
+        debug_counts["calls"] += 1
+
+        if len(d1_df) < 10 and len(h4_df) < 10:
+            debug_counts["returned_empty"] += 1
+            return htf_pois
+
+        current_price = float(m15_df["close"].iloc[-1])
+        piv_window = max(2, self.config.external_swing_window)
+        immediate_window = 8
+
+        def _apply_shift_rule_within_leg(
+            full_df: pd.DataFrame,
+            start_idx: int,
+            leg_end_idx: int,
+        ) -> Optional[int]:
+            for idx in range(start_idx, leg_end_idx + 1):
+                fvg_start = idx + 1
+                fvg_end = min(len(full_df) - 2, leg_end_idx, idx + immediate_window)
+
+                if fvg_end < fvg_start:
+                    continue
+
+                immediate_fvgs = self._find_fvgs(
+                    full_df,
+                    sweep.direction,
+                    start=fvg_start,
+                    end=fvg_end,
+                )
+                if immediate_fvgs:
+                    return idx
+
+            return None
+
+        timeframe_sets = [
+            ("D1", d1_df),
+            ("H4", h4_df),
+        ]
+
+        for timeframe_name, full_df in timeframe_sets:
+            debug_counts["timeframes_checked"] += 1
+
+            if len(full_df) < max(5, piv_window * 2 + 1):
+                debug_counts["too_short_df"] += 1
+                continue
+
+            ph, pl = self._find_pivots_debug(full_df, piv_window)
+
+            if sweep.direction == "BULLISH":
+                pivot_list = pl
+            else:
+                pivot_list = ph
+
+            if len(pivot_list) < 2:
+                debug_counts["not_enough_pivots"] += 1
+                continue
+
+            protected_idx = pivot_list[-1]
+            idm_idx = pivot_list[-2]
+
+            if protected_idx <= idm_idx:
+                debug_counts["bad_anchor_order"] += 1
+                continue
+
+            leg_df = full_df.iloc[idm_idx : protected_idx + 1]
+            if leg_df.empty or len(leg_df) < 3:
+                debug_counts["empty_leg"] += 1
+                continue
+
+            if sweep.direction == "BULLISH":
+                extreme_rel_idx = int(leg_df["low"].to_numpy().argmin())
+            else:
+                extreme_rel_idx = int(leg_df["high"].to_numpy().argmax())
+
+            extreme_abs_idx = idm_idx + extreme_rel_idx
+
+            first_after_idm_abs_idx: Optional[int] = None
+            for scan_idx in range(idm_idx + 1, protected_idx + 1):
+                shifted_idx = _apply_shift_rule_within_leg(full_df, scan_idx, protected_idx)
+                if shifted_idx is None:
+                    debug_counts["first_no_shift_fvg"] += 1
+                    continue
+
+                candidate_poi = self._build_poi(
+                    full_df,
+                    f"{timeframe_name}_HTF_FIRST_OB_AFTER_IDM",
+                    int(shifted_idx),
+                )
+
+                if not self.is_displacement_after_poi(candidate_poi, full_df, sweep.direction):
+                    debug_counts["first_failed_displacement"] += 1
+                    continue
+
+                first_after_idm_abs_idx = shifted_idx
+                break
+
+            shifted_extreme_idx = _apply_shift_rule_within_leg(full_df, extreme_abs_idx, protected_idx)
+            if shifted_extreme_idx is None:
+                debug_counts["extreme_no_shift_fvg"] += 1
+            else:
+                extreme_poi = self._build_poi(
+                    full_df,
+                    f"{timeframe_name}_HTF_EXTREME_OB",
+                    int(shifted_extreme_idx),
+                )
+                if self.is_displacement_after_poi(extreme_poi, full_df, sweep.direction):
+                    htf_pois.append(extreme_poi)
+                    debug_counts["pois_added"] += 1
+                else:
+                    debug_counts["extreme_failed_displacement"] += 1
+
+            if first_after_idm_abs_idx is not None:
+                first_poi = self._build_poi(
+                    full_df,
+                    f"{timeframe_name}_HTF_FIRST_OB_AFTER_IDM",
+                    int(first_after_idm_abs_idx),
+                )
+                htf_pois.append(first_poi)
+                debug_counts["pois_added"] += 1
+
+        htf_pois = self._dedupe_pois(htf_pois)
+
+        if sweep.direction == "BULLISH":
+            nearby_htf_pois = [
+                poi for poi in htf_pois
+                if poi.high >= current_price and (poi.high - current_price) <= 40.0
+            ]
+        else:
+            nearby_htf_pois = [
+                poi for poi in htf_pois
+                if poi.low <= current_price and (current_price - poi.low) <= 40.0
+            ]
+
+        if nearby_htf_pois:
+            htf_pois = nearby_htf_pois
+
+        if htf_pois:
+            debug_counts["returned_nonempty"] += 1
+        else:
+            debug_counts["returned_empty"] += 1
+
+        return htf_pois
 
     def _step_ob_fvg_confluence(
         self,
@@ -1480,7 +1542,7 @@ class SignalEngine:
             is_bullish_body = close_p > open_p
             is_bearish_body = close_p < open_p
             is_strong_body  = body_ratio >= 0.50     # at least 50% body-to-range
-            is_large_candle = body >= atr * 0.25    # at least 75% of ATR in body size
+            is_large_candle = body >= atr * 0.25    # at least 80% of ATR in body size
 
             if direction == "BULLISH" and is_bullish_body and is_strong_body and is_large_candle:
                 return True

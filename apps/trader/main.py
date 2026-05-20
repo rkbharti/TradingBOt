@@ -292,12 +292,197 @@ class XAUUSDTradingBot:
         self.trade_log: list           = []
         self.open_positions: list      = []
         self.manual_positions: list    = []
+        self.closed_trades: list       = []
         self.max_positions             = 3
         self.max_lot_size              = 2.0
         self.risk_per_trade_percent    = 0.5
         self.current_session           = "UNKNOWN"
         self.dry_run                   = DRY_RUN
         self.waiting_for_confirmation  = False
+
+        # ── Cycle summary collector (populated during analyze_once) ───────────
+        self._cycle_data: dict         = {}
+
+    # ── Cycle summary printer ─────────────────────────────────────────────────
+    def _print_cycle_summary(self) -> None:
+        """
+        Prints one clean, readable block per analysis cycle.
+        Reads from self._cycle_data which is populated in analyze_once().
+        Also emits a JSON snapshot to stdout for any log aggregator.
+        """
+        d = self._cycle_data
+        W = 66  # box width
+
+        def row(label: str, value: str) -> str:
+            content = f"  {label:<18} {value}"
+            return f"║{content:<{W}}║"
+
+        def divider(char: str = "─") -> str:
+            return f"╠{char * W}╣"
+
+        def section(title: str) -> str:
+            t = f"  {title}"
+            return f"╠{t:<{W}}╣"
+
+        def blank() -> str:
+            return f"║{' ' * W}║"
+
+        lines = []
+        # ── Header ────────────────────────────────────────────────────────────
+        ts    = d.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        sess  = d.get("session", "UNKNOWN")
+        mode  = "🔴 LIVE" if not self.dry_run else "🟡 DRY-RUN"
+        title = f"  XAUUSD  │  {ts}  │  {sess}  │  {mode}"
+        lines.append(f"╔{'═' * W}╗")
+        lines.append(f"║{title:<{W}}║")
+
+        # ── Account ───────────────────────────────────────────────────────────
+        lines.append(divider())
+        lines.append(f"║{'  💼 ACCOUNT':<{W}}║")
+        acct = d.get("account", {})
+        bal  = acct.get("balance", 0.0)
+        eq   = acct.get("equity", 0.0)
+        lg   = acct.get("login", "—")
+        srv  = acct.get("server", "—")
+        dd   = bal - eq if bal and eq else 0.0
+        lines.append(row("Balance:",    f"${bal:>12,.2f}"))
+        lines.append(row("Equity:",     f"${eq:>12,.2f}   (Drawdown: ${abs(dd):,.2f})"))
+        lines.append(row("Account:",    f"Login: {lg}   Server: {srv}"))
+        lines.append(row("Daily PnL:",  f"{d.get('daily_pnl_pct', 0.0):+.2f}%   Trades today: {d.get('trades_today', 0)}   Consec. losses: {d.get('consecutive_losses', 0)}"))
+
+        # ── Live price ────────────────────────────────────────────────────────
+        lines.append(divider())
+        lines.append(f"║{'  📈 LIVE PRICE  ─  XAUUSD':<{W}}║")
+        candle = d.get("candle", {})
+        lines.append(row("Bid / Ask:",  f"{d.get('bid', 0):.2f}  /  {d.get('ask', 0):.2f}   Spread: {d.get('spread', 0):.2f} pts"))
+        lines.append(row("M5 Candle:",  f"O:{candle.get('open','─')}  H:{candle.get('high','─')}  L:{candle.get('low','─')}  C:{candle.get('close','─')}"))
+        lines.append(row("Δ vs Bid:",   f"{d.get('close_bid_delta', 0):.2f} pts"))
+
+        # ── Bias ──────────────────────────────────────────────────────────────
+        lines.append(divider())
+        lines.append(f"║{'  🧭 MARKET BIAS':<{W}}║")
+        prev_b = d.get("prev_bias", "—")
+        live_b = d.get("current_bias", "—")
+        arrow  = "→" if prev_b == live_b else "⟳"
+        lines.append(row("HTF Bias:",   f"Prev: {prev_b}  {arrow}  Live: {live_b}"))
+        lines.append(row("D1 / H4:",    f"{d.get('d1_bias', '—')}  /  {d.get('h4_bias', '—')}"))
+
+        # ── Gates ─────────────────────────────────────────────────────────────
+        lines.append(divider())
+        lines.append(f"║{'  🔬 SMC SIGNAL ENGINE  ─  8-Gate Sequential':<{W}}║")
+        gate_labels = {
+            "step_1_htf_bias":             "G1  HTF Bias",
+            "step_2_external_liquidity_sweep": "G2  Liquidity Sweep",
+            "step_3_choch_mss_body_close": "G3  CHoCH / MSS",
+            "step_4_valid_poi":            "G4  Valid POI",
+            "step_5_ob_fvg_confluence":    "G5  OB / FVG Confluence",
+            "step_6_dealing_range":        "G6  Dealing Range",
+            "step_7_killzone":             "G7  Killzone",
+            "step_8_risk_reward":          "G8  Risk / Reward",
+        }
+        gates       = d.get("gates", {})
+        first_fail  = None
+        for key, label in gate_labels.items():
+            gdata  = gates.get(key, {})
+            passed = gdata.get("passed", False)
+            reason = gdata.get("reason", "NOT_EVALUATED")
+            if reason == "NOT_EVALUATED":
+                icon   = "  ─"
+                marker = ""
+            elif passed:
+                icon   = "  ✅"
+                marker = ""
+            else:
+                icon   = "  ❌"
+                marker = "  ← STOPPED"
+                if first_fail is None:
+                    first_fail = key
+            content = f"{icon}  {label:<28} {reason}{marker}"
+            lines.append(f"║{content:<{W+2}}║")
+
+        # ── Decision ──────────────────────────────────────────────────────────
+        lines.append(divider())
+        lines.append(f"║{'  🎯 DECISION':<{W}}║")
+        action = d.get("action", "NO_TRADE")
+        conf   = d.get("confidence", 0)
+        reason = d.get("reason", "—")
+        action_icon = "🚀 ENTER" if action == "ENTER" else "⛔ NO_TRADE"
+        lines.append(row("Action:",     f"{action_icon}   Confidence: {conf}%"))
+        lines.append(row("Blocked by:", reason))
+        if d.get("entry_price"):
+            lines.append(row("Entry / SL / TP:", f"{d['entry_price']}  /  {d.get('sl_price','—')}  /  {d.get('tp_price','—')}"))
+
+        # ── Positions ─────────────────────────────────────────────────────────
+        lines.append(divider())
+        bot_pos  = [p for p in self.open_positions if p.get("source") != "MANUAL"]
+        man_pos  = self.manual_positions
+        lines.append(f"║{'  📂 POSITIONS  ─  Bot: ' + str(len(bot_pos)) + '   Manual: ' + str(len(man_pos)):<{W}}║")
+        all_pos = bot_pos + man_pos
+        if not all_pos:
+            lines.append(f"║{'  — No open positions —':<{W}}║")
+        else:
+            for p in all_pos:
+                side   = p.get("signal", "?")
+                ticket = p.get("ticket", "?")
+                entry  = p.get("entry_price", p.get("price_open", 0.0))
+                sl_p   = p.get("sl", "—")
+                tp_p   = p.get("tp", "—")
+                pnl    = p.get("profit", 0.0)
+                src    = "MANUAL" if p.get("source") == "MANUAL" or p.get("origin") == "MANUAL" else "BOT"
+                pnl_s  = f"${float(pnl):+.2f}" if pnl is not None else "—"
+                content = f"  [{src}] #{ticket}  {side}  Entry:{entry}  SL:{sl_p}  TP:{tp_p}  PnL:{pnl_s}"
+                lines.append(f"║{content:<{W}}║")
+
+        # ── Footer ────────────────────────────────────────────────────────────
+        lines.append(f"╚{'═' * W}╝")
+
+        print("\n" + "\n".join(lines))
+
+        # ── Compact JSON snapshot for WebSocket / log aggregator ──────────────
+        snapshot = {
+            "type":       "cycle_update",
+            "timestamp":  d.get("timestamp"),
+            "session":    d.get("session"),
+            "dry_run":    self.dry_run,
+            "account":    d.get("account", {}),
+            "risk": {
+                "daily_pnl_pct":       d.get("daily_pnl_pct", 0.0),
+                "trades_today":        d.get("trades_today", 0),
+                "consecutive_losses":  d.get("consecutive_losses", 0),
+                "peak_balance":        self._peak_balance,
+            },
+            "price": {
+                "bid":             d.get("bid"),
+                "ask":             d.get("ask"),
+                "spread":          d.get("spread"),
+                "close_bid_delta": d.get("close_bid_delta"),
+                "candle":          d.get("candle", {}),
+            },
+            "bias": {
+                "previous":   d.get("prev_bias"),
+                "current":    d.get("current_bias"),
+                "d1":         d.get("d1_bias"),
+                "h4":         d.get("h4_bias"),
+            },
+            "signal": {
+                "action":      d.get("action"),
+                "direction":   d.get("direction"),
+                "confidence":  d.get("confidence"),
+                "reason":      d.get("reason"),
+                "entry_price": d.get("entry_price"),
+                "sl_price":    d.get("sl_price"),
+                "tp_price":    d.get("tp_price"),
+                "gates":       d.get("gates", {}),
+            },
+            "positions": {
+                "bot":    [p for p in self.open_positions if p.get("source") != "MANUAL"],
+                "manual": self.manual_positions,
+            },
+        }
+        try:
+            print("__CYCLE_JSON__:" + json.dumps(snapshot, default=str))
+        except Exception:
+            pass
 
     # ── MT5 wrappers ──────────────────────────────────────────────────────────
     MT5_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
@@ -342,14 +527,28 @@ class XAUUSDTradingBot:
         Returns a list of normalised dicts.
         """
         positions_raw = None
+
+        accessors = []
+        if hasattr(self.mt5, "positions_get"):
+            accessors.append(("self.mt5.positions_get", lambda: self.mt5.positions_get()))
+        if hasattr(self.mt5, "get_positions"):
+            accessors.append(("self.mt5.get_positions", lambda: self.mt5.get_positions()))
+        if hasattr(self.mt5, "get_open_positions"):
+            accessors.append(("self.mt5.get_open_positions", lambda: self.mt5.get_open_positions()))
+        if hasattr(self.mt5, "mt5") and hasattr(self.mt5.mt5, "positions_get"):
+            accessors.append(("self.mt5.mt5.positions_get", lambda: self.mt5.mt5.positions_get()))
+
         try:
-            if   hasattr(self.mt5, "positions_get"):     positions_raw = self.mt5.positions_get()
-            elif hasattr(self.mt5, "get_positions"):      positions_raw = self.mt5.get_positions()
-            elif hasattr(self.mt5, "get_open_positions"): positions_raw = self.mt5.get_open_positions()
-            elif hasattr(self.mt5, "mt5") and hasattr(self.mt5.mt5, "positions_get"):
-                positions_raw = self.mt5.mt5.positions_get()
+            for accessor_name, accessor_call in accessors:
+                try:
+                    candidate = accessor_call()
+                    if candidate is not None:
+                        positions_raw = candidate
+                        break
+                except Exception as inner_e:
+                    pass  # try next accessor silently
         except Exception as e:
-            print(f"\u26a0\ufe0f Error fetching live positions: {e}")
+            print(f"⚠️ Error fetching live positions: {e}")
             return []
 
         if positions_raw is None:
@@ -375,10 +574,22 @@ class XAUUSDTradingBot:
                         "price_current": getattr(p, "price_current", 0.0),
                         "profit":        getattr(p, "profit", 0.0),
                     }
+
                 if p_dict.get("ticket"):
+                    raw_type = p_dict.get("type", 0)
+                    if isinstance(raw_type, str):
+                        if raw_type.upper() == "BUY":
+                            type_code = 0
+                        elif raw_type.upper() == "SELL":
+                            type_code = 1
+                        else:
+                            type_code = 0
+                    else:
+                        type_code = int(raw_type or 0)
+
                     normalized.append({
                         "ticket":        int(p_dict.get("ticket", 0)),
-                        "type":          int(p_dict.get("type", 0)),
+                        "type":          type_code,
                         "volume":        float(p_dict.get("volume", 0.0)),
                         "price_open":    float(p_dict.get("price_open", 0.0)),
                         "sl":            float(p_dict.get("sl", 0.0)),
@@ -388,8 +599,9 @@ class XAUUSDTradingBot:
                         "profit":        float(p_dict.get("profit", 0.0)),
                     })
         except Exception as e:
-            print(f"\u26a0\ufe0f Error normalizing positions: {e}")
+            print(f"⚠️ Error normalizing positions: {e}")
             return []
+
         return normalized
 
     def mt5_place_order(self, side: str, lots: float, sl: float, tp: float):
@@ -515,31 +727,31 @@ class XAUUSDTradingBot:
             tp      = float(pos.get("tp", 0.0))
             side    = pos.get("signal", "BUY")
 
-            # ── Determine PnL ────────────────────────────────────────────────
-            # Best case: MT5 gave us a live profit field when we stored the pos.
-            # Fallback: estimate from SL/TP distance (direction-aware).
             raw_pnl = pos.get("profit", None)
 
+            if not any(ct.get("ticket") == ticket for ct in self.closed_trades):
+                closed_record = dict(pos)
+                closed_record["status"] = "CLOSED"
+                closed_record["closed_time"] = datetime.now().isoformat()
+                if raw_pnl is not None:
+                    closed_record["profit"] = float(raw_pnl)
+                self.closed_trades.append(closed_record)
+
             if raw_pnl is None or raw_pnl == 0.0:
-                # Estimate: did price reach TP or SL?
-                # We don't know for certain so we skip was_win logic here —
-                # better to not count it than to count it wrong.
                 print(f"  ⚠️  Ticket {ticket}: no profit field — skipping policy update")
                 continue
 
-            pnl      = float(raw_pnl)
-            was_win  = pnl > 0
+            pnl = float(raw_pnl)
+            was_win = pnl > 0
 
-            # ── Update challenge policy internal state ────────────────────────
             self.challenge_policy.log_trade_result(
                 was_win=was_win,
                 pnl=pnl,
                 current_balance=current_balance,
             )
 
-            # ── Sync bot-level shadow counters ────────────────────────────────
             self._consecutive_losses = self.challenge_policy.consecutive_losses
-            self._peak_balance       = self.challenge_policy.peak_balance
+            self._peak_balance = self.challenge_policy.peak_balance
 
             if current_balance > 0 and self.challenge_policy.starting_balance > 0:
                 self._daily_pnl_pct = (
@@ -585,6 +797,36 @@ class XAUUSDTradingBot:
                     continue
 
                 if ticket not in bot_tickets:
+                    known_bot_trade = any(
+                        int(log.get("ticket", 0)) == ticket and log.get("action") == "ORDER_PLACED"
+                        for log in self.trade_log
+                        if isinstance(log, dict)
+                    )
+
+                    if known_bot_trade:
+                        existing_open = next((x for x in self.open_positions if x.get("ticket") == ticket), None)
+                        if not existing_open:
+                            type_code = pos.get("type", 0)
+                            trade_type = "BUY" if type_code == 0 else "SELL"
+                            restored_open = {
+                                "ticket": ticket,
+                                "signal": trade_type,
+                                "lot_size": pos.get("volume"),
+                                "sl": pos.get("sl"),
+                                "tp": pos.get("tp"),
+                                "entry_price": float(pos.get("price_open", 0.0)),
+                                "entry_time": datetime.now().isoformat(),
+                                "status": "OPEN",
+                                "source": "SIGNAL_ENGINE",
+                                "type": type_code,
+                                "profit": pos.get("profit", 0.0),
+                                "price_current": pos.get("price_current", 0.0),
+                                "symbol": symbol,
+                            }
+                            self.open_positions.append(restored_open)
+                            print(f"♻️ Restored bot trade from MT5: Ticket {ticket} | {trade_type}")
+                        continue
+
                     current_manual_tickets.append(ticket)
                     existing = next((x for x in self.manual_positions if x["ticket"] == ticket), None)
 
@@ -874,14 +1116,23 @@ class XAUUSDTradingBot:
         is_active, session_name = is_trading_session()
         session_norm = map_session_for_filter(session_name)
         self.current_session = session_norm
-        print(f"\n🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Session: {self.current_session}")
+
+        # ── Initialise cycle_data collector ───────────────────────────────────
+        self._cycle_data = {
+            "timestamp":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "session":    session_norm,
+        }
 
         previous_bias = self.htf_memory.get("htf_bias", "NEUTRAL")
-        print("HTF MEMORY BIAS (previous cycle):", previous_bias)
+        self._cycle_data["prev_bias"] = previous_bias
 
         # ── Weekend / market closed ───────────────────────────────────────────
         if not is_active:
             print(f"⏸️ Market session '{session_norm}' not active — heartbeat only")
+            self.detect_and_manage_manual_trades({
+                "market_structure": {"current_trend": previous_bias},
+                "current_zone": "UNKNOWN",
+            })
             acct = self.mt5_get_account()
             equity = float(getattr(acct, "equity", 0.0)) if acct else 0.0
             balance = float(getattr(acct, "balance", 0.0)) if acct else 0.0
@@ -901,12 +1152,12 @@ class XAUUSDTradingBot:
             except Exception:
                 pass
 
-            send_to_dashboard(
+            dashboard_ok = send_to_dashboard(
                 {
                     "equity": equity, "balance": balance, "last_price": 0,
                     "open_positions": self.open_positions,
                     "manual_positions": self.manual_positions,
-                    "closed_trades": [], "chart_data": [],
+                    "closed_trades": self.closed_trades, "chart_data": [],  # ← Gap 1 fix
                     "current_session": session_norm,
                 },
                 {
@@ -914,7 +1165,8 @@ class XAUUSDTradingBot:
                     "zone_strength": 0, "current_zone": "CLOSED", "zones": {},
                 },
             )
-            return
+            print(f"🔎 Weekend dashboard POST success: {dashboard_ok}")
+            return  # ← Gap 3 fix: stop here, do not fall through to active-market code
 
         # ── Fetch market data ─────────────────────────────────────────────────
         market_data, current_price = self.fetch_and_prepare()
@@ -928,30 +1180,41 @@ class XAUUSDTradingBot:
         # ── LIVE CANDLE SYNC VERIFICATION ─────────────────────────────────────
         try:
             _vc = market_data.iloc[-1]
-            print("\n🕯️  LIVE CANDLE SYNC CHECK")
-            print(f"   Time  : {_vc.get('time', _vc.name)}")
-            print(f"   Open  : {_vc['open']}")
-            print(f"   High  : {_vc['high']}")
-            print(f"   Low   : {_vc['low']}")
-            print(f"   Close : {_vc['close']}")
-            print(f"   Bid   : {bid}  |  Ask: {ask}  |  Spread: {round(spread, 2)}")
-            print(f"   ⚡ Close vs Bid delta: {round(abs(float(_vc['close']) - bid), 2)} pts")
+            _close_bid_delta = round(abs(float(_vc['close']) - bid), 2)
+            self._cycle_data.update({
+                "bid":             bid,
+                "ask":             ask,
+                "spread":          round(spread, 2),
+                "close_bid_delta": _close_bid_delta,
+                "candle": {
+                    "time":  str(_vc.get('time', _vc.name)),
+                    "open":  _vc['open'],
+                    "high":  _vc['high'],
+                    "low":   _vc['low'],
+                    "close": _vc['close'],
+                },
+            })
         except Exception as _ve:
             print(f"⚠️ Candle sync check failed: {_ve}")
 
         # ── Fetch all timeframe DataFrames ────────────────────────────────────
-        m5_df = self.mtf.fetch_data("M5")
-        latest = m5_df.iloc[-1]
-        m15_df = self.mtf.fetch_data("M15")
-        h4_df = self.mtf.fetch_data("H4")
-        d1_df = self.mtf.fetch_data("D1")
+        m5_raw = self.mtf.fetch_data("M5")
+        m15_raw = self.mtf.fetch_data("M15")
+        h4_raw = self.mtf.fetch_data("H4")
+        d1_raw = self.mtf.fetch_data("D1")
+
+        m5_df = m5_raw.get("df") if isinstance(m5_raw, dict) else m5_raw
+        m15_df = m15_raw.get("df") if isinstance(m15_raw, dict) else m15_raw
+        h4_df = h4_raw.get("df") if isinstance(h4_raw, dict) else h4_raw
+        d1_df = d1_raw.get("df") if isinstance(d1_raw, dict) else d1_raw
+
+        latest = m5_df.iloc[-1] if m5_df is not None and len(m5_df) > 0 else None
 
         if any(df is None or len(df) == 0 for df in [m5_df, m15_df, h4_df, d1_df]):
             print("❌ One or more timeframe DataFrames unavailable — skipping cycle")
             return
 
         # ── CANONICAL SIGNAL ENGINE ───────────────────────────────────────────
-        print("\n🔬 Running SMC Signal Engine (8-gate sequential check)...")
         try:
             result = self.signal_engine.evaluate(
                 m5_df=m5_df,
@@ -970,7 +1233,21 @@ class XAUUSDTradingBot:
         if result.direction:
             self.htf_memory.update("htf_bias", result.direction)
 
-        print("HTF LIVE BIAS (current cycle):", current_bias)
+        # ── Populate bias + gate data into cycle_data ─────────────────────────
+        htf_gate_early = result.gates.get("step_1_htf_bias", {})
+        self._cycle_data.update({
+            "current_bias": current_bias,
+            "d1_bias":      htf_gate_early.get("d1_bias", "NEUTRAL"),
+            "h4_bias":      htf_gate_early.get("h4_bias", "NEUTRAL"),
+            "action":       result.action,
+            "direction":    result.direction,
+            "confidence":   result.confidence_score,
+            "reason":       result.reason,
+            "entry_price":  result.entry_price,
+            "sl_price":     result.sl_price,
+            "tp_price":     result.tp_price,
+            "gates":        result.gates,
+        })
 
         # ── Manual trade observation ──────────────────────────────────────────
         self.detect_and_manage_manual_trades({
@@ -978,21 +1255,22 @@ class XAUUSDTradingBot:
             "current_zone": "UNKNOWN",
         })
 
-        # ── Print gate results ────────────────────────────────────────────────
-        print("\n📊 SIGNAL ENGINE — GATE RESULTS")
-        print("=" * 58)
-        for gate_name, gate_data in result.gates.items():
-            icon = "✅" if gate_data.get("passed") else "❌"
-            reason = gate_data.get("reason", "")
-            print(f"  {icon}  {gate_name:<40} {reason}")
-        print("=" * 58)
-        print(f"  🎯 ACTION:     {result.action}")
-        print(f"  📌 DIRECTION:  {result.direction}")
-        print(f"  🔑 REASON:     {result.reason}")
-        print(f"  💯 CONFIDENCE: {result.confidence_score}%")
-        if result.entry_price:
-            print(f"  💰 ENTRY: {result.entry_price}  SL: {result.sl_price}  TP: {result.tp_price}")
-        print("=" * 58 + "\n")
+        # ── Collect account info for summary ─────────────────────────────────
+        acct_summary = self.mt5_get_account()
+        self._cycle_data.update({
+            "account": {
+                "login":   getattr(acct_summary, "login", None) if acct_summary else None,
+                "server":  getattr(acct_summary, "server", None) if acct_summary else None,
+                "balance": float(getattr(acct_summary, "balance", 0.0)) if acct_summary else 0.0,
+                "equity":  float(getattr(acct_summary, "equity", 0.0)) if acct_summary else 0.0,
+            },
+            "daily_pnl_pct":      self._daily_pnl_pct,
+            "trades_today":       self._trades_today,
+            "consecutive_losses": self._consecutive_losses,
+        })
+
+        # ── Print clean cycle summary (terminal + JSON line) ─────────────────
+        self._print_cycle_summary()
 
         # ── Log cycle ─────────────────────────────────────────────────────────
         log_record = {
@@ -1016,8 +1294,26 @@ class XAUUSDTradingBot:
         except Exception:
             pass
 
+        # ── Gap 2 fix: refresh floating P&L on open positions from MT5 ─────────
+        # Pulls the latest price_current and profit for every open position
+        # so the dashboard shows live floating P&L, not stale entry-time values.
+        try:
+            live_pos_map = {
+                p["ticket"]: p
+                for p in self.mt5_get_all_positions()
+                if p.get("ticket")
+            }
+            for op in self.open_positions:
+                ticket = op.get("ticket")
+                if ticket and ticket in live_pos_map:
+                    live = live_pos_map[ticket]
+                    op["price_current"] = live.get("price_current", op.get("price_current", 0.0))
+                    op["profit"]        = live.get("profit",        op.get("profit", 0.0))
+        except Exception as _pnl_err:
+            print(f"⚠️ Live P&L refresh failed: {_pnl_err}")
+
         # ── Dashboard payload ─────────────────────────────────────────────────
-        acct = self.mt5_get_account()
+        acct = acct_summary  # already fetched above for cycle summary
         htf_gate = result.gates.get("step_1_htf_bias", {})
         dr_gate = result.gates.get("step_6_dealing_range", {})
         rr_gate = result.gates.get("step_8_risk_reward", {})
@@ -1064,7 +1360,7 @@ class XAUUSDTradingBot:
                 "last_price": bid,
                 "open_positions": self.open_positions,
                 "manual_positions": self.manual_positions,
-                "closed_trades": [],
+                "closed_trades": self.closed_trades,          # ← Gap 1 fix: was hardcoded []
                 "chart_data": market_data.tail(300).to_dict(orient="records"),
                 "current_session": self.current_session,
                 "account": {
@@ -1079,12 +1375,10 @@ class XAUUSDTradingBot:
 
         # ── Execution gate ────────────────────────────────────────────────────
         if len(self.open_positions) > 0:
-            print(f"⛔ BLOCKED: POSITION_ALREADY_OPEN ({len(self.open_positions)} open)")
-            return
+            return  # summary already shows open position count
 
         if result.action != "ENTER":
-            print(f"⛔ NO_TRADE: {result.reason}")
-            return
+            return  # summary already shows reason
 
         # ── All 8 gates passed — execute via OrderExecutor ───────────────────
         acct = self.mt5_get_account()
@@ -1196,6 +1490,22 @@ class XAUUSDTradingBot:
                 **position_record,
             })
             self.save_trade_log()
+            # ── ADD THIS BLOCK ─────────────────────────────────────
+            # Post-trade dashboard sync: send updated open_positions AFTER append
+            acct_post = self.mt5_get_account()
+            send_to_dashboard(
+                {
+                    "equity":           float(getattr(acct_post, "equity", 0.0)) if acct_post else 0.0,
+                    "balance":          float(getattr(acct_post, "balance", 0.0)) if acct_post else 0.0,
+                    "last_price":       bid,
+                    "open_positions":   self.open_positions,       # ← now contains new position
+                    "manual_positions": self.manual_positions,
+                    "closed_trades":    [],
+                    "chart_data":       [],                        # omit heavy chart data on this call
+                    "current_session":  self.current_session,
+                },
+                analysis_snapshot,                                 # reuse snapshot from this cycle
+            )
 
             send_telegram(
                 f"🚀 <b>{trade_side}</b> entered @ {result.entry_price}\n"
