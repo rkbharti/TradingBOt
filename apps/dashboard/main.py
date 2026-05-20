@@ -1002,7 +1002,7 @@ html_content = """
                 // A) FIX: Dynamic pipeline ingestion handling
                 connect() {
                     // Force direct alignment to your VPS streaming instance endpoint
-                    this.ws = new WebSocket('ws://68.233.99.145:8000/ws');
+                    this.ws = new WebSocket('ws://68.233.99.145:8001/ws');
 
                     this.ws.onopen = () => {
                         this.ws_connected = true;
