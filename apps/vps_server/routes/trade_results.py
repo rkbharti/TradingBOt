@@ -1,10 +1,9 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List
-
 from fastapi import APIRouter
-
 from apps.vps_server.telegram_utils import send_telegram
 
+# 1. This must be initialized BEFORE decorators use it
 router = APIRouter(tags=["trade-results"])
 
 # In-memory store (bounded)
@@ -41,29 +40,44 @@ def build_trade_result_message(event: Dict[str, Any]) -> str:
 
 
 @router.post("/trade-result")
-def receive_trade_result(payload: Dict[str, Any]):
+async def receive_trade_result(payload: Dict[str, Any]):
+    from apps.vps_server.routes.bot_control import manager
+    from apps.vps_server.state import bot_state
+
     event = {
         **payload,
         "received_at": datetime.now(timezone.utc).isoformat(),
     }
-
     trade_result_events.append(event)
 
-    # Memory control (production safety)
     if len(trade_result_events) > MAX_TRADE_RESULTS:
         trade_result_events.pop(0)
 
-    # Telegram alert
+    # Update and accumulate metrics directly inside our central state cache
+    trade_pnl = float(payload.get("pnl", 0))
+    bot_state.pnl_today = round(getattr(bot_state, "pnl_today", 0.0) + trade_pnl, 2)
+    bot_state.pnl_total = round(getattr(bot_state, "pnl_total", 0.0) + trade_pnl, 2)
+    bot_state.balance = float(payload.get("balance", bot_state.balance))
+    bot_state.equity = float(payload.get("equity", bot_state.equity))
+
     try:
         send_telegram(build_trade_result_message(event))
     except Exception as e:
         print(f"❌ Trade-result Telegram error: {e}")
 
+    # Broadcast from the central state instead of the raw payload keys
+    await manager.broadcast({
+        "closed_trades": trade_result_events[-20:][::-1],
+        "equity": bot_state.equity,
+        "balance": bot_state.balance,
+        "pnl_today": bot_state.pnl_today,
+        "pnl_total": bot_state.pnl_total
+    })
+
     return {
         "ok": True,
-        "message": "Trade result received",
+        "message": "Trade result captured and updated live",
         "count": len(trade_result_events),
-        "event": event,
     }
 
 
