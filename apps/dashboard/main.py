@@ -131,584 +131,926 @@ html_content = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;">
-    <title>Guardeer OS v3</title>
-    
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GUARDEER OS v4.0 - Institutional SMC Terminal</title>
+
     <script src="https://unpkg.com/lightweight-charts@4.0.0/dist/lightweight-charts.standalone.production.js"></script>
-    <script src="https://unpkg.com/@phosphor-icons/web"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
-    <link href="https://cdn.jsdelivr.net/npm/gridstack@7.2.3/dist/gridstack.min.css" rel="stylesheet"/>
-    <script src="https://cdn.jsdelivr.net/npm/gridstack@7.2.3/dist/gridstack-all.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
+
     <style>
-        :root { --bg: #000000; --card-bg: #1c1c1e; --card-border: #2c2c2e; --text-main: #ffffff; --text-sub: #8e8e93; --green: #30d158; --red: #ff453a; --blue: #0a84ff; --gold: #ffd60a; --radius: 16px; }
-        * { box-sizing: border-box; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
-        body { background: var(--bg); color: var(--text-main); font-family: 'SF Pro Display', sans-serif; margin: 0; padding: 10px; overflow-x: hidden; }
-        .grid-stack-item-content { background: var(--card-bg); border-radius: var(--radius); border: 1px solid rgba(255,255,255,0.08); overflow: hidden !important; box-shadow: 0 4px 12px rgba(0,0,0,0.3); display: flex; flex-direction: column; }
-        .w-header { padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.03); cursor: grab; }
-        .w-header:active { cursor: grabbing; }
-        .w-title { font-size: 11px; text-transform: uppercase; font-weight: 700; color: var(--text-sub); display: flex; align-items: center; gap: 6px; }
-        .w-body { flex: 1; padding: 14px; overflow-y: auto; position: relative; }
-        .val-xl { font-size: clamp(24px, 4vw, 32px); font-weight: 700; font-family: 'JetBrains Mono', monospace; letter-spacing: -1px; }
-        .val-lg { font-size: 18px; font-weight: 600; }
-        .mono { font-family: 'JetBrains Mono', monospace; }
-        .text-green { color: var(--green); } .text-red { color: var(--red); } .text-blue { color: var(--blue); }
-        .flip-card { perspective: 1000px; width: 100%; height: 100%; }
-        .flip-inner { position: relative; width: 100%; height: 100%; text-align: center; transition: transform 0.6s; transform-style: preserve-3d; }
-        .flipped .flip-inner { transform: rotateY(180deg); }
-        .flip-front, .flip-back { position: absolute; width: 100%; height: 100%; backface-visibility: hidden; display: flex; flex-direction: column; justify-content: center; }
-        .flip-back { transform: rotateY(180deg); background: #252528; border-radius: var(--radius); }
-        #chart-container { width: 100%; height: 100%; }
-        .chart-overlay { position: absolute; top: 10px; left: 10px; z-index: 20; display: flex; gap: 6px; pointer-events: none; }
-        .badge { background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); padding: 4px 8px; border-radius: 6px; font-size: 10px; font-weight: 600; border: 1px solid rgba(255,255,255,0.1); }
-        .pos-item { background: rgba(255,255,255,0.03); border-radius: 8px; padding: 10px; margin-bottom: 8px; border-left: 3px solid var(--text-sub); display: flex; justify-content: space-between; align-items: center; }
-        .pos-item.BUY { border-left-color: var(--green); } .pos-item.SELL { border-left-color: var(--red); }
-        .pulse { animation: pulse 2s infinite; }
-        @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
-        .pos-footer { margin-top: 8px; display:flex; justify-content:space-between; align-items:center; font-size:12px; color:var(--text-sub); }
-        /* Feed rows */
-        .feed-row { display:flex; justify-content:space-between; align-items:center; padding:5px 8px; margin-bottom:4px; background:rgba(255,255,255,0.03); border-radius:6px; border-left:3px solid; }
-        .feed-row.BUY { border-left-color: var(--green); }
-        .feed-row.SELL { border-left-color: var(--red); }
-        .feed-row.WIN { border-left-color: var(--green); }
-        .feed-row.LOSS { border-left-color: var(--red); }
-        /* Bot control */
-        .bot-status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-        .bot-status-dot.ACTIVE { background: var(--green); animation: pulse 2s infinite; }
-        .bot-status-dot.PAUSED { background: var(--red); }
-        .bot-status-dot.OFFLINE { background: #636366; }
-        .ctrl-btn { border: none; border-radius: 8px; padding: 8px 16px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: 'SF Pro Display', sans-serif; letter-spacing: 0.5px; transition: opacity 0.15s; }
-        .ctrl-btn:active { opacity: 0.7; }
-        .ctrl-btn.pause { background: rgba(255,69,58,0.2); color: var(--red); border: 1px solid rgba(255,69,58,0.4); }
-        .ctrl-btn.resume { background: rgba(48,209,88,0.2); color: var(--green); border: 1px solid rgba(48,209,88,0.4); }
+        :root {
+            --bg-black: #000000;
+            --bg-panel: #060607;
+            --bg-panel-header: #0c0c0e;
+            --border-color: #16161a;
+            --text-main: #d1d1d6;
+            --text-muted: #636366;
+            --neon-green: #00ff88;
+            --neon-red: #ff4d4d;
+            --neon-amber: #ff9f0a;
+            --neon-blue: #00d4ff;
+            --terminal-gold: #c5a880;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+        }
+
+        body {
+            background-color: var(--bg-black);
+            color: var(--text-main);
+            font-family: 'Rajdhani', sans-serif;
+            font-size: 13px;
+            letter-spacing: 0.5px;
+            overflow-x: hidden;
+            padding-bottom: 30px;
+        }
+
+        .mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* Utility Classes */
+        .txt-green { color: var(--neon-green) !important; }
+        .txt-red { color: var(--neon-red) !important; }
+        .txt-amber { color: var(--neon-amber) !important; }
+        .txt-muted { color: var(--text-muted) !important; }
+        .txt-gold { color: var(--terminal-gold) !important; }
+
+        /* HEADER */
+        .terminal-header {
+            background-color: var(--bg-black);
+            border-bottom: 1px solid var(--border-color);
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            align-items: center;
+            padding: 8px 16px;
+            height: 65px;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+        }
+
+        .timezone-block {
+            display: flex;
+            flex-direction: column;
+        }
+        .timezone-label {
+            font-size: 10px;
+            color: var(--text-muted);
+            font-weight: 700;
+            margin-bottom: 2px;
+        }
+        .time-row {
+            display: flex;
+            gap: 16px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .header-center {
+            text-align: center;
+        }
+        .header-center h1 {
+            font-size: 24px;
+            color: var(--neon-green);
+            font-weight: 700;
+            letter-spacing: 3px;
+            line-height: 1.1;
+        }
+        .header-center .subtitle {
+            font-size: 10px;
+            color: var(--text-main);
+            letter-spacing: 1.5px;
+            font-weight: 600;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 20px;
+        }
+        .control-panel {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border: 1px solid var(--border-color);
+            padding: 4px 8px;
+            border-radius: 4px;
+            background: #09090b;
+        }
+        .btn-toggle {
+            padding: 2px 8px;
+            font-size: 11px;
+            font-weight: 700;
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            cursor: pointer;
+            border-radius: 3px;
+            transition: all 0.2s ease;
+        }
+        .btn-toggle.active-on {
+            background: rgba(0, 255, 136, 0.1);
+            border-color: var(--neon-green);
+            color: var(--neon-green);
+        }
+        .btn-toggle.active-off {
+            background: rgba(255, 77, 77, 0.1);
+            border-color: var(--neon-red);
+            color: var(--neon-red);
+        }
+
+        .meta-item {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+        .meta-label { font-size: 9px; color: var(--text-muted); font-weight: bold; }
+        .meta-val { font-size: 12px; font-weight: 600; }
+
+        /* DASHBOARD LAYOUT */
+        .dashboard-container {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 12px;
+        }
+
+        .top-row-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+        }
+
+        /* PANELS */
+        .terminal-panel {
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .panel-header {
+            background-color: var(--bg-panel-header);
+            border-bottom: 1px solid var(--border-color);
+            padding: 6px 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .panel-title {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--terminal-gold);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .panel-title::before {
+            content: '';
+            display: inline-block;
+            width: 3px;
+            height: 11px;
+            background: var(--terminal-gold);
+        }
+
+        .panel-body {
+            padding: 12px;
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        /* DATA ROWS & LISTS */
+        .data-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .data-label { color: var(--text-muted); font-weight: 500; font-size: 12px; }
+        .data-value { font-weight: 600; font-size: 13px; }
+
+        /* NEWS FILTER SPECIFIC */
+        .filter-tabs {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 8px;
+            font-size: 11px;
+            align-items: center;
+        }
+        .filter-tab {
+            padding: 1px 6px;
+            border: 1px solid transparent;
+            color: var(--text-muted);
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .filter-tab.active {
+            border: 1px solid var(--neon-red);
+            color: var(--neon-red);
+            background: rgba(255, 77, 77, 0.05);
+        }
+
+        /* NARRATIVE ENGINE SPECIFIC */
+        .progress-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+        }
+        .progress-bar-bg {
+            background: #141416;
+            height: 8px;
+            flex-grow: 1;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .progress-bar-fill {
+            background: var(--neon-green);
+            height: 100%;
+            transition: width 0.4s ease;
+        }
+        .narrative-box {
+            background: rgba(197, 168, 128, 0.04);
+            border: 1px dashed rgba(197, 168, 128, 0.15);
+            padding: 6px 8px;
+            font-size: 11px;
+            color: #ebdcb9;
+            margin-top: 8px;
+            line-height: 1.3;
+        }
+
+        /* SYSTEM STATUS SPECIFIC */
+        .status-indicator-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+        .status-dot-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--neon-green);
+            box-shadow: 0 0 6px var(--neon-green);
+        }
+        .status-dot.inactive {
+            background: var(--neon-red) !important;
+            box-shadow: 0 0 6px var(--neon-red) !important;
+        }
+
+        /* CHART REGION */
+        .chart-controls-bar {
+            background: var(--bg-panel-header);
+            border-bottom: 1px solid var(--border-color);
+            padding: 6px 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .chart-meta-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .chart-symbol { font-size: 14px; font-weight: 700; color: #fff; }
+        .badge {
+            font-size: 11px;
+            padding: 1px 6px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .badge-green { background: rgba(0,255,136,0.1); border: 1px solid var(--neon-green); color: var(--neon-green); }
+        .badge-gold { background: rgba(197,168,128,0.1); border: 1px solid var(--terminal-gold); color: var(--terminal-gold); }
+        
+        .timeframe-selector {
+            display: flex;
+            gap: 2px;
+        }
+        .tf-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            padding: 2px 6px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.1s ease;
+        }
+        .tf-btn.active {
+            background: #1c1c1f;
+            color: #fff;
+            border-radius: 2px;
+        }
+
+        .chart-container-shell {
+            height: 380px;
+            position: relative;
+            background-color: #050505;
+        }
+
+        /* TABLES WORKSPACE FOR LOWER TIERS */
+        .bottom-row-grid {
+            display: grid;
+            grid-template-columns: 2.2fr 2fr 1.8fr;
+            gap: 12px;
+        }
+
+        .table-wrapper {
+            width: 100%;
+            overflow-x: auto;
+        }
+        .terminal-table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 12px;
+        }
+        .terminal-table th {
+            background: var(--bg-panel-header);
+            color: var(--text-muted);
+            font-weight: 600;
+            padding: 6px 8px;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 10px;
+            text-transform: uppercase;
+        }
+        .terminal-table td {
+            padding: 6px 8px;
+            border-bottom: 1px solid rgba(255,255,255,0.02);
+            white-space: nowrap;
+        }
+        .table-footer {
+            padding: 6px 8px;
+            text-align: right;
+            border-top: 1px solid var(--border-color);
+            font-weight: 700;
+            font-size: 12px;
+        }
+
+        /* LOWER RIGHT SPLIT: ACTIONS & GATES */
+        .gates-split-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            height: 100%;
+        }
+        .gate-list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+            padding: 3px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.02);
+        }
+
+        /* FOOTER STATUS STRIP */
+        .terminal-footer {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: #020202;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 16px;
+            font-size: 10px;
+            color: var(--text-muted);
+            font-weight: 600;
+            z-index: 1000;
+        }
+        .footer-left-meta span, .footer-right-meta span {
+            margin-right: 14px;
+        }
     </style>
 </head>
+
 <body x-data="dashboardStore()">
 
-    <div class="grid-stack">
-        <div class="grid-stack-item" gs-id="capital" gs-w="3" gs-h="2">
-            <div class="grid-stack-item-content" @click="flipCapital = !flipCapital" :class="{ 'flipped': flipCapital }">
-                <div class="flip-card">
-                    <div class="flip-inner">
-                        <div class="flip-front w-body" style="align-items: flex-start; text-align: left;">
-                            <div class="w-title" style="width:100%; justify-content:space-between;">
-                                <span><i class="ph-fill ph-wallet"></i> Capital</span>
-                                <div class="pulse" style="width:6px; height:6px; background:var(--green); border-radius:50%"></div>
-                            </div>
-                            <div style="margin-top:auto">
-                                <div class="text-sub" style="font-size:11px;">Total Equity</div>
-                                <div class="val-xl" x-text="fmt(equity)">$0.00</div>
-                                <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">
-                                    <div class="mono" style="font-size:12px;" :class="pnl_today >= 0 ? 'text-green' : 'text-red'">
-                                        <div style="font-size:10px; color:var(--text-sub)">Today</div>
-                                        <div style="font-weight:700" x-text="(pnl_today >= 0 ? '+' : '') + fmt(pnl_today)"></div>
-                                    </div>
-                                    <div class="mono" style="font-size:12px;" :class="pnl_week >= 0 ? 'text-green' : 'text-red'">
-                                        <div style="font-size:10px; color:var(--text-sub)">This Week</div>
-                                        <div style="font-weight:700" x-text="(pnl_week >= 0 ? '+' : '') + fmt(pnl_week)"></div>
-                                    </div>
-                                    <div class="mono" style="font-size:12px;" :class="pnl_total >= 0 ? 'text-green' : 'text-red'">
-                                        <div style="font-size:10px; color:var(--text-sub)">Total</div>
-                                        <div style="font-weight:700" x-text="(pnl_total >= 0 ? '+' : '') + fmt(pnl_total)"></div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="flip-back w-body">
-                            <div class="w-title"><i class="ph-fill ph-chart-line-up"></i> Balance</div>
-                            <div class="val-xl" x-text="fmt(balance)">$0.00</div>
-                            <div class="mono text-sub" style="font-size:12px; margin-top:6px;">Open P&L: <span :class="open_pnl >= 0 ? 'text-green' : 'text-red' " x-text="(open_pnl >= 0 ? '+' : '') + fmt(open_pnl)"></span></div>
-                        </div>
-                    </div>
+    <header class="terminal-header">
+        <div class="header-left">
+            <div class="timezone-block">
+                <span class="timezone-label">TIMEZONE</span>
+                <div class="time-row mono">
+                    <div><span class="txt-amber">IST</span> <span id="ist-clock">--:--:--</span></div>
+                    <div><span class="txt-muted">UTC</span> <span id="utc-clock" class="txt-main">--:--:--</span></div>
                 </div>
             </div>
         </div>
 
-        <div class="grid-stack-item" gs-id="smc" gs-w="3" gs-h="2">
-            <div class="grid-stack-item-content">
-                <div class="w-header">
-                    <span class="w-title"><i class="ph-fill ph-brain"></i> SMC AI</span>
-                    <span class="badge text-blue" x-text="session">--</span>
+        <div class="header-center">
+            <h1>GUARDEER OS</h1>
+            <div class="subtitle">INSTITUTIONAL SMC COMMAND TERMINAL</div>
+        </div>
+
+        <div class="header-right">
+            <div class="control-panel">
+                <span class="meta-label" style="margin-right:4px;">CONTROL</span>
+                <span style="font-size:11px; font-weight:700; color:var(--text-main)">BOT STATUS</span>
+                <span class="status-dot" :class="bot_status ? '' : 'inactive'" style="margin: 0 4px;"></span>
+                <span :class="bot_status ? 'txt-green' : 'txt-red'" style="font-size:11px; font-weight:700; margin-right:6px;" x-text="bot_status ? 'RUNNING' : 'STOPPED'">RUNNING</span>
+                
+                <button class="btn-toggle" :class="bot_status ? 'active-on' : ''" @click="toggleBot(true)">ON</button>
+                <button class="btn-toggle" :class="!bot_status ? 'active-off' : ''" @click="toggleBot(false)">OFF</button>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">SERVER</span>
+                <span class="meta-val mono">VPS-01 <span class="txt-muted" style="font-size:10px;">v6.3</span></span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">ACCOUNT</span>
+                <span class="meta-val mono txt-amber">REAL-01</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="dashboard-container">
+        
+        <section class="top-row-grid">
+            
+            <div class="terminal-panel">
+                <div class="panel-header">
+                    <div class="panel-title">Account Overview</div>
                 </div>
-                <div class="w-body">
-                    <div style="margin-bottom:15px;">
-                        <div class="text-sub" style="font-size:11px">Structure</div>
-                        <div class="val-lg" x-text="structure" :class="structure.includes('UP') ? 'text-green' : structure.includes('DOWN') ? 'text-red' : ''">--</div>
+                <div class="panel-body">
+                    <div class="data-row"><span class="data-label">LOGIN</span><span class="data-value mono">210045678</span></div>
+                    <div class="data-row"><span class="data-label">SERVER</span><span class="data-value mono">Exness-MT5Real</span></div>
+                    <div class="data-row"><span class="data-label">EQUITY</span><span class="data-value mono txt-green" x-text="fmt(equity)">$0.00</span></div>
+                    <div class="data-row"><span class="data-label">BALANCE</span><span class="data-value mono txt-green" x-text="fmt(balance)">$0.00</span></div>
+                    <div class="data-row">
+                        <span class="data-label">DAILY P&L</span>
+                        <span class="data-value mono" :class="pnl_today >= 0 ? 'txt-green' : 'txt-red'" x-text="fmt(pnl_today)">$0.00</span>
                     </div>
-                    <div>
-                        <div class="w-title" style="justify-content:space-between;">
-                            <span>Zone Strength</span>
-                            <span x-text="zone_strength + '%'">0%</span>
-                        </div>
-                        <div style="height:4px; background:#333; border-radius:2px; margin-top:4px; overflow:hidden;">
-                            <div :style="`width: ${zone_strength}%; background: ${zone_strength > 50 ? 'var(--green)' : 'var(--blue)'}; height:100%`"></div>
-                        </div>
+                    <div class="data-row">
+                        <span class="data-label">WEEKLY P&L</span>
+                        <span class="data-value mono" :class="pnl_week >= 0 ? 'txt-green' : 'txt-red'" x-text="fmt(pnl_week)">$0.00</span>
+                    </div>
+                    <div class="data-row" style="margin-bottom:0;">
+                        <span class="data-label">OVERALL P&L</span>
+                        <span class="data-value mono" :class="pnl_total >= 0 ? 'txt-green' : 'txt-red'" x-text="fmt(pnl_total)">$0.00</span>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <div class="grid-stack-item" gs-id="news" gs-w="6" gs-h="1">
-            <div class="grid-stack-item-content">
-                <div class="w-body" style="display:flex; align-items:center; gap:12px; padding:0 14px;">
-                    <i class="ph-fill ph-info text-blue" style="font-size:20px;"></i>
-                    <div style="flex:1; overflow:hidden;">
-                        <div style="font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" x-text="news.title">Scanning...</div>
-                        <div class="text-sub" style="font-size:10px;" x-text="news.time">--</div>
+            <div class="terminal-panel">
+                <div class="panel-header">
+                    <div class="panel-title">News Filter</div>
+                </div>
+                <div class="panel-body">
+                    <div class="filter-tabs">
+                        <span class="txt-muted" style="font-size:10px; font-weight:700;">IMPACT:</span>
+                        <span class="filter-tab">ALL</span>
+                        <span class="filter-tab active">HIGH</span>
+                        <span class="filter-tab">MED</span>
+                        <span class="filter-tab">LOW</span>
                     </div>
-                    <div style="text-align:right;">
-                        <div class="mono" style="font-weight:700;" x-text="price">--.--</div>
-                        <div class="text-sub" style="font-size:10px;">XAUUSD</div>
+                    <div style="flex-grow:1; display:flex; flex-direction:column; gap:4px;">
+                        <template x-for="item in news_items">
+                            <div class="data-row mono" style="font-size:12px; margin-bottom:2px;">
+                                <span class="txt-muted" x-text="item.time">00:00</span>
+                                <span :class="item.impact === 'HIGH' ? 'txt-red' : item.impact === 'MED' ? 'txt-amber' : 'txt-muted'" style="width:35px;font-weight:700" x-text="item.impact">HIGH</span>
+                                <span class="txt-main" style="flex-grow:1; text-align:right" x-text="item.title">Event Loading...</span>
+                            </div>
+                        </template>
+                        <div x-show="news_items.length === 0" class="txt-muted mono" style="font-size:11px; text-align:center; margin-top:20px;">
+                            NO MARKET EVENT DATA
+                        </div>
+                    </div>
+                    <div class="data-row mono" style="margin-top:6px; margin-bottom:0; font-size:11px;">
+                        <span class="txt-muted">NEXT EVENT IN:</span>
+                        <span class="txt-amber" x-text="news.time">COUNTING DOWN</span>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <div class="grid-stack-item" gs-id="positions" gs-w="3" gs-h="3">
-            <div class="grid-stack-item-content">
-                <div class="w-header">
-                    <span class="w-title"><i class="ph-fill ph-list-dashes"></i> Positions</span>
-                    <span class="badge" x-text="trades.length + '/3'">0/3</span>
+            <div class="terminal-panel">
+                <div class="panel-header">
+                    <div class="panel-title">Narrative Engine</div>
                 </div>
-                <div class="w-body">
-                    <template x-for="t in trades" :key="t.id">
-                        <div class="pos-item" :class="t.type">
-                            <div>
-                                <div style="font-weight:700; font-size:13px;" :class="t.type=='BUY'?'text-green':'text-red'">
-                                    <span x-text="t.type"></span> <span x-text="t.lot_size"></span>
-                                </div>
-                                <div class="mono text-sub" style="font-size:10px; margin-top:2px;">@ <span x-text="t.entry"></span></div>
-                            </div>
-                            <div class="mono" style="font-weight:700;" :class="t.pnl >= 0 ? 'text-green' : 'text-red'">
-                                <span x-text="t.pnl >= 0 ? '+' : ''"></span><span x-text="fmt(t.pnl)"></span>
-                            </div>
-                        </div>
-                    </template>
-                    <div x-show="trades.length === 0" style="text-align:center; padding:20px; color:var(--text-sub); font-size:12px;">
-                        <i class="ph ph-robot" style="font-size:24px; margin-bottom:5px;"></i><br>AI Scanning...
-                    </div>
-
-                    <div class="pos-footer">
+                <div class="panel-body">
+                    <div style="display:grid; grid-template-columns: 1fr 1.2fr; gap:12px; width:100%;">
                         <div>
-                            <div style="font-size:11px; color:var(--text-sub)">Open P&L</div>
-                            <div :class="open_pnl >= 0 ? 'text-green' : 'text-red'" style="font-weight:700;" x-text="(open_pnl >= 0 ? '+' : '') + fmt(open_pnl)"></div>
+                            <div class="data-row" style="margin-bottom:4px;">
+                                <span class="data-label">D1 BIAS</span>
+                                <span class="data-value" :class="d1_bias === 'BULLISH' ? 'txt-green' : d1_bias === 'BEARISH' ? 'txt-red' : 'txt-muted'" x-text="d1_bias">--</span>
+                            </div>
+                            <div class="data-row" style="margin-bottom:4px;">
+                                <span class="data-label">H4 BIAS</span>
+                                <span class="data-value" :class="h4_bias === 'BULLISH' ? 'txt-green' : h4_bias === 'BEARISH' ? 'txt-red' : 'txt-muted'" x-text="h4_bias">--</span>
+                            </div>
+                            <div class="data-row" style="margin-bottom:0;">
+                                <span class="data-label">STRUCTURE</span>
+                                <span class="data-value" :class="structure === 'BULLISH' ? 'txt-green' : structure === 'BEARISH' ? 'txt-red' : 'txt-muted'" x-text="structure">--</span>
+                            </div>
                         </div>
-                        <div style="text-align:right;">
-                            <div style="font-size:11px; color:var(--text-sub)">Today / Week / Total</div>
-                            <div style="font-weight:700;">
-                                <span :class="pnl_today >= 0 ? 'text-green' : 'text-red' " x-text="(pnl_today >= 0 ? '+' : '') + fmt(pnl_today)"></span>
-                                <span style="color:var(--text-sub)"> / </span>
-                                <span :class="pnl_week >= 0 ? 'text-green' : 'text-red' " x-text="(pnl_week >= 0 ? '+' : '') + fmt(pnl_week)"></span>
-                                <span style="color:var(--text-sub)"> / </span>
-                                <span :class="pnl_total >= 0 ? 'text-green' : 'text-red' " x-text="(pnl_total >= 0 ? '+' : '') + fmt(pnl_total)"></span>
+                        <div style="display:flex; flex-direction:column; justify-content:center;">
+                            <div class="data-row" style="margin-bottom:2px;">
+                                <span class="data-label" style="font-size:10px;">SMC CONFIDENCE</span>
+                                <span class="data-value mono txt-green" style="font-size:12px;" x-text="signal_engine.confidence + '%'">0%</span>
+                            </div>
+                            <div class="progress-container" style="margin-bottom:6px;">
+                                <div class="progress-bar-bg">
+                                    <div class="progress-bar-fill" :style="`width: ${signal_engine.confidence}%`" style="width: 0%;"></div>
+                                </div>
+                            </div>
+                            <div class="data-row" style="margin-bottom:0;">
+                                <span class="data-label" style="font-size:10px;">GATES PASSED</span>
+                                <span class="data-value mono" style="font-size:12px;" x-text="getPassedGatesCount() + ' / 8'">0 / 8</span>
                             </div>
                         </div>
                     </div>
-
+                    <div class="narrative-box">
+                        <span class="txt-gold" style="font-weight:700">NARRATIVE:</span> 
+                        <span x-text="signal_engine.reason">Parsing stream telemetry...</span>
+                    </div>
                 </div>
             </div>
-        </div>
 
-        <div class="grid-stack-item" gs-id="chart" gs-w="9" gs-h="3">
-            <div class="grid-stack-item-content">
-                <div class="chart-overlay">
-                    <div class="badge"><i class="ph-fill ph-chart-bar"></i> M15</div>
-                    <div class="badge" x-text="'STR: ' + structure"></div>
-                    <div class="badge text-gold" x-text="'ZONE: ' + zone"></div>
+            <div class="terminal-panel">
+                <div class="panel-header">
+                    <div class="panel-title">System Status</div>
                 </div>
-                <div id="chart-container"></div>
+                <div class="panel-body" style="justify-content: flex-start;">
+                    <div class="status-indicator-row"><span>MT5 CONNECTED</span><div class="status-dot-group"><div class="status-dot" :class="ws_connected ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
+                    <div class="status-indicator-row"><span>DATA FETCHING (main.py)</span><div class="status-dot-group"><div class="status-dot" :class="ws_connected ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
+                    <div class="status-indicator-row"><span>VPS RECEIVING DATA</span><div class="status-dot-group"><div class="status-dot" :class="ws_connected ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
+                    <div class="status-indicator-row"><span>DASHBOARD ANALYSIS</span><div class="status-dot-group"><div class="status-dot" :class="ws_connected ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
+                    <div class="status-indicator-row" style="margin-bottom:8px;"><span>SYNC STATUS</span><div class="status-dot-group"><div class="status-dot" :class="ws_connected ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'WORKING' : 'HALTED'">HALTED</span></div></div>
+                    <div class="data-row mono" style="margin-top:auto; margin-bottom:0; border-top:1px solid rgba(255,255,255,0.03); padding-top:4px; font-size:11px;">
+                        <span class="txt-muted">LAST UPDATE:</span><span class="txt-main" id="last-update-ts">--:--:--</span>
+                    </div>
+                </div>
             </div>
-        </div>
+        </section>
 
-        <!-- ═══════════════════════════════════════════════════════════ -->
-        <!-- SIGNAL FEED PANEL                                           -->
-        <!-- ═══════════════════════════════════════════════════════════ -->
-        <div class="grid-stack-item" gs-id="signals" gs-w="4" gs-h="3">
-            <div class="grid-stack-item-content">
-                <div class="w-header">
-                    <span class="w-title"><i class="ph-fill ph-lightning"></i> Signal Feed</span>
-                    <span class="badge" x-text="signals.length + ' signals'">0 signals</span>
+        <section class="terminal-panel">
+            <div class="chart-controls-bar">
+                <div class="chart-meta-left">
+                    <span class="chart-symbol mono">XAUUSD <span class="txt-muted" style="font-size:11px;">•</span> <span x-text="current_tf">M15</span></span>
+                    <div class="badge badge-green">LIVE</div>
+                    <div class="badge badge-green" style="font-size:10px;" x-text="'STRUCTURE: ' + structure">STRUCTURE: --</div>
+                    <div class="badge badge-gold" style="font-size:10px;" x-text="'SESSION: ' + session">SESSION: --</div>
                 </div>
-                <div class="w-body" style="padding:8px;">
-                    <template x-for="(s, idx) in signals.slice(0, 10)" :key="idx">
-                        <div class="feed-row" :class="s.direction">
-                            <div>
-                                <div class="mono" style="font-size:10px; color:var(--text-sub);" x-text="s.time || '--'"></div>
-                                <div style="font-weight:700; font-size:12px;" :class="s.direction === 'BUY' ? 'text-green' : 'text-red'" x-text="s.direction || '--'"></div>
-                            </div>
-                            <div class="mono" style="font-size:10px; text-align:right; line-height:1.6;">
-                                <div><span style="color:var(--text-sub)">E </span><span style="color:var(--text-main);" x-text="s.entry ?? '--'"></span></div>
-                                <div><span style="color:var(--red)">SL </span><span x-text="s.sl ?? '--'"></span></div>
-                                <div><span style="color:var(--green)">TP </span><span x-text="s.tp ?? '--'"></span></div>
-                            </div>
-                        </div>
+                
+                <div class="timeframe-selector mono">
+                    <template x-for="tf in ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1']">
+                        <button class="tf-btn" :class="current_tf === tf ? 'active' : ''" @click="changeTimeframe(tf)" x-text="tf"></button>
                     </template>
-                    <div x-show="signals.length === 0" style="text-align:center; padding:24px; color:var(--text-sub); font-size:12px;">
-                        <i class="ph ph-broadcast" style="font-size:24px; margin-bottom:6px; display:block;"></i>
-                        Awaiting signals...
+                </div>
+                <div class="txt-muted mono" style="font-size:11px;">CHART CONTROLS</div>
+            </div>
+            <div class="chart-container-shell">
+                <div id="chart-container" style="width: 100%; height: 100%;"></div>
+            </div>
+        </section>
+
+        <section class="bottom-row-grid">
+            
+            <div class="terminal-panel">
+                <div class="panel-header">
+                    <div class="panel-title">Open Positions (<span x-text="trades.length">0</span>)</div>
+                </div>
+                <div class="panel-body" style="padding:0;">
+                    <div class="table-wrapper">
+                        <table class="terminal-table mono">
+                            <thead>
+                                <tr>
+                                    <th>SYMBOL</th>
+                                    <th>TYPE</th>
+                                    <th>ENTRY</th>
+                                    <th>SL</th>
+                                    <th>TP</th>
+                                    <th>VOL</th>
+                                    <th>P&L</th>
+                                    <th>STATUS</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="t in trades">
+                                    <tr>
+                                        <td style="font-weight:700;" x-text="t.symbol || 'XAUUSD'">XAUUSD</td>
+                                        <td :class="t.type === 'BUY' ? 'txt-green' : 'txt-red'" style="font-weight:700;" x-text="t.type">BUY</td>
+                                        <td x-text="t.entry">0.00</td>
+                                        <td class="txt-muted" x-text="t.sl">0.00</td>
+                                        <td class="txt-muted" x-text="t.tp">0.00</td>
+                                        <td x-text="t.volume || t.vol || '0.10'">0.10</td>
+                                        <td :class="t.pnl >= 0 ? 'txt-green' : 'txt-red'" style="font-weight:700;" x-text="fmt(t.pnl)">$0.00</td>
+                                        <td class="txt-green" style="font-size:11px;">OPEN</td>
+                                    </tr>
+                                </template>
+                                <tr x-show="trades.length === 0">
+                                    <td colspan="8" class="txt-muted" style="text-align:center; padding: 20px 0;">NO ACTIVE TRADES DETECTED</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="table-footer mono" :class="getOpenTotalPnl() >= 0 ? 'txt-green' : 'txt-red'">
+                        TOTAL P&L: <span x-text="fmt(getOpenTotalPnl())">$0.00</span>
                     </div>
                 </div>
             </div>
-        </div>
 
-        <!-- ═══════════════════════════════════════════════════════════ -->
-        <!-- TRADE RESULTS PANEL                                         -->
-        <!-- ═══════════════════════════════════════════════════════════ -->
-        <div class="grid-stack-item" gs-id="trade_results" gs-w="4" gs-h="3">
-            <div class="grid-stack-item-content">
-                <div class="w-header">
-                    <span class="w-title"><i class="ph-fill ph-flag-checkered"></i> Trade Results</span>
-                    <span class="badge" x-text="trade_results.length + ' trades'">0 trades</span>
+            <div class="terminal-panel">
+                <div class="panel-header">
+                    <div class="panel-title">Closed Positions (<span x-text="closed_trades.length">0</span>)</div>
                 </div>
-                <div class="w-body" style="padding:8px;">
-                    <template x-for="(r, idx) in trade_results.slice(0, 10)" :key="idx">
-                        <div class="feed-row" :class="r.result">
+                <div class="panel-body" style="padding:0;">
+                    <div class="table-wrapper">
+                        <table class="terminal-table mono">
+                            <thead>
+                                <tr>
+                                    <th>SYMBOL</th>
+                                    <th>TYPE</th>
+                                    <th>ENTRY</th>
+                                    <th>EXIT</th>
+                                    <th>P&L</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="ct in closed_trades">
+                                    <tr>
+                                        <td style="font-weight:700;" x-text="ct.symbol">--</td>
+                                        <td :class="ct.type === 'BUY' ? 'txt-green' : 'txt-red'" x-text="ct.type">--</td>
+                                        <td x-text="ct.entry">0.00</td>
+                                        <td x-text="ct.exit">0.00</td>
+                                        <td :class="ct.pnl >= 0 ? 'txt-green' : 'txt-red'" style="font-weight:700;" x-text="fmt(ct.pnl)">$0.00</td>
+                                    </tr>
+                                </template>
+                                <tr x-show="closed_trades.length === 0">
+                                    <td colspan="5" class="txt-muted" style="text-align:center; padding: 20px 0;">HISTORY IS EMPTY</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="table-footer mono" :class="getClosedTotalPnl() >= 0 ? 'txt-green' : 'txt-red'">
+                        TOTAL CLOSED P&L: <span x-text="fmt(getClosedTotalPnl())">$0.00</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="terminal-panel">
+                <div class="panel-header">
+                    <div class="panel-title">Signal Engine / Gateways</div>
+                </div>
+                <div class="panel-body" style="padding:10px;">
+                    <div class="gates-split-container">
+                        
+                        <div style="display:flex; flex-direction:column; justify-content:space-between; background:rgba(255,255,255,0.01); padding:8px; border:1px solid var(--border-color)">
                             <div>
-                                <div class="mono" style="font-size:10px; color:var(--text-sub);" x-text="r.time || '--'"></div>
-                                <div style="font-size:12px; font-weight:700;" :class="r.direction === 'BUY' ? 'text-green' : 'text-red'" x-text="r.direction || '--'"></div>
+                                <div style="font-size:10px; color:var(--text-muted); font-weight:700; margin-bottom:4px;">SIGNAL ACTION</div>
+                                <div class="mono">
+                                    <div class="txt-muted" style="font-size:9px;">ACTION</div>
+                                    <div style="font-size:16px; font-weight:700;" :class="signal_engine.action === 'BUY' ? 'txt-green' : signal_engine.action === 'SELL' ? 'txt-red' : 'txt-muted'" x-text="signal_engine.action">NO_TRADE</div>
+                                </div>
+                                <div class="mono" style="margin-top:4px;">
+                                    <div class="txt-muted" style="font-size:9px;">DIRECTION</div>
+                                    <div class="txt-gold" style="font-size:13px; font-weight:700;" x-text="signal_engine.direction || '--'">--</div>
+                                </div>
                             </div>
-                            <div style="text-align:right;">
-                                <div style="font-size:11px; font-weight:800; letter-spacing:0.5px;" :class="r.result === 'WIN' ? 'text-green' : 'text-red'" x-text="r.result || '--'"></div>
-                                <div class="mono" style="font-size:11px;" :class="r.pnl >= 0 ? 'text-green' : 'text-red'" x-text="(r.pnl >= 0 ? '+' : '') + fmt(r.pnl)"></div>
+                            <div class="mono" style="margin-top:auto;">
+                                <div class="txt-muted" style="font-size:9px;">REASON</div>
+                                <div class="txt-amber" style="font-size:11px; font-weight:600; line-height:1.2" x-text="signal_engine.reason_code || 'SCANNING'">SCANNING</div>
                             </div>
                         </div>
-                    </template>
-                    <div x-show="trade_results.length === 0" style="text-align:center; padding:24px; color:var(--text-sub); font-size:12px;">
-                        <i class="ph ph-trophy" style="font-size:24px; margin-bottom:6px; display:block;"></i>
-                        No closed trades yet...
+
+                        <div class="mono" style="display:flex; flex-direction:column; justify-content:space-between;">
+                            <div style="font-size:10px; color:var(--text-muted); font-weight:700; margin-bottom:2px;">SMC GATES</div>
+                            <div style="flex-grow:1;">
+                                <template x-for="(passed, name, index) in signal_engine.gates">
+                                    <div class="gate-list-item">
+                                        <span x-text="name">Gate Name</span>
+                                        <span :class="passed ? 'txt-green' : 'txt-red'" style="font-weight:700;" x-text="passed ? '✔' : '✘'">✘</span>
+                                    </div>
+                                </template>
+                                <div x-show="Object.keys(signal_engine.gates).length === 0" class="txt-muted" style="font-size:11px; padding-top:20px; text-align:center;">
+                                    NO GATES REGISTERED
+                                </div>
+                            </div>
+                            <div style="margin-top:4px;">
+                                <div class="progress-bar-bg" style="height:4px; margin-bottom:2px;">
+                                    <div class="progress-bar-fill" :style="`width: ${signal_engine.confidence}%`"></div>
+                                </div>
+                                <div style="font-size:9px; display:flex; justify-content:space-between" class="txt-muted">
+                                    <span>MATCH: <span x-text="getPassedGatesCount()">0</span>/8</span>
+                                    <span x-text="signal_engine.confidence + '%'">0%</span>
+                                </div>
+                            </div>
+                        </div>
+
                     </div>
                 </div>
             </div>
+
+        </section>
+    </main>
+
+    <footer class="terminal-footer mono">
+        <div class="footer-left-meta">
+            <span>GUARDEER OS v4.0</span>
+            <span>INSTITUTIONAL SMC COMMAND TERMINAL</span>
         </div>
-
-        <!-- ═══════════════════════════════════════════════════════════ -->
-        <!-- BOT CONTROL PANEL                                           -->
-        <!-- ═══════════════════════════════════════════════════════════ -->
-        <div class="grid-stack-item" gs-id="bot_control" gs-w="4" gs-h="2">
-            <div class="grid-stack-item-content">
-                <div class="w-header">
-                    <span class="w-title"><i class="ph-fill ph-robot"></i> Bot Control</span>
-                    <div style="display:flex; align-items:center;">
-                        <span class="bot-status-dot" :class="bot_status"></span>
-                        <span class="mono" style="font-size:11px; font-weight:700;"
-                            :class="bot_status === 'ACTIVE' ? 'text-green' : bot_status === 'PAUSED' ? 'text-red' : ''"
-                            :style="bot_status === 'OFFLINE' ? 'color:#636366' : ''"
-                            x-text="bot_status">OFFLINE</span>
-                    </div>
-                </div>
-                <div class="w-body" style="display:flex; flex-direction:column; justify-content:center; gap:10px; padding:14px;">
-                    <div style="display:flex; gap:10px;">
-                        <button class="ctrl-btn pause" style="flex:1;"
-                            :disabled="bot_status === 'OFFLINE' || bot_status === 'PAUSED'"
-                            :style="(bot_status === 'OFFLINE' || bot_status === 'PAUSED') ? 'opacity:0.4; cursor:not-allowed;' : ''"
-                            @click="pauseBot()">
-                            <i class="ph-fill ph-pause"></i> PAUSE
-                        </button>
-                        <button class="ctrl-btn resume" style="flex:1;"
-                            :disabled="bot_status === 'OFFLINE' || bot_status === 'ACTIVE'"
-                            :style="(bot_status === 'OFFLINE' || bot_status === 'ACTIVE') ? 'opacity:0.4; cursor:not-allowed;' : ''"
-                            @click="resumeBot()">
-                            <i class="ph-fill ph-play"></i> RESUME
-                        </button>
-                    </div>
-                    <div class="mono" style="font-size:10px; color:var(--text-sub); text-align:center;">
-                        Auto-refresh every 5s &nbsp;·&nbsp; Last check: <span x-text="bot_status_ts">--</span>
-                    </div>
-                </div>
-            </div>
+        <div class="footer-right-meta">
+            <span>VPS: <span :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'ONLINE' : 'OFFLINE'">OFFLINE</span></span>
+            <span>WEBSOCKET: <span :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'ACTIVE' : 'DISCONNECTED'">DISCONNECTED</span></span>
         </div>
-
-    </div>
-
-    <div style="position:fixed; bottom:10px; right:10px; z-index:99; opacity:0.3; transition:opacity 0.2s;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.3">
-        <button onclick="resetLayout()" style="background:#2c2c2e; border:1px solid #444; color:#fff; padding:6px 12px; border-radius:8px; cursor:pointer; font-size:10px;">Reset Layout</button>
-    </div>
+    </footer>
 
     <script>
-        const chart = LightweightCharts.createChart(document.getElementById('chart-container'), {
-            layout: { background: { type: 'solid', color: '#1c1c1e' }, textColor: '#8e8e93' },
-            grid: { vertLines: { color: 'rgba(255, 255, 255, 0.05)' }, horzLines: { color: 'rgba(255, 255, 255, 0.05)' } },
-            rightPriceScale: { borderColor: 'rgba(255, 255, 255, 0.1)' },
-            timeScale: { borderColor: 'rgba(255, 255, 255, 0.1)', timeVisible: true },
-            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        function updateClocks() {
+            const now = new Date();
+            document.getElementById('utc-clock').innerText = now.toUTCString().split(' ')[4];
+            document.getElementById('ist-clock').innerText = now.toLocaleTimeString('en-IN', {
+                timeZone: 'Asia/Kolkata',
+                hour12: false
+            });
+        }
+        setInterval(updateClocks, 1000);
+        updateClocks();
+
+        // High-Fidelity Modern Dark-Theme Lightweight Chart initialization
+        const container = document.getElementById('chart-container');
+        const chart = LightweightCharts.createChart(container, {
+            layout: {
+                background: { color: '#050505' },
+                textColor: '#a0a0a5',
+                fontSize: 11,
+                fontFamily: 'JetBrains Mono'
+            },
+            grid: {
+                vertLines: { color: '#121215' },
+                horzLines: { color: '#121215' }
+            },
+            rightPriceScale: { borderColor: '#1f1f24', alignLabels: true },
+            timeScale: { borderColor: '#1f1f24', timeVisible: true, secondsVisible: false },
+            crosshair: {
+                vertLine: { color: '#3a3a42', style: 3 },
+                horzLine: { color: '#3a3a42', style: 3 }
+            }
         });
-        const series = chart.addCandlestickSeries({ upColor: '#30d158', downColor: '#ff453a', borderVisible: false, wickUpColor: '#30d158', wickDownColor: '#ff453a' });
-        
-        let pdhLine = series.createPriceLine({ price: 0, color: '#8e8e93', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: 'PDH' });
-        let pdlLine = series.createPriceLine({ price: 0, color: '#8e8e93', lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: 'PDL' });
-        let eqLine = series.createPriceLine({ price: 0, color: '#ffffff', lineWidth: 1, lineStyle: 3, axisLabelVisible: false, title: 'EQ' });
 
-        // Phase-7: Overlay lines storage
-        let overlayLines = [];
+        const series = chart.addCandlestickSeries({
+            upColor: '#00ff88',
+            downColor: '#ff4d4d',
+            borderVisible: false,
+            wickUpColor: '#00ff88',
+            wickDownColor: '#ff4d4d'
+        });
 
-        // Chart objects overlays storage
-        let chartObjectLines = [];
+        const resizeObserver = new ResizeObserver(entries => {
+            if (entries.length === 0 || !entries[0].contentRect) return;
+            chart.resize(entries[0].contentRect.width, entries[0].contentRect.height);
+        });
+        resizeObserver.observe(container);
 
+        // Global Alpine.js Reactive Controller Block
         function dashboardStore() {
             return {
-                equity: 0, balance: 0, pnl_daily: 0, price: 0,
-                structure: 'NEUTRAL', zone_strength: 0, zone: '--', session: '--',
-                news: { title: 'Scanning...', time: '--' },
-                trades: [], flipCapital: false,
-                pnl_today: 0, pnl_week: 0, pnl_total: 0, open_pnl: 0,
-                signals: [],
-                trade_results: [],
-                bot_status: 'OFFLINE',
-                bot_status_ts: '--',
+                ws: null,
+                ws_connected: false,
+                bot_status: true,
+                current_tf: 'M15',
+                
+                // Account metrics arrays
+                equity: 0,
+                balance: 0,
+                pnl_today: 0,
+                pnl_week: 0,
+                pnl_total: 0,
+                
+                // Narrative matrix properties
+                structure: '--',
+                session: '--',
+                d1_bias: '--',
+                h4_bias: '--',
+                
+                // Subordinate structural arrays
+                trades: [],
+                closed_trades: [],
+                news_items: [],
+                
+                signal_engine: {
+                    action: 'NO_TRADE',
+                    confidence: 0,
+                    direction: '--',
+                    reason: 'Parsing stream data...',
+                    reason_code: 'SCANNING',
+                    gates: {} // Bound via keys: {"HTF BIAS": true, "LIQUIDITY SWEEP": false, ...}
+                },
+                news: { time: '--' },
 
-                fmt(n) { return (n !== null && n !== undefined) ? '$' + Number(n).toLocaleString(undefined,{minimumFractionDigits:2}) : '$0.00' },
+                fmt(v) {
+                    return '$' + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                },
+                getPassedGatesCount() {
+                    return Object.values(this.signal_engine.gates).filter(v => v === true).length;
+                },
+                getOpenTotalPnl() {
+                    return this.trades.reduce((sum, t) => sum + Number(t.pnl || 0), 0);
+                },
+                getClosedTotalPnl() {
+                    return this.closed_trades.reduce((sum, ct) => sum + Number(ct.pnl || 0), 0);
+                },
+
+                // B) FIX: Bot Status toggle communication outbound
+                toggleBot(statusState) {
+                    this.bot_status = statusState;
+                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this.ws.send(JSON.stringify({
+                            action: "toggle_bot",
+                            status: statusState ? "ON" : "OFF"
+                        }));
+                    }
+                },
+
+                // C) FIX: Timeframe mutation click handler with payload push
+                changeTimeframe(selectedTf) {
+                    this.current_tf = selectedTf;
+                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this.ws.send(JSON.stringify({
+                            action: "change_timeframe",
+                            timeframe: selectedTf
+                        }));
+                    }
+                },
+
                 init() {
                     this.connect();
-                    this.fetchBotStatus();
-                    setInterval(() => this.fetchBotStatus(), 5000);
                 },
+
+                // A) FIX: Dynamic pipeline ingestion handling
                 connect() {
-                    const ws = new WebSocket((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/ws');
-                    ws.onmessage = (event) => {
+                    // Force direct alignment to your VPS streaming instance endpoint
+                    this.ws = new WebSocket('ws://68.233.99.145:8000/ws');
+
+                    this.ws.onopen = () => {
+                        this.ws_connected = true;
+                    };
+
+                    this.ws.onopen = () => {
+                        this.ws_connected = true;
+                    };
+
+                    this.ws.onmessage = (event) => {
                         const data = JSON.parse(event.data);
-                        console.log("FULL WS DATA:", data);
-                        console.log("CHART_OBJECTS:", data.chart_objects);
-                        console.log(JSON.stringify(data.chart_objects, null, 2));
+                        document.getElementById('last-update-ts').innerText = new Date().toLocaleTimeString('en-IN', { hour12: false });
 
-                        if (!data) return;
-                        this.equity = data.equity || this.equity;
-                        this.balance = data.balance || this.balance;
-                        this.pnl_daily = data.pnl_daily ?? this.pnl_daily;
+                        // Core assignments mapping fields streaming from vps_reporter
+                        if (data.equity !== undefined) this.equity = data.equity;
+                        if (data.balance !== undefined) this.balance = data.balance;
+                        if (data.pnl_today !== undefined) this.pnl_today = data.pnl_today;
+                        if (data.pnl_week !== undefined) this.pnl_week = data.pnl_week;
+                        if (data.pnl_total !== undefined) this.pnl_total = data.pnl_total;
+                        if (data.market_structure !== undefined) this.structure = data.market_structure;
+                        if (data.session !== undefined) this.session = data.session;
+                        if (data.d1_bias !== undefined) this.d1_bias = data.d1_bias;
+                        if (data.h4_bias !== undefined) this.h4_bias = data.h4_bias;
+                        if (data.bot_status !== undefined) this.bot_status = (data.bot_status === true || data.bot_status === "ON");
+                        
+                        // Array overrides
+                        if (data.trades) this.trades = data.trades;
+                        if (data.closed_trades) this.closed_trades = data.closed_trades;
+                        if (data.news_items) this.news_items = data.news_items;
+                        if (data.news_countdown) this.news.time = data.news_countdown;
 
-                        this.pnl_today = data.pnl_today ?? this.pnl_today;
-                        this.pnl_week = data.pnl_week ?? this.pnl_week;
-                        this.pnl_total = data.pnl_total ?? this.pnl_total;
-                        this.open_pnl = data.open_pnl ?? this.open_pnl;
+                        if (data.signal_engine) {
+                            this.signal_engine = { ...this.signal_engine, ...data.signal_engine };
+                        }
 
-                        this.price = data.price || this.price;
-                        this.structure = data.market_structure || 'NEUTRAL';
-                        this.zone_strength = data.zone_strength || 0; this.zone = data.zone || '--';
-                        this.session = data.session || '--'; this.news = data.news_event || this.news;
-                        this.trades = data.trades || [];
-
-                        if (Array.isArray(data.signals)) this.signals = data.signals;
-                        if (Array.isArray(data.trade_results)) this.trade_results = data.trade_results;
-
+                        // Feed candlestick changes into canvas
                         if (data.chart_data?.length) {
-                            const unique = [...new Map(data.chart_data.map(i => [i['time'], i])).values()].sort((a, b) => a.time - b.time);
-                            series.setData(unique);
-                        }
-                        if (data.chart_overlays) {
-                            const ov = data.chart_overlays;
-                            if(ov.levels?.pdh) pdhLine.applyOptions({ price: ov.levels.pdh, axisLabelVisible: true });
-                            if(ov.levels?.pdl) pdlLine.applyOptions({ price: ov.levels.pdl, axisLabelVisible: true });
-                            if(ov.zones?.equilibrium) eqLine.applyOptions({ price: ov.zones.equilibrium, axisLabelVisible: true });
-                        }
-
-                        // Phase-7: Draw POI overlays as zone boundaries
-                        if (data.poi_overlays && Array.isArray(data.poi_overlays)) {
-                            // Clear existing
-                            overlayLines.forEach(l => series.removePriceLine(l));
-                            overlayLines = [];
-
-                            data.poi_overlays.forEach(zone => {
-                                let c = '#8e8e93'; // Median/Gray
-                                if (zone.type === 'extreme') c = '#ff453a'; // Red
-                                if (zone.type === 'idm') c = '#ffd60a'; // Yellow
-                                
-                                const lTop = series.createPriceLine({
-                                    price: zone.top, color: c, lineWidth: 1, lineStyle: 0,
-                                    axisLabelVisible: false, title: zone.type.toUpperCase()
-                                });
-                                const lBot = series.createPriceLine({
-                                    price: zone.bottom, color: c, lineWidth: 1, lineStyle: 2,
-                                    axisLabelVisible: false, title: ''
-                                });
-                                overlayLines.push(lTop, lBot);
-                            });
-                        }
-
-                        // === Draw chart_objects overlays ===
-                        if (data.chart_objects) {
-                            // Clear previous chart_objectLines
-                            chartObjectLines.forEach(l => series.removePriceLine(l));
-                            chartObjectLines = [];
-
-                            // Structure lines
-                            if (Array.isArray(data.chart_objects.structure_lines)) {
-                                data.chart_objects.structure_lines.forEach(line => {
-                                    if (line.top !== undefined && line.bottom !== undefined) {
-                                        let lineColor = "#8e8e93"; // gray
-                                        if (line.type === "msb") lineColor = "#0a84ff";
-                                        else if (line.type === "range") lineColor = "#ffd60a";
-                                        const lTop = series.createPriceLine({
-                                            price: line.top,
-                                            color: lineColor, lineWidth: 2, lineStyle: 0,
-                                            axisLabelVisible: true, title: "STRUCT_TOP"
-                                        });
-                                        const lBot = series.createPriceLine({
-                                            price: line.bottom,
-                                            color: lineColor, lineWidth: 2, lineStyle: 2,
-                                            axisLabelVisible: true, title: "STRUCT_BOT"
-                                        });
-                                        chartObjectLines.push(lTop, lBot);
-                                    } else if (line.price !== undefined) {
-                                        let lineColor = "#0a84ff";
-                                        const msbLine = series.createPriceLine({
-                                            price: line.price,
-                                            color: lineColor, lineWidth: 2, lineStyle: 1,
-                                            axisLabelVisible: true, title: "MSB"
-                                        });
-                                        chartObjectLines.push(msbLine);
-                                    }
-                                });
-                            }
-
-                            // Entry Zones
-                            if (Array.isArray(data.chart_objects.entry_zones)) {
-                                data.chart_objects.entry_zones.forEach(zone => {
-                                    if (zone.top !== undefined && zone.bottom !== undefined) {
-                                        let lineColor = "#30d158"; // green
-                                        const entryTop = series.createPriceLine({
-                                            price: zone.top,
-                                            color: lineColor, lineWidth: 1, lineStyle: 0,
-                                            axisLabelVisible: true, title: (zone.label || "ENTRY_TOP")
-                                        });
-                                        const entryBot = series.createPriceLine({
-                                            price: zone.bottom,
-                                            color: lineColor, lineWidth: 1, lineStyle: 2,
-                                            axisLabelVisible: true, title: (zone.label || "ENTRY_BOT")
-                                        });
-                                        chartObjectLines.push(entryTop, entryBot);
-                                    }
-                                });
-                            }
-
-                            // SL/TP Boxes
-                            if (Array.isArray(data.chart_objects.sl_tp_boxes)) {
-                                data.chart_objects.sl_tp_boxes.forEach(box => {
-                                    // If box has sl and tp, draw those
-                                    if (box.sl !== undefined && box.tp !== undefined) {
-                                        let slColor = "#ff453a"; // red
-                                        let tpColor = "#30d158"; // green
-                                        const slLine = series.createPriceLine({
-                                            price: box.sl,
-                                            color: slColor, lineWidth: 2, lineStyle: 1,
-                                            axisLabelVisible: true, title: "SL"
-                                        });
-                                        const tpLine = series.createPriceLine({
-                                            price: box.tp,
-                                            color: tpColor, lineWidth: 2, lineStyle: 1,
-                                            axisLabelVisible: true, title: "TP"
-                                        });
-                                        chartObjectLines.push(slLine, tpLine);
-                                    }
-                                    if (box.top !== undefined && box.bottom !== undefined) {
-                                        let boxColor = "#ffd60a";
-                                        if (box.type === "extreme_poi") boxColor = "#ff453a";
-                                        const topLine = series.createPriceLine({
-                                            price: box.top,
-                                            color: boxColor, lineWidth: 2, lineStyle: 0,
-                                            axisLabelVisible: true, title: "BOX_TOP"
-                                        });
-                                        const botLine = series.createPriceLine({
-                                            price: box.bottom,
-                                            color: boxColor, lineWidth: 2, lineStyle: 2,
-                                            axisLabelVisible: true, title: "BOX_BOT"
-                                        });
-                                        chartObjectLines.push(topLine, botLine);
-                                    }
-                                });
-                            }
+                            series.setData(data.chart_data);
                         }
                     };
-                    ws.onclose = () => setTimeout(() => this.connect(), 3000);
-                },
 
-                async fetchBotStatus() {
-                    try {
-                        const r = await fetch("http://68.233.99.145:8000/bot/status");
-
-                        if (!r.ok) {
-                            this.bot_status = "OFFLINE";
-                            return;
-                        }
-
-                        const d = await r.json();
-
-                        // ✅ Correct mapping for YOUR VPS response
-                        if (typeof d.trading === "boolean") {
-                            this.bot_status = d.trading ? "ACTIVE" : "PAUSED";
-                        } else {
-                            this.bot_status = "OFFLINE";
-                        }
-
-                    } catch (e) {
-                        console.error("VPS ERROR:", e);
-                        this.bot_status = "OFFLINE";
-                    }
-
-                    const now = new Date();
-                    this.bot_status_ts = now.toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        second: "2-digit"
-                    });
-                },
-
-                async pauseBot() {
-                    try {
-                        const r = await fetch("http://68.233.99.145:8000/bot/pause", {
-                            method: "POST"
-                        });
-
-                        if (r.ok) {
-                            await this.fetchBotStatus();
-                        } else {
-                            this.bot_status = "OFFLINE";
-                        }
-
-                    } catch (e) {
-                        console.error("PAUSE ERROR:", e);
-                        this.bot_status = "OFFLINE";
-                    }
-                },
-
-                async resumeBot() {
-                    try {
-                        const r = await fetch("http://68.233.99.145:8000/bot/resume", {
-                            method: "POST"
-                        });
-
-                        if (r.ok) {
-                            await this.fetchBotStatus();
-                        } else {
-                            this.bot_status = "OFFLINE";
-                        }
-
-                    } catch (e) {
-                        console.error("RESUME ERROR:", e);
-                        this.bot_status = "OFFLINE";
-                    }
+                    this.ws.onclose = () => {
+                        this.ws_connected = false;
+                        setTimeout(() => this.connect(), 3000);
+                    };
                 }
             }
         }
-
-        let grid = GridStack.init({ column: 12, cellHeight: 70, margin: 6, float: true, disableOneColumnMode: false });
-        const savedLayout = localStorage.getItem('guardeer_v3_layout');
-        if (savedLayout) grid.load(JSON.parse(savedLayout));
-        grid.on('change', function(event, items) {
-            localStorage.setItem('guardeer_v3_layout', JSON.stringify(grid.save(false)));
-        });
-        grid.on('resizestop', function(event, el) {
-            if (el.querySelector('#chart-container')) {
-                let rect = el.getBoundingClientRect();
-                chart.applyOptions({ width: rect.width, height: rect.height - 20 });
-            }
-        });
-        new ResizeObserver(entries => {
-            if(entries.length) chart.applyOptions({ width: entries[0].contentRect.width, height: entries[0].contentRect.height });
-        }).observe(document.getElementById('chart-container'));
-        
-        function resetLayout() { localStorage.removeItem('guardeer_v3_layout'); location.reload(); }
     </script>
 </body>
 </html>
@@ -995,6 +1337,7 @@ def update_bot_state_v2(bot_instance, analysis_data):
 
         # Extract chart_objects from analysis_data
         chart_objects = analysis_data.get("chart_objects", {})
+        
 
         bot_state.update({
             "equity": equity,
@@ -1022,6 +1365,21 @@ def update_bot_state_v2(bot_instance, analysis_data):
             "signals": formatted_signals,
             "trade_results": formatted_results,
             "trading": not bot_paused,
+            # --- HTF Biases ---
+            "d1_bias": analysis_data.get("market_structure", {}).get("d1_bias", "NEUTRAL") if isinstance(analysis_data, dict) else "NEUTRAL",
+            "h4_bias": analysis_data.get("market_structure", {}).get("h4_bias", "NEUTRAL") if isinstance(analysis_data, dict) else "NEUTRAL",
+
+            # --- Signal Engine ---
+            "signal_engine": {
+                "action":     analysis_data.get("signal_engine", {}).get("action", "NO_TRADE") if isinstance(analysis_data, dict) else "NO_TRADE",
+                "direction":  analysis_data.get("signal_engine", {}).get("direction", "NEUTRAL") if isinstance(analysis_data, dict) else "NEUTRAL",
+                "confidence": analysis_data.get("signal_engine", {}).get("confidence", 0) if isinstance(analysis_data, dict) else 0,
+                "reason":     analysis_data.get("signal_engine", {}).get("reason", "--") if isinstance(analysis_data, dict) else "--",
+                "entry_price": analysis_data.get("signal_engine", {}).get("entry_price", None) if isinstance(analysis_data, dict) else None,
+                "sl_price":    analysis_data.get("signal_engine", {}).get("sl_price", None) if isinstance(analysis_data, dict) else None,
+                "tp_price":    analysis_data.get("signal_engine", {}).get("tp_price", None) if isinstance(analysis_data, dict) else None,
+                "gates":       analysis_data.get("signal_engine", {}).get("gates", {}) if isinstance(analysis_data, dict) else {},
+            },
         })
     except Exception as e:
         print(f"⚠️ Error building bot_state: {e}")

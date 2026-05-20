@@ -3,7 +3,7 @@ import csv
 from pathlib import Path
 from bisect import bisect_left
 from tradingbot.strategy.smc.signal_engine import SignalEngine
-from backtest_logger import BacktestLogger
+from apps.backtest.backtest_logger import BacktestLogger
 import uuid
 
 
@@ -214,6 +214,8 @@ def run_backtest(df):
     summary = logger.finalize_run(capital, INITIAL_CAPITAL, max_dd)
 
     print("\n" + "=" * 60)
+    if hasattr(engine, "_htf_poi_debug_totals"):
+        print(f"[HTF POI DEBUG TOTALS] {engine._htf_poi_debug_totals}")
     print(f"💰 FINAL CAPITAL: ₹{round(capital, 2)}")
     print(f"📉 MAX DRAWDOWN: {round(max_dd * 100, 2)}%")
     print(
