@@ -86,6 +86,7 @@ class DailyPnLTracker:
 pnl_tracker = DailyPnLTracker()
 
 # --- BROADCAST LOOP ---
+last_webhook_timestamp = datetime.now()
 async def broadcast_loop():
     last_state_hash = None
     while True:
@@ -763,12 +764,28 @@ html_content = """
                             </div>
                         </template>
                         <div x-show="getFilteredNews().length === 0" class="txt-muted mono" style="font-size:11px; text-align:center; margin-top:20px;">
-                            NO EVENTS ({{news_filter}})
+                            NO EVENTS (<span x-text="news_filter"></span>)
                         </div>
                     </div>
                     <div class="data-row mono" style="margin-top:6px; margin-bottom:0; font-size:11px;">
                         <span class="txt-muted">NEXT EVENT:</span>
                         <span class="txt-amber" x-text="news.time">COUNTING DOWN</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="terminal-panel">
+                <div class="panel-header">
+                    <div class="panel-title">System Status</div>
+                </div>
+                <div class="panel-body" style="justify-content: flex-start;">
+                    <div class="status-indicator-row"><span>MT5 CONNECTED</span><div class="status-dot-group"><div class="status-dot" :class="(ws_connected && webhook_age_seconds < 60) ? '' : 'inactive'"></div><span class="mono" :class="(ws_connected && webhook_age_seconds < 60) ? 'txt-green' : 'txt-red'" x-text="(ws_connected && webhook_age_seconds < 60) ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
+                    <div class="status-indicator-row"><span>DATA FETCHING</span><div class="status-dot-group"><div class="status-dot" :class="(ws_connected && webhook_age_seconds < 60) ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
+                    <div class="status-indicator-row"><span>VPS RECEIVING DATA</span><div class="status-dot-group"><div class="status-dot" :class="(ws_connected && webhook_age_seconds < 60) ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
+                    <div class="status-indicator-row"><span>DASHBOARD ANALYSIS</span><div class="status-dot-group"><div class="status-dot" :class="(ws_connected && webhook_age_seconds < 60) ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
+                    <div class="status-indicator-row" style="margin-bottom:8px;"><span>SYNC STATUS</span><div class="status-dot-group"><div class="status-dot" :class="(ws_connected && webhook_age_seconds < 60) ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'WORKING' : 'HALTED'">HALTED</span></div></div>
+                    <div class="data-row mono" style="margin-top:auto; margin-bottom:0; border-top:1px solid rgba(255,255,255,0.03); padding-top:4px; font-size:11px;">
+                        <span class="txt-muted">LAST UPDATE:</span><span class="txt-main" id="last-update-ts">--:--:--</span>
                     </div>
                 </div>
             </div>
@@ -816,21 +833,7 @@ html_content = """
                 </div>
             </div>
 
-            <div class="terminal-panel">
-                <div class="panel-header">
-                    <div class="panel-title">System Status</div>
-                </div>
-                <div class="panel-body" style="justify-content: flex-start;">
-                    <div class="status-indicator-row"><span>MT5 CONNECTED</span><div class="status-dot-group"><div class="status-dot" :class="ws_connected ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
-                    <div class="status-indicator-row"><span>DATA FETCHING</span><div class="status-dot-group"><div class="status-dot" :class="ws_connected ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
-                    <div class="status-indicator-row"><span>VPS RECEIVING DATA</span><div class="status-dot-group"><div class="status-dot" :class="ws_connected ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
-                    <div class="status-indicator-row"><span>DASHBOARD ANALYSIS</span><div class="status-dot-group"><div class="status-dot" :class="ws_connected ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'DOWN'">DOWN</span></div></div>
-                    <div class="status-indicator-row" style="margin-bottom:8px;"><span>SYNC STATUS</span><div class="status-dot-group"><div class="status-dot" :class="ws_connected ? '' : 'inactive'"></div><span class="mono" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'WORKING' : 'HALTED'">HALTED</span></div></div>
-                    <div class="data-row mono" style="margin-top:auto; margin-bottom:0; border-top:1px solid rgba(255,255,255,0.03); padding-top:4px; font-size:11px;">
-                        <span class="txt-muted">LAST UPDATE:</span><span class="txt-main" id="last-update-ts">--:--:--</span>
-                    </div>
-                </div>
-            </div>
+            
         </section>
 
         <section class="terminal-panel">
@@ -1075,6 +1078,7 @@ html_content = """
                 bot_status: true,
                 current_tf: 'M15',
                 theme_mode: localStorage.getItem('gos_theme') || 'dark',
+                webhook_age_seconds: 0,
                 
                 // Account metrics
                 account_login: '--',
@@ -1167,15 +1171,30 @@ html_content = """
 
                 toggleBot(statusState) {
                     this.bot_status = statusState;
+                    
+                    // 1. Send WebSocket message to dashboard server
                     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                         this.ws.send(JSON.stringify({
                             action: "toggle_bot",
                             status: statusState ? "ON" : "OFF"
                         }));
                     }
-                    // Also call REST endpoint
-                    const endpoint = statusState ? '/bot/resume' : '/bot/pause';
-                    fetch(endpoint, { method: 'POST' }).catch(e => console.error(e));
+                    
+                    // 2. Call dashboard's own pause/resume endpoints
+                    const dashboardEndpoint = statusState ? '/bot/resume' : '/bot/pause';
+                    fetch(dashboardEndpoint, { method: 'POST' }).catch(e => console.error(e));
+                    
+                    // 3. Call TRADER BOT control endpoints (NEW)
+                    const traderEndpoint = statusState ? '/control/resume' : '/control/pause';
+                    const traderUrl = `http://${window.location.hostname}:5000${traderEndpoint}`;
+                    fetch(traderUrl, { 
+                        method: 'POST',
+                        timeout: 5000 
+                    }).then(r => {
+                        console.log(`✅ Trader bot command sent: ${statusState ? 'RESUME' : 'PAUSE'}`);
+                    }).catch(e => {
+                        console.warn(`⚠️ Could not reach trader bot at ${traderUrl}:`, e);
+                    });
                 },
 
                 changeTimeframe(selectedTf) {
@@ -1198,6 +1217,27 @@ html_content = """
                         })
                         .catch(e => console.error('Bot status poll error:', e));
                 },
+                
+                pollTraderBotStatus() {
+                    const traderUrl = `http://${window.location.hostname}:5000/control/status`;
+                    fetch(traderUrl, { timeout: 3000 })
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.paused !== undefined) {
+                                // Sync trader bot state with dashboard
+                                if (data.paused && !this.paused) {
+                                    console.log("🤖 Trader bot is paused");
+                                    this.paused = true;
+                                } else if (!data.paused && this.paused) {
+                                    console.log("🤖 Trader bot resumed");
+                                    this.paused = false;
+                                }
+                            }
+                        })
+                        .catch(e => {
+                            // Trader bot unreachable — that's okay, not a critical error
+                        });
+                },
 
                 init() {
                     // Apply theme on init
@@ -1206,6 +1246,20 @@ html_content = """
                     }
                     
                     this.connect();
+                    init() {
+                        // Apply theme on init
+                        if (this.theme_mode === 'light') {
+                            document.body.classList.add('light-theme');
+                        }
+                        
+                        this.connect();
+                        this.pollBotStatus();  // Poll dashboard server
+                        this.pollTraderBotStatus();  // Poll trader bot (NEW)
+                        
+                        // Poll bot status every 10 seconds
+                        setInterval(() => this.pollBotStatus(), 10000);
+                        setInterval(() => this.pollTraderBotStatus(), 15000);  // NEW - Poll trader every 15s
+                    },
                     
                     // Poll bot status every 10 seconds
                     setInterval(() => this.pollBotStatus(), 10000);
@@ -1229,6 +1283,7 @@ html_content = """
                             document.getElementById('last-update-ts').innerText = new Date().toLocaleTimeString('en-IN', { hour12: false });
 
                             // FIX: Account fields
+                            if (data.webhook_age_seconds !== undefined) this.webhook_age_seconds = data.webhook_age_seconds;
                             if (data.account_login !== undefined) this.account_login = data.account_login;
                             if (data.account_server !== undefined) this.account_server = data.account_server;
                             if (data.account_name !== undefined) this.account_name = data.account_name;
@@ -1326,7 +1381,8 @@ def parse_profit(x):
 
 def update_bot_state_v2(bot_instance, analysis_data):
     """Core state ingestion from webhook payload"""
-    global bot_state, pnl_tracker
+    global bot_state, pnl_tracker, last_webhook_timestamp
+    last_webhook_timestamp = datetime.now()
 
     equity = float(get_val(bot_instance, "equity", 0.0) or 0.0)
     balance = float(get_val(bot_instance, "balance", 0.0) or 0.0)
@@ -1456,6 +1512,7 @@ def update_bot_state_v2(bot_instance, analysis_data):
         chart_objects = analysis_data.get("chart_objects", {}) if isinstance(analysis_data, dict) else getattr(analysis_data, "chart_objects", {})
 
         bot_state.update({
+            "webhook_age_seconds": (datetime.now() - last_webhook_timestamp).total_seconds(),
             "account_login": account_login,
             "account_server": account_server,
             "account_name": get_val(bot_instance, "account_name", "REAL-01"),

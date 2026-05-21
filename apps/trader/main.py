@@ -45,6 +45,56 @@ from tradingbot.strategy.smc.signal_engine import SignalEngine, SignalEngineConf
 # ── Config ────────────────────────────────────────────────────────────────────
 from config.settings import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ENABLE_TELEGRAM
 from apps.trader.vps_reporter import ping_health, post_signal, post_trade_result
+# ── Control server (for dashboard commands) ────────────────────────────────
+from flask import Flask, jsonify
+import threading
+
+control_app = Flask(__name__)
+bot_instance_ref = None  # Will be set after bot initialization
+
+@control_app.route('/control/status', methods=['GET'])
+def control_status():
+    """Dashboard polls this to check if bot is paused/running"""
+    global bot_instance_ref
+    if bot_instance_ref is None:
+        return jsonify({"status": "UNKNOWN", "paused": False}), 500
+    
+    is_paused = getattr(bot_instance_ref, 'paused', False)
+    return jsonify({
+        "status": "PAUSED" if is_paused else "RUNNING",
+        "paused": is_paused,
+        "timestamp": datetime.now().isoformat(),
+    }), 200
+
+@control_app.route('/control/pause', methods=['POST'])
+def control_pause():
+    """Dashboard calls this to pause trading"""
+    global bot_instance_ref
+    if bot_instance_ref is None:
+        return jsonify({"error": "Bot not initialized"}), 500
+    
+    bot_instance_ref.paused = True
+    print("⏸️  Bot PAUSED via dashboard control")
+    return jsonify({"status": "PAUSED", "timestamp": datetime.now().isoformat()}), 200
+
+@control_app.route('/control/resume', methods=['POST'])
+def control_resume():
+    """Dashboard calls this to resume trading"""
+    global bot_instance_ref
+    if bot_instance_ref is None:
+        return jsonify({"error": "Bot not initialized"}), 500
+    
+    bot_instance_ref.paused = False
+    print("▶️  Bot RESUMED via dashboard control")
+    return jsonify({"status": "RUNNING", "timestamp": datetime.now().isoformat()}), 200
+
+def start_control_server():
+    """Run Flask control server in background thread"""
+    try:
+        print("🌐 Starting bot control server on port 5000...")
+        control_app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False, threaded=True)
+    except Exception as e:
+        print(f"❌ Control server error: {e}")
 
 from tradingbot.risk.position_sizing import (
     PositionSizer,
@@ -159,7 +209,7 @@ def map_session_for_filter(session_name: str) -> str:
 def send_to_dashboard(
     bot_data: dict,
     analysis: dict,
-    endpoint: str = "http://68.233.99.145:8001/webhook",
+    endpoint: str = "http://68.233.99.145:8000/webhook",
     timeout: float = 3.0,
 ) -> bool:
     """
@@ -289,6 +339,7 @@ class XAUUSDTradingBot:
 
         # ── State ─────────────────────────────────────────────────────────────
         self.running                   = False
+        self.paused                    = False
         self.trade_log: list           = []
         self.open_positions: list      = []
         self.manual_positions: list    = []
@@ -1076,9 +1127,15 @@ class XAUUSDTradingBot:
     def analyze_once(self) -> None:
         # ── Daily reset (08:00 IST) ───────────────────────────────────────────
         self._maybe_reset_daily_state()
+        
+        # ── Pause flag check (from dashboard control) ──────────────────────────
+        if self.paused:
+            print("⏸️ Bot paused via dashboard control — skipping cycle")
+            return
+        
         # ── Remote pause check ────────────────────────────────────────
         if not check_bot_active():
-            print("⏸️ Bot paused via dashboard — skipping cycle")
+            print("⏸️ Bot paused via remote — skipping cycle")
             return
 
         self.sync_closed_positions()
@@ -1717,12 +1774,22 @@ class XAUUSDTradingBot:
 # CLI ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
+    global bot_instance_ref
+    
     bot = XAUUSDTradingBot()
 
     if not bot.initialize():
         print("❌ Bot initialization failed — exiting")
         return
 
+    bot_instance_ref = bot  # Make bot accessible to control server
+    
+    # ── Start control server in background ─────────────────────────────────
+    control_thread = threading.Thread(target=start_control_server, daemon=True)
+    control_thread.start()
+    print("✅ Control server thread started on port 5000")
+    time.sleep(1)  # Give server time to start
+    
     bot.load_trade_log()
 
     print("🔬 Running diagnostics...")
