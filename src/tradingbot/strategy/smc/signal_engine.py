@@ -745,7 +745,7 @@ class SignalEngine:
         if break_m15_idx is None:
             break_m15_idx = len(m15_df) - 1
 
-        lookback = 30
+        lookback = 36
         start = max(0, sweep.candle_index - lookback)
         end = min(len(m15_df) - 1, break_m15_idx)
         if end < start:
@@ -981,7 +981,7 @@ class SignalEngine:
                 shifted_idx = _apply_shift_rule_within_leg(full_df, scan_idx, protected_idx)
                 if shifted_idx is None:
                     debug_counts["first_no_shift_fvg"] += 1
-                    continue
+                    shifted_idx = scan_idx
 
                 candidate_poi = self._build_poi(
                     full_df,
@@ -999,6 +999,7 @@ class SignalEngine:
             shifted_extreme_idx = _apply_shift_rule_within_leg(full_df, extreme_abs_idx, protected_idx)
             if shifted_extreme_idx is None:
                 debug_counts["extreme_no_shift_fvg"] += 1
+                # NO fallback here — extreme OB must have an immediate FVG
             else:
                 extreme_poi = self._build_poi(
                     full_df,
