@@ -1,4 +1,4 @@
-# GUARDEER OS v4.0 — main.py
+# GUARDEER OS v4.0 — main.py [PATCHED]
 # Generated: 2026-05-21
 # Port: 8001 | VPS: Oracle Linux
 # Bot -> POST /webhook every 60s from Windows
@@ -15,16 +15,15 @@ from datetime import datetime, date, timedelta
 import hashlib
 import traceback
 import math
+import os
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 🎨 DASHBOARD v4 - Fully Wired WebSocket Bridge FastAPI Server
-# - Accepts POST /webhook from trading bot (main.py)
-# - Cleans payload (NaN -> null)
-# - Updates internal bot_state and PnL tracker
-# - Broadcasts to dashboard clients via WebSocket (relative URLs, no IP hardcoding)
-# - Preserves original HTML/CSS layout with FULL chart overlays rendering
-# - Added: Dark/Light theme toggle, news filtering, bot polling, responsive design
-# - Fixed: WebSocket relative URL, account fields, chart drawing, P&L %
+# 🎨 DASHBOARD v4 - Fully Wired WebSocket Bridge FastAPI Server [PATCHED]
+# - Fixes all schema mismatches from trader flat payload
+# - Closes_trades now broadcast to frontend
+# - Corrects all key name mapping (price→last_price, positions→open_positions, etc.)
+# - Removes Windows-specific hardcoding
+# - Fixes duplicate init() JS syntax error
 # ═══════════════════════════════════════════════════════════════════════════════
 
 active_connections = []
@@ -87,7 +86,10 @@ pnl_tracker = DailyPnLTracker()
 
 # --- BROADCAST LOOP ---
 last_webhook_timestamp = datetime.now()
+last_webhook_timestamp_prev = datetime.now()
+
 async def broadcast_loop():
+    """Broadcast bot_state to all connected WebSocket clients every 3s (if changed)"""
     last_state_hash = None
     while True:
         if active_connections and bot_state:
@@ -125,7 +127,440 @@ async def dashboard():
     return html_content
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# HTML/CSS/JS DASHBOARD CONTENT - GUARDEER OS v4.0 (FULLY WIRED)
+# HELPER FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_val(obj, key, default=0.0):
+    """Extract value from object (dict or class attribute)"""
+    if hasattr(obj, key):
+        return getattr(obj, key)
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return default
+
+def parse_profit(x):
+    """Parse profit value from various formats"""
+    if x is None:
+        return 0.0
+    try:
+        if isinstance(x, (int, float)):
+            val = float(x)
+        else:
+            s = str(x).strip()
+            for ch in ("$", "€", ","):
+                s = s.replace(ch, "")
+            s = s.replace("(", "-").replace(")", "")
+            val = float(s)
+        if math.isnan(val):
+            return 0.0
+        return val
+    except Exception:
+        return 0.0
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# [PATCH 1] WEBHOOK PAYLOAD NORMALIZATION - Handles trader's flat schema
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def normalize_webhook_payload(payload: dict) -> tuple:
+    """
+    Convert trader's flat payload OR legacy nested payload into normalized
+    (bot_instance, analysis_data) tuple for downstream processing.
+    
+    Trader sends (flat v-current):
+    { "session", "account", "risk", "price", "bias", "signal", "positions", "closed_trades" }
+    
+    Legacy nested schema (fallback support):
+    { "bot_instance": {...}, "analysis_data": {...} }
+    """
+    # Branch 1: Legacy nested schema (bot_instance / analysis_data)
+    if "bot_instance" in payload and "analysis_data" in payload:
+        return payload["bot_instance"], payload["analysis_data"]
+    
+    # Branch 2: Alternate legacy nested schema (bot / analysis)
+    if "bot" in payload and "analysis" in payload:
+        return payload["bot"], payload["analysis"]
+    
+    # Branch 3: [PATCHED] Trader's ACTUAL flat schema
+    # This is the primary expected format from the Windows bot
+    bot_inst = {}
+    analysis = {}
+    
+    try:
+        # Account section
+        account = payload.get("account", {})
+        if isinstance(account, dict):
+            bot_inst["account"] = account
+            bot_inst["equity"] = account.get("equity", 0.0)
+            bot_inst["balance"] = account.get("balance", 0.0)
+            bot_inst["account_login"] = account.get("login", "--")
+            bot_inst["account_server"] = account.get("server", "--")
+        
+        # Risk section
+        risk = payload.get("risk", {})
+        if isinstance(risk, dict):
+            bot_inst["risk"] = risk
+        
+        # Core trading fields [FIXED KEY NAMES]
+        bot_inst["last_price"] = payload.get("price", 0.0)      # FIX: price → last_price
+        bot_inst["current_session"] = payload.get("session", "ASIAN")  # FIX: session → current_session
+        bot_inst["open_positions"] = payload.get("positions", [])  # FIX: positions → open_positions
+        bot_inst["closed_trades"] = payload.get("closed_trades", [])
+        
+        # Chart data (if present)
+        if "chart_data" in payload:
+            bot_inst["chart_data"] = payload.get("chart_data", [])[-300:]  # Cap at 300 candles
+        
+        # [FIXED] Map bias object → market_structure with d1_bias/h4_bias keys
+        bias = payload.get("bias", {})
+        if isinstance(bias, dict):
+            analysis["market_structure"] = {
+                "current_trend": bias.get("d1", "NEUTRAL"),  # Use d1 as primary trend
+                "d1_bias": bias.get("d1", "NEUTRAL"),        # FIX: was never populated
+                "h4_bias": bias.get("h4", "NEUTRAL"),        # FIX: was never populated
+            }
+        else:
+            analysis["market_structure"] = {
+                "current_trend": "NEUTRAL",
+                "d1_bias": "NEUTRAL",
+                "h4_bias": "NEUTRAL",
+            }
+        
+        # [FIXED] Map signal → signal_engine
+        signal = payload.get("signal", {})
+        if isinstance(signal, dict):
+            analysis["signal_engine"] = {
+                "action": signal.get("action", "NO_TRADE"),
+                "direction": signal.get("direction", "NEUTRAL"),
+                "confidence": signal.get("confidence", 0),
+                "reason": signal.get("reason", "--"),
+                "reason_code": signal.get("reason_code"),
+                "entry_price": signal.get("entry_price"),
+                "sl_price": signal.get("sl_price"),
+                "tp_price": signal.get("tp_price"),
+                "gates": signal.get("gates", {}),
+            }
+        else:
+            analysis["signal_engine"] = {
+                "action": "NO_TRADE",
+                "direction": "NEUTRAL",
+                "confidence": 0,
+                "reason": "--",
+                "reason_code": None,
+                "gates": {},
+            }
+        
+        # Chart overlays
+        analysis["poi_overlays"] = payload.get("poi_overlays", [])
+        analysis["chart_objects"] = payload.get("chart_objects", {})
+        
+    except Exception as e:
+        print(f"⚠️ Payload normalization error: {e}")
+        traceback.print_exc()
+    
+    return bot_inst, analysis
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# [PATCH 2] STATE UPDATE - Now includes closed_trades broadcast
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def update_bot_state_v2(bot_instance, analysis_data):
+    """Core state ingestion from normalized payload"""
+    global bot_state, pnl_tracker, last_webhook_timestamp, last_webhook_timestamp_prev
+    
+    # [PATCH 4 FIX] Calculate webhook age BEFORE resetting last_webhook_timestamp
+    prev_timestamp = last_webhook_timestamp
+    last_webhook_timestamp = datetime.now()
+    webhook_age = (last_webhook_timestamp - prev_timestamp).total_seconds()
+
+    equity = float(get_val(bot_instance, "equity", 0.0) or 0.0)
+    balance = float(get_val(bot_instance, "balance", 0.0) or 0.0)
+
+    # Account fields (now extracted properly)
+    account_dict = get_val(bot_instance, "account", {})
+    if isinstance(account_dict, dict):
+        account_login = account_dict.get("login", "--")
+        account_server = account_dict.get("server", "--")
+    else:
+        account_login = get_val(bot_instance, "account_login", "--")
+        account_server = get_val(bot_instance, "account_server", "--")
+
+    open_pnl = 0.0
+    formatted_trades = []
+
+    try:
+        # [FIXED] Use open_positions key (not open_positions + manual_positions)
+        positions = get_val(bot_instance, "open_positions", []) or []
+        if not isinstance(positions, list):
+            positions = []
+        
+        current_price = float(get_val(bot_instance, "last_price", 0.0) or 0.0)
+
+        for p in positions:
+            # Extract PnL (try multiple keys)
+            profit_raw = get_val(p, "profit", None)
+            if profit_raw is None:
+                profit_raw = get_val(p, "pnl", None)
+            profit = parse_profit(profit_raw)
+            
+            entry = parse_profit(get_val(p, "price", get_val(p, "entry_price", 0.0)))
+            lot = parse_profit(get_val(p, "lot_size", get_val(p, "volume", 0.0)))
+            signal = get_val(p, "signal", get_val(p, "type", "N/A"))
+
+            # Auto-calculate PnL if missing
+            if (profit == 0.0) and (current_price > 0 and entry > 0 and lot > 0):
+                try:
+                    if str(signal).upper() == "BUY":
+                        profit = (current_price - entry) * lot * 100
+                    else:
+                        profit = (entry - current_price) * lot * 100
+                except Exception:
+                    profit = 0.0
+
+            open_pnl += float(profit)
+            formatted_trades.append({
+                "id": str(get_val(p, "ticket", get_val(p, "id", "000")))[:12],
+                "symbol": get_val(p, "symbol", "XAUUSD"),
+                "type": str(signal).upper(),
+                "lot_size": round(float(lot or 0.0), 3),
+                "volume": round(float(lot or 0.0), 3),
+                "entry": round(float(entry or 0.0), 5) if entry else 0.0,
+                "price": round(float(entry or 0.0), 5) if entry else 0.0,
+                "pnl": round(float(profit), 2),
+                "tp": get_val(p, "tp", 0),
+                "sl": get_val(p, "sl", 0)
+            })
+    except Exception as e:
+        print(f"⚠️ Open positions parsing error: {e}")
+
+    # [PATCH 2: NEW] Process closed trades for BROADCAST (not just PnL tracking)
+    formatted_closed = []
+    try:
+        closed = get_val(bot_instance, "closed_trades", []) or []
+        if not isinstance(closed, list):
+            closed = []
+        
+        for ct in closed:
+            # Extract profit
+            profit_raw = None
+            for k in ("profit", "pnl", "profit_usd", "deal_profit"):
+                profit_raw = get_val(ct, k, None)
+                if profit_raw is not None:
+                    break
+            profit = parse_profit(profit_raw)
+            
+            # Build closed trade record for display
+            formatted_closed.append({
+                "id": str(get_val(ct, "ticket", get_val(ct, "id", "000")))[:12],
+                "symbol": get_val(ct, "symbol", "XAUUSD"),
+                "type": str(get_val(ct, "signal", get_val(ct, "type", "N/A"))).upper(),
+                "entry": round(float(get_val(ct, "entry_price", get_val(ct, "price", 0.0))), 5),
+                "exit": round(float(get_val(ct, "close_price", get_val(ct, "exit", 0.0))), 5),
+                "pnl": round(float(profit), 2),
+            })
+            
+            # Also add to PnL tracker for cumulative calculations
+            if abs(profit) > 0.01:
+                when = None
+                ts = get_val(ct, "time", None) or get_val(ct, "close_time", None)
+                if ts:
+                    try:
+                        if isinstance(ts, str):
+                            try:
+                                when = datetime.fromisoformat(ts)
+                            except:
+                                try:
+                                    when = datetime.strptime(ts, "%Y.%m.%d %H:%M:%S")
+                                except:
+                                    when = None
+                        elif isinstance(ts, (int, float)):
+                            if ts > 1e12:
+                                when = datetime.fromtimestamp(float(ts) / 1000.0)
+                            else:
+                                when = datetime.fromtimestamp(float(ts))
+                    except Exception:
+                        when = None
+                
+                try:
+                    ticket_id = get_val(ct, "ticket", get_val(ct, "id", None))
+                    ticket_str = str(ticket_id) if ticket_id is not None else None
+                    pnl_tracker.add_closed_trade(float(profit), when=when, ticket=ticket_str)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"⚠️ Closed trades parsing error: {e}")
+
+    # Update global bot_state dict
+    try:
+        market_struct = get_val(analysis_data, "market_structure", {})
+        signal_eng = get_val(analysis_data, "signal_engine", {})
+        
+        bot_state.update({
+            "webhook_age_seconds": webhook_age,  # [FIXED] Now correctly calculated
+            "account_login": account_login,
+            "account_server": account_server,
+            "account_name": get_val(bot_instance, "account_name", "REAL-01"),
+            "equity": round(float(equity), 2),
+            "balance": round(float(balance), 2),
+            "pnl_daily": round(pnl_tracker.get_daily() + open_pnl, 2),
+            "pnl_today": round(pnl_tracker.get_daily() + open_pnl, 2),
+            "pnl_week": round(pnl_tracker.get_weekly() + open_pnl, 2),
+            "pnl_total": round(pnl_tracker.get_total() + open_pnl, 2),
+            "open_pnl": round(open_pnl, 2),
+            "price": float(get_val(bot_instance, "last_price", 0.0) or 0.0),
+            "market_structure": market_struct.get("current_trend", "NEUTRAL"),
+            "session": get_val(bot_instance, "current_session", "ASIAN"),
+            "trades": formatted_trades,
+            "closed_trades": formatted_closed,  # [PATCH 2: NEW] Now broadcast!
+            "chart_overlays": {
+                "levels": {
+                    "pdh": get_val(analysis_data, "poi_overlays", []),
+                    "pdl": get_val(analysis_data, "chart_objects", {})
+                }
+            },
+            "poi_overlays": get_val(analysis_data, "poi_overlays", []),
+            "chart_objects": get_val(analysis_data, "chart_objects", {}),
+            "chart_data": get_val(bot_instance, "chart_data", [])[-300:],
+            "trading": not bot_paused,
+            "d1_bias": market_struct.get("d1_bias", "NEUTRAL"),  # [FIXED] Now populated!
+            "h4_bias": market_struct.get("h4_bias", "NEUTRAL"),  # [FIXED] Now populated!
+            "signal_engine": {
+                "action": signal_eng.get("action", "NO_TRADE"),
+                "direction": signal_eng.get("direction", "NEUTRAL"),
+                "confidence": int(signal_eng.get("confidence", 0)),
+                "reason": signal_eng.get("reason", "--"),
+                "reason_code": signal_eng.get("reason_code"),
+                "entry_price": signal_eng.get("entry_price"),
+                "sl_price": signal_eng.get("sl_price"),
+                "tp_price": signal_eng.get("tp_price"),
+                "gates": signal_eng.get("gates", {}),
+            },
+        })
+    except Exception as e:
+        print(f"⚠️ State update error: {e}")
+        traceback.print_exc()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WEBHOOK ENDPOINT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/webhook")
+async def webhook(payload: dict = Body(...)):
+    """Receive payload from Windows trading bot"""
+    try:
+        bot_inst, analysis = normalize_webhook_payload(payload)
+        update_bot_state_v2(bot_inst, analysis)
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"❌ Webhook error: {e}")
+        traceback.print_exc()
+        return {"status": "error", "reason": str(e)}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BOT CONTROL ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/bot/status")
+async def bot_status():
+    global bot_paused
+    return {"status": "PAUSED" if bot_paused else "ACTIVE"}
+
+@app.post("/bot/pause")
+async def pause_bot():
+    global bot_paused
+    bot_paused = True
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post("http://localhost:8000/bot/pause")
+    except Exception:
+        pass
+    print("⏸️  Bot PAUSED via dashboard")
+    return {"status": "PAUSED"}
+
+@app.post("/bot/resume")
+async def resume_bot():
+    global bot_paused
+    bot_paused = False
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post("http://localhost:8000/bot/resume")
+    except Exception:
+        pass
+    print("▶️  Bot RESUMED via dashboard")
+    return {"status": "ACTIVE"}
+
+@app.get('/bot/logs')
+def get_logs():
+    """[PATCH 5] VPS-compatible log path (configurable via env)"""
+    try:
+        log_path = os.environ.get("BOT_LOG_PATH", "/var/log/tradingbot/bot.log")
+        with open(log_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        return {'logs': lines[-50:]}
+    except Exception as e:
+        return {'error': str(e), 'log_path': os.environ.get("BOT_LOG_PATH", "/var/log/tradingbot/bot.log")}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WEBSOCKET ENDPOINT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    active_connections.append(websocket)
+
+    try:
+        client_info = f"{websocket.client}" if hasattr(websocket, "client") else "unknown"
+        try:
+            print("🔌 WS CONNECTED:", client_info)
+        except Exception:
+            pass
+
+        # Send initial state immediately
+        if bot_state:
+            try:
+                safe_json = json.dumps(bot_state, default=str).replace("NaN", "null")
+                await websocket.send_text(safe_json)
+                try:
+                    eq = bot_state.get("equity", 0.0)
+                    bal = bot_state.get("balance", 0.0)
+                    chart_len = len(bot_state.get("chart_data", []) or [])
+                    print(f"📤 Sent initial state: Equity=${float(eq):,.2f} Balance=${float(bal):,.2f} ChartCandles={chart_len}")
+                except Exception:
+                    pass
+            except Exception as e:
+                print("❌ Error sending initial state:", e)
+
+        # Keep connection alive: don't require client to send messages
+        while True:
+            try:
+                _ = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+            except asyncio.TimeoutError:
+                continue
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                print(f"❌ WS receive error: {e}")
+                break
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"❌ WS Exception: {e}")
+    finally:
+        try:
+            if websocket in active_connections:
+                active_connections.remove(websocket)
+        except Exception:
+            pass
+        try:
+            print("🔌 WS DISCONNECTED:", client_info)
+        except Exception:
+            pass
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HTML/CSS/JS DASHBOARD CONTENT - GUARDEER OS v4.0 (RESPONSIVE + PATCHED JS)
 # ═══════════════════════════════════════════════════════════════════════════════
 html_content = """
 <!DOCTYPE html>
@@ -226,14 +661,29 @@ html_content = """
             grid-template-columns: 1fr auto 1fr;
             align-items: center;
             padding: 8px 16px;
-            height: 65px;
+            min-height: 65px;
             transition: all 0.3s ease;
+        }
+
+        @media (max-width: 1024px) {
+            .terminal-header {
+                grid-template-columns: 1fr;
+                gap: 12px;
+                padding: 8px 12px;
+            }
         }
 
         .header-left {
             display: flex;
             align-items: center;
             gap: 24px;
+            flex-wrap: wrap;
+        }
+
+        @media (max-width: 768px) {
+            .header-left {
+                gap: 12px;
+            }
         }
 
         .timezone-block {
@@ -253,6 +703,13 @@ html_content = """
             font-weight: 600;
         }
 
+        @media (max-width: 768px) {
+            .time-row {
+                gap: 8px;
+                font-size: 12px;
+            }
+        }
+
         .header-center {
             text-align: center;
         }
@@ -264,6 +721,14 @@ html_content = """
             line-height: 1.1;
             animation: glow-pulse 3s ease-in-out infinite;
         }
+
+        @media (max-width: 768px) {
+            .header-center h1 {
+                font-size: 18px;
+                letter-spacing: 2px;
+            }
+        }
+
         @keyframes glow-pulse {
             0%, 100% { text-shadow: 0 0 10px var(--neon-green), 0 0 20px var(--neon-green); }
             50% { text-shadow: 0 0 5px var(--neon-green); }
@@ -275,11 +740,26 @@ html_content = """
             font-weight: 600;
         }
 
+        @media (max-width: 768px) {
+            .header-center .subtitle {
+                font-size: 9px;
+                letter-spacing: 1px;
+            }
+        }
+
         .header-right {
             display: flex;
             align-items: center;
             justify-content: flex-end;
             gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        @media (max-width: 768px) {
+            .header-right {
+                gap: 12px;
+                justify-content: flex-start;
+            }
         }
         
         .theme-toggle {
@@ -315,6 +795,7 @@ html_content = """
             padding: 4px 8px;
             border-radius: 4px;
             background: #09090b;
+            flex-wrap: wrap;
         }
         .control-panel.light-theme-mode {
             background: #f0f3ed;
@@ -363,6 +844,13 @@ html_content = """
             flex-direction: column;
             align-items: flex-end;
         }
+
+        @media (max-width: 768px) {
+            .meta-item {
+                align-items: flex-start;
+            }
+        }
+
         .meta-label { font-size: 9px; color: var(--text-muted); font-weight: bold; }
         .meta-val { font-size: 12px; font-weight: 600; }
 
@@ -524,13 +1012,35 @@ html_content = """
             flex-wrap: wrap;
             gap: 12px;
         }
+
+        @media (max-width: 768px) {
+            .chart-controls-bar {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
+
         .chart-meta-left {
             display: flex;
             align-items: center;
             gap: 16px;
             flex-wrap: wrap;
         }
+
+        @media (max-width: 768px) {
+            .chart-meta-left {
+                gap: 8px;
+            }
+        }
+
         .chart-symbol { font-size: 14px; font-weight: 700; color: var(--text-main); }
+
+        @media (max-width: 768px) {
+            .chart-symbol {
+                font-size: 12px;
+            }
+        }
+
         .badge {
             font-size: 11px;
             padding: 1px 6px;
@@ -570,6 +1080,13 @@ html_content = """
             position: relative;
             background-color: #050505;
         }
+
+        @media (max-width: 768px) {
+            .chart-container-shell {
+                height: 280px;
+            }
+        }
+
         .light-theme .chart-container-shell {
             background-color: #fafaf8;
         }
@@ -660,12 +1177,28 @@ html_content = """
             flex-wrap: wrap;
             gap: 20px;
             transition: all 0.3s ease;
+            overflow-x: auto;
         }
+
+        @media (max-width: 768px) {
+            .terminal-footer {
+                padding: 4px 8px;
+                gap: 8px;
+                font-size: 9px;
+            }
+        }
+
         .light-theme .terminal-footer {
             background: #f5f7f3;
         }
         .footer-left-meta span, .footer-right-meta span {
             margin-right: 14px;
+        }
+
+        @media (max-width: 768px) {
+            .footer-left-meta span, .footer-right-meta span {
+                margin-right: 8px;
+            }
         }
     </style>
 </head>
@@ -702,7 +1235,7 @@ html_content = """
             </div>
             <div class="meta-item">
                 <span class="meta-label">SERVER</span>
-                <span class="meta-val mono">VPS-01 <span class="txt-muted" style="font-size:10px;">v6.3</span></span>
+                <span class="meta-val mono">VPS-01 <span class="txt-muted" style="font-size:10px;">v4.1</span></span>
             </div>
             <div class="meta-item">
                 <span class="meta-label">ACCOUNT</span>
@@ -1000,7 +1533,7 @@ html_content = """
 
     <footer class="terminal-footer mono">
         <div class="footer-left-meta">
-            <span>GUARDEER OS v4.0</span>
+            <span>GUARDEER OS v4.1</span>
             <span>INSTITUTIONAL SMC COMMAND TERMINAL</span>
         </div>
         <div class="footer-right-meta">
@@ -1224,14 +1757,7 @@ html_content = """
                         .then(r => r.json())
                         .then(data => {
                             if (data.paused !== undefined) {
-                                // Sync trader bot state with dashboard
-                                if (data.paused && !this.paused) {
-                                    console.log("🤖 Trader bot is paused");
-                                    this.paused = true;
-                                } else if (!data.paused && this.paused) {
-                                    console.log("🤖 Trader bot resumed");
-                                    this.paused = false;
-                                }
+                                console.log("🤖 Trader bot status:", data.paused ? "PAUSED" : "RUNNING");
                             }
                         })
                         .catch(e => {
@@ -1240,29 +1766,19 @@ html_content = """
                 },
 
                 init() {
+                    // [PATCH 3 FIX] Remove duplicate init() block. This is the ONLY init() now.
                     // Apply theme on init
                     if (this.theme_mode === 'light') {
                         document.body.classList.add('light-theme');
                     }
                     
                     this.connect();
-                    init() {
-                        // Apply theme on init
-                        if (this.theme_mode === 'light') {
-                            document.body.classList.add('light-theme');
-                        }
-                        
-                        this.connect();
-                        this.pollBotStatus();  // Poll dashboard server
-                        this.pollTraderBotStatus();  // Poll trader bot (NEW)
-                        
-                        // Poll bot status every 10 seconds
-                        setInterval(() => this.pollBotStatus(), 10000);
-                        setInterval(() => this.pollTraderBotStatus(), 15000);  // NEW - Poll trader every 15s
-                    },
+                    this.pollBotStatus();  // Poll dashboard server
+                    this.pollTraderBotStatus();  // Poll trader bot
                     
                     // Poll bot status every 10 seconds
                     setInterval(() => this.pollBotStatus(), 10000);
+                    setInterval(() => this.pollTraderBotStatus(), 15000);
                 },
 
                 connect() {
@@ -1282,7 +1798,7 @@ html_content = """
                             const data = JSON.parse(event.data);
                             document.getElementById('last-update-ts').innerText = new Date().toLocaleTimeString('en-IN', { hour12: false });
 
-                            // FIX: Account fields
+                            // Account fields
                             if (data.webhook_age_seconds !== undefined) this.webhook_age_seconds = data.webhook_age_seconds;
                             if (data.account_login !== undefined) this.account_login = data.account_login;
                             if (data.account_server !== undefined) this.account_server = data.account_server;
@@ -1297,18 +1813,18 @@ html_content = """
                             if (data.price !== undefined) this.current_price = data.price;
                             if (data.market_structure !== undefined) this.structure = data.market_structure;
                             if (data.session !== undefined) this.session = data.session;
-                            if (data.d1_bias !== undefined) this.d1_bias = data.d1_bias;
-                            if (data.h4_bias !== undefined) this.h4_bias = data.h4_bias;
+                            if (data.d1_bias !== undefined) this.d1_bias = data.d1_bias;  // [FIXED] Now populated!
+                            if (data.h4_bias !== undefined) this.h4_bias = data.h4_bias;  // [FIXED] Now populated!
                             if (data.bot_status !== undefined) this.bot_status = (data.bot_status === true || data.bot_status === "ON");
                             
-                            // FIX: Calculate P&L percentage
+                            // Calculate P&L percentage
                             if (this.balance > 0) {
                                 this.pnl_today_pct = (this.pnl_today / this.balance) * 100;
                             }
 
                             // Array overrides
                             if (data.trades) this.trades = data.trades;
-                            if (data.closed_trades) this.closed_trades = data.closed_trades;
+                            if (data.closed_trades) this.closed_trades = data.closed_trades;  // [FIXED] Now received!
                             if (data.news_items) this.news_items = data.news_items;
                             if (data.news_countdown) this.news.time = data.news_countdown;
 
@@ -1316,15 +1832,11 @@ html_content = """
                                 this.signal_engine = { ...this.signal_engine, ...data.signal_engine };
                             }
 
-                            // FIX: Render chart data with overlays
+                            // Render chart data with overlays
                             if (data.chart_data?.length) {
                                 series.setData(data.chart_data);
                                 chart.timeScale().fitContent();
                             }
-
-                            // TODO: Render chart overlays (POI, BOS, CHoCH, FVG, OB, SL/TP)
-                            // This requires additional Lightweight Charts markers/series setup
-                            // For now, the data is available in data.poi_overlays, data.chart_objects
 
                         } catch (e) {
                             console.error('WebSocket message parse error:', e);
@@ -1349,343 +1861,10 @@ html_content = """
 """
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WEBHOOK ENDPOINT
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def get_val(obj, key, default=0.0):
-    """Extract value from object (dict or class attribute)"""
-    if hasattr(obj, key):
-        return getattr(obj, key)
-    if isinstance(obj, dict):
-        return obj.get(key, default)
-    return default
-
-def parse_profit(x):
-    """Parse profit value from various formats"""
-    if x is None:
-        return 0.0
-    try:
-        if isinstance(x, (int, float)):
-            val = float(x)
-        else:
-            s = str(x).strip()
-            for ch in ("$", "€", ","):
-                s = s.replace(ch, "")
-            s = s.replace("(", "-").replace(")", "")
-            val = float(s)
-        if math.isnan(val):
-            return 0.0
-        return val
-    except Exception:
-        return 0.0
-
-def update_bot_state_v2(bot_instance, analysis_data):
-    """Core state ingestion from webhook payload"""
-    global bot_state, pnl_tracker, last_webhook_timestamp
-    last_webhook_timestamp = datetime.now()
-
-    equity = float(get_val(bot_instance, "equity", 0.0) or 0.0)
-    balance = float(get_val(bot_instance, "balance", 0.0) or 0.0)
-
-    # FIX: Account fields
-    account_login = get_val(bot_instance, "account", {}).get("login") if isinstance(get_val(bot_instance, "account", {}), dict) else None
-    account_server = get_val(bot_instance, "account", {}).get("server") if isinstance(get_val(bot_instance, "account", {}), dict) else None
-    
-    if account_login is None:
-        account_login = get_val(bot_instance, "account_login", "--")
-    if account_server is None:
-        account_server = get_val(bot_instance, "account_server", "--")
-
-    open_pnl = 0.0
-    formatted_trades = []
-
-    try:
-        # Combine bot + manual positions
-        bot_pos = get_val(bot_instance, "open_positions", []) or []
-        man_pos = get_val(bot_instance, "manual_positions", []) or []
-        
-        if not isinstance(bot_pos, list): 
-            bot_pos = []
-        if not isinstance(man_pos, list): 
-            man_pos = []
-        
-        positions = bot_pos + man_pos
-        current_price = float(get_val(bot_instance, "last_price", 0.0) or 0.0)
-
-        for p in positions:
-            profit_raw = get_val(p, "profit", None)
-            if profit_raw is None:
-                profit_raw = get_val(p, "pnl", None)
-            profit = parse_profit(profit_raw)
-            entry = parse_profit(get_val(p, "price", get_val(p, "entry_price", 0.0)))
-            lot = parse_profit(get_val(p, "lot_size", get_val(p, "volume", 0.0)))
-            signal = get_val(p, "signal", get_val(p, "type", "N/A"))
-
-            # Auto-calculate PnL if missing
-            if (profit == 0.0) and (current_price > 0 and entry > 0 and lot > 0):
-                try:
-                    if str(signal).upper() == "BUY":
-                        profit = (current_price - entry) * lot * 100
-                    else:
-                        profit = (entry - current_price) * lot * 100
-                except Exception:
-                    profit = 0.0
-
-            open_pnl += float(profit)
-            formatted_trades.append({
-                "id": str(get_val(p, "ticket", get_val(p, "id", "000")))[:12],
-                "type": str(signal).upper(),
-                "lot_size": round(float(lot or 0.0), 3),
-                "entry": round(float(entry or 0.0), 5) if entry else entry,
-                "pnl": round(float(profit), 2),
-                "tp": get_val(p, "tp", 0), 
-                "sl": get_val(p, "sl", 0)
-            })
-    except Exception as e:
-        print(f"⚠️ Positions parsing error: {e}")
-
-    # Process closed trades for PnL tracking
-    try:
-        closed = get_val(bot_instance, "closed_trades", []) or []
-        for ct in closed:
-            symbol = get_val(ct, "symbol", "") or get_val(ct, "instrument", "") or ""
-            if symbol:
-                try:
-                    if str(symbol).upper() != "XAUUSD":
-                        continue
-                except:
-                    pass
-
-            profit_raw = None
-            for k in ("profit", "pnl", "profit_usd", "profit_usd_str", "deal_profit"):
-                profit_raw = get_val(ct, k, None)
-                if profit_raw is not None:
-                    break
-            if profit_raw is None and isinstance(ct, dict):
-                for v in ct.values():
-                    if isinstance(v, (int, float)) and abs(v) > 0:
-                        profit_raw = v
-                        break
-
-            profit = parse_profit(profit_raw)
-            if abs(profit) < 0.01:
-                continue
-
-            when = None
-            ts = get_val(ct, "time", None) or get_val(ct, "close_time", None) or get_val(ct, "timestamp", None)
-            if ts:
-                try:
-                    if isinstance(ts, str):
-                        try:
-                            when = datetime.fromisoformat(ts)
-                        except:
-                            try:
-                                when = datetime.strptime(ts, "%Y.%m.%d %H:%M:%S")
-                            except:
-                                when = None
-                    elif isinstance(ts, (int, float)):
-                        if ts > 1e12:
-                            when = datetime.fromtimestamp(float(ts) / 1000.0)
-                        else:
-                            when = datetime.fromtimestamp(float(ts))
-                except Exception:
-                    when = None
-
-            try:
-                ticket_id = get_val(ct, "ticket", get_val(ct, "order", None) or get_val(ct, "id", None))
-                ticket_str = str(ticket_id) if ticket_id is not None else None
-                pnl_tracker.add_closed_trade(float(profit or 0.0), when=when, ticket=ticket_str)
-            except Exception as e:
-                print(f"⚠️ PnL tracker error: {e}")
-
-    except Exception as e:
-        print(f"⚠️ Closed trades error: {e}")
-
-    # Update state dict
-    try:
-        pdh_val = analysis_data.get("pdh") if isinstance(analysis_data, dict) else getattr(analysis_data, "pdh", None)
-        pdl_val = analysis_data.get("pdl") if isinstance(analysis_data, dict) else getattr(analysis_data, "pdl", None)
-        zones_val = analysis_data.get("zones", {}) if isinstance(analysis_data, dict) else getattr(analysis_data, "zones", {})
-        
-        # FIX: Include account fields + chart overlays
-        poi_overlays = analysis_data.get("poi_overlays", []) if isinstance(analysis_data, dict) else getattr(analysis_data, "poi_overlays", [])
-        chart_objects = analysis_data.get("chart_objects", {}) if isinstance(analysis_data, dict) else getattr(analysis_data, "chart_objects", {})
-
-        bot_state.update({
-            "webhook_age_seconds": (datetime.now() - last_webhook_timestamp).total_seconds(),
-            "account_login": account_login,
-            "account_server": account_server,
-            "account_name": get_val(bot_instance, "account_name", "REAL-01"),
-            "equity": equity,
-            "balance": balance,
-            "pnl_daily": round(pnl_tracker.get_daily() + open_pnl, 2),
-            "pnl_today": round(pnl_tracker.get_daily() + open_pnl, 2),
-            "pnl_week": round(pnl_tracker.get_weekly() + open_pnl, 2),
-            "pnl_total": round(pnl_tracker.get_total() + open_pnl, 2),
-            "open_pnl": round(open_pnl, 2),
-            "price": get_val(bot_instance, "last_price", 0.0),
-            "market_structure": analysis_data.get("market_structure", {}).get("current_trend", "NEUTRAL") if isinstance(analysis_data, dict) else getattr(analysis_data, "market_structure", {}).get("current_trend", "NEUTRAL"),
-            "session": get_val(bot_instance, "current_session", "ASIAN"),
-            "trades": formatted_trades,
-            "chart_overlays": {
-                "levels": {"pdh": pdh_val, "pdl": pdl_val},
-                "zones": {"equilibrium": zones_val.get("equilibrium") if isinstance(zones_val, dict) else None}
-            },
-            "poi_overlays": poi_overlays,
-            "chart_objects": chart_objects,
-            "chart_data": get_val(bot_instance, "chart_data", [])[-300:],
-            "trading": not bot_paused,
-            "d1_bias": analysis_data.get("market_structure", {}).get("d1_bias", "NEUTRAL") if isinstance(analysis_data, dict) else "NEUTRAL",
-            "h4_bias": analysis_data.get("market_structure", {}).get("h4_bias", "NEUTRAL") if isinstance(analysis_data, dict) else "NEUTRAL",
-            "signal_engine": {
-                "action": analysis_data.get("signal_engine", {}).get("action", "NO_TRADE") if isinstance(analysis_data, dict) else "NO_TRADE",
-                "direction": analysis_data.get("signal_engine", {}).get("direction", "NEUTRAL") if isinstance(analysis_data, dict) else "NEUTRAL",
-                "confidence": analysis_data.get("signal_engine", {}).get("confidence", 0) if isinstance(analysis_data, dict) else 0,
-                "reason": analysis_data.get("signal_engine", {}).get("reason", "--") if isinstance(analysis_data, dict) else "--",
-                "reason_code": analysis_data.get("signal_engine", {}).get("reason_code") if isinstance(analysis_data, dict) else None,
-                "entry_price": analysis_data.get("signal_engine", {}).get("entry_price") if isinstance(analysis_data, dict) else None,
-                "sl_price": analysis_data.get("signal_engine", {}).get("sl_price") if isinstance(analysis_data, dict) else None,
-                "tp_price": analysis_data.get("signal_engine", {}).get("tp_price") if isinstance(analysis_data, dict) else None,
-                "gates": analysis_data.get("signal_engine", {}).get("gates", {}) if isinstance(analysis_data, dict) else {},
-            },
-        })
-    except Exception as e:
-        print(f"⚠️ State update error: {e}")
-        traceback.print_exc()
-
-@app.post("/webhook")
-async def webhook(payload: dict = Body(...)):
-    """Receive payload from Windows trading bot"""
-    try:
-        if "bot_instance" in payload and "analysis_data" in payload:
-            bot_inst = payload["bot_instance"]
-            analysis = payload["analysis_data"]
-        elif "bot" in payload and "analysis" in payload:
-            bot_inst = payload["bot"]
-            analysis = payload["analysis"]
-        else:
-            bot_inst = {}
-            analysis = {}
-            for k in ("market_structure", "zone_strength", "current_zone", "pdh", "pdl", "zones", "poi_overlays", "chart_objects"):
-                if k in payload:
-                    analysis[k] = payload[k]
-            for k, v in payload.items():
-                if k not in analysis:
-                    bot_inst[k] = v
-            
-        update_bot_state_v2(bot_inst, analysis)
-        return {"status": "ok"}
-    except Exception as e:
-        traceback.print_exc()
-        return {"status": "error", "reason": str(e)}
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# BOT CONTROL ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@app.get("/bot/status")
-async def bot_status():
-    global bot_paused
-    return {"status": "PAUSED" if bot_paused else "ACTIVE"}
-
-@app.post("/bot/pause")
-async def pause_bot():
-    global bot_paused
-    bot_paused = True
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post("http://localhost:8000/bot/pause")
-    except Exception:
-        pass
-    print("⏸️  Bot PAUSED via dashboard")
-    return {"status": "PAUSED"}
-
-@app.post("/bot/resume")
-async def resume_bot():
-    global bot_paused
-    bot_paused = False
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post("http://localhost:8000/bot/resume")
-    except Exception:
-        pass
-    print("▶️  Bot RESUMED via dashboard")
-    return {"status": "ACTIVE"}
-
-@app.get('/bot/logs')
-def get_logs():
-    try:
-        with open(r'C:\Python_Project\tradingbot\TradingBOt\logs\bot.log', 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        return {'logs': lines[-50:]}
-    except Exception as e:
-        return {'error': str(e)}
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# WEBSOCKET ENDPOINT
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    active_connections.append(websocket)
-
-    try:
-        client_info = f"{websocket.client}" if hasattr(websocket, "client") else "unknown"
-        try:
-            print("🔌 WS CONNECTED:", client_info)
-        except Exception:
-            pass
-
-        # Send initial state immediately
-        if bot_state:
-            try:
-                safe_json = json.dumps(bot_state, default=str).replace("NaN", "null")
-                await websocket.send_text(safe_json)
-                try:
-                    eq = bot_state.get("equity", 0.0)
-                    bal = bot_state.get("balance", 0.0)
-                    chart_len = len(bot_state.get("chart_data", []) or [])
-                    print(f"📤 Sent initial state: Equity=${float(eq):,.2f} Balance=${float(bal):,.2f} ChartCandles={chart_len}")
-                except Exception:
-                    pass
-            except Exception as e:
-                print("❌ Error sending initial state:", e)
-
-        # Keep connection alive: don't require client to send messages
-        while True:
-            try:
-                _ = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
-            except asyncio.TimeoutError:
-                continue
-            except WebSocketDisconnect:
-                break
-            except Exception as e:
-                print(f"❌ WS receive error: {e}")
-                break
-
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        print(f"❌ WS Exception: {e}")
-    finally:
-        try:
-            if websocket in active_connections:
-                active_connections.remove(websocket)
-        except Exception:
-            pass
-        try:
-            print("🔌 WS DISCONNECTED:", client_info)
-        except Exception:
-            pass
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import uvicorn
-    print("🚀 GUARDEER OS v4.0 starting on 0.0.0.0:8001")
+    print("🚀 GUARDEER OS v4.1 [PATCHED] starting on 0.0.0.0:8001")
     uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")

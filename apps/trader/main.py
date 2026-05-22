@@ -209,7 +209,7 @@ def map_session_for_filter(session_name: str) -> str:
 def send_to_dashboard(
     bot_data: dict,
     analysis: dict,
-    endpoint: str = "http://68.233.99.145:8000/webhook",
+    endpoint: str = "http://68.233.99.145:8001/webhook",
     timeout: float = 3.0,
 ) -> bool:
     """

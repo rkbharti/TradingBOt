@@ -195,6 +195,7 @@ class SignalEngine:
         h4_df: pd.DataFrame,
         d1_df: pd.DataFrame,
         now_utc: Optional[datetime] = None,
+        w1_df: Optional[pd.DataFrame] = None,  # ✅ Added
     ) -> SignalResult:
 
         if not hasattr(self, 'rejection_counts'):
@@ -221,44 +222,41 @@ class SignalEngine:
 
         if any(len(df) < 15 for df in [m5_df, m15_df, h4_df, d1_df]):
             print(f"⚠️ LOW DATA → m5:{len(m5_df)}, m15:{len(m15_df)}, h4:{len(h4_df)}, d1:{len(d1_df)}")
-        
+
         # ─── Step 0: ATR Regime Filter ──────────────────────────────
-        # print("🔥 EVALUATE METHOD RUNNING")
-
         current_atr = self._calc_atr(m5_df, len(m5_df) - 1, self.config.atr_period)
-
-        # TEMP DEBUG — no formatting, safe against None
-        # print(f"[ATR RAW] current_atr={current_atr} | type={type(current_atr)} | threshold={self.config.min_atr_threshold}")
-
         if current_atr is None or current_atr < self.config.min_atr_threshold:
             return _reject(gates, "LOW_VOLATILITY_REGIME")
-        # ─── Step 1: HTF Bias ───────────────────────────────────────────────
-        step1 = self._step_htf_bias(d1_df, h4_df)
+
+        # ─── Step 1: HTF Bias ───────────────────────────────────────
+        step1 = self._step_htf_bias(d1_df, h4_df, w1_df)  # ✅ w1_df passed
         gates["step_1_htf_bias"] = step1
         if not step1["passed"]:
             return _reject(gates, step1["reason"])
 
         direction: str = step1["direction"]
 
-        # ─── Step 2: External Liquidity Sweep ───────────────────────────────
+        # ─── Step 2: External Liquidity Sweep ───────────────────────
         step2, sweep = self._step_external_liquidity_sweep(m15_df, direction)
         gates["step_2_external_liquidity_sweep"] = step2
         if not step2["passed"] or sweep is None:
             return _reject(gates, step2["reason"], direction=direction)
 
-        # ─── Step 3: CHOCH / MSS Body Close ─────────────────────────────────
+        # ─── Step 3: CHOCH / MSS Body Close ─────────────────────────
         step3, structure_break = self._step_choch_mss_body_close(m5_df, sweep, m15_df)
         gates["step_3_choch_mss_body_close"] = step3
         if not step3["passed"] or structure_break is None:
             return _reject(gates, step3["reason"], direction=direction)
 
-        # ─── Step 4: Valid POI ───────────────────────────────────────────────
-        step4, poi_candidates = self._step_valid_poi(m15_df, m5_df, h4_df, d1_df, sweep, structure_break)
+        # ─── Step 4: Valid POI ───────────────────────────────────────
+        step4, poi_candidates = self._step_valid_poi(
+            m15_df, m5_df, h4_df, d1_df, sweep, structure_break
+        )
         gates["step_4_valid_poi"] = step4
         if not step4["passed"] or not poi_candidates:
             return _reject(gates, step4["reason"], direction=direction)
 
-        # ─── Step 5: OB/FVG Confluence ──────────────────────────────────────
+        # ─── Step 5: OB/FVG Confluence ──────────────────────────────
         step5, selected_poi, selected_fvg, entry_price = self._step_ob_fvg_confluence(
             m5_df, m15_df, direction, sweep, structure_break, poi_candidates
         )
@@ -266,19 +264,19 @@ class SignalEngine:
         if not step5["passed"] or selected_poi is None or selected_fvg is None or entry_price is None:
             return _reject(gates, step5["reason"], direction=direction)
 
-        # ─── Step 6: Dealing Range ───────────────────────────────────────────
+        # ─── Step 6: Dealing Range ───────────────────────────────────
         step6 = self._step_dealing_range(direction, entry_price, sweep)
         gates["step_6_dealing_range"] = step6
         if not step6["passed"]:
             return _reject(gates, step6["reason"], direction=direction)
 
-        # ─── Step 7: Killzone ────────────────────────────────────────────────
+        # ─── Step 7: Killzone ────────────────────────────────────────
         step7 = self._step_killzone(now_utc, m5_df)
         gates["step_7_killzone"] = step7
         if not step7["passed"]:
             return _reject(gates, step7["reason"], direction=direction)
 
-        # ─── Step 7.5: News Filter ───────────────────────────────────────────
+        # ─── Step 7.5: News Filter ───────────────────────────────────
         if self.news_filter is not None:
             blocked, news_reason = self.news_filter.is_news_blackout(now_utc)
             step7b = {
@@ -291,19 +289,15 @@ class SignalEngine:
         if not step7b["passed"]:
             return _reject(gates, step7b["reason"], direction=direction)
 
-        # ─── Step 8: Risk/Reward ─────────────────────────────────────────────
+        # ─── Step 8: Risk/Reward ─────────────────────────────────────
         step8, sl_price, tp_price = self._step_rr(
-            direction,
-            entry_price,
-            sweep,
-            selected_poi,
-            structure_break,
+            direction, entry_price, sweep, selected_poi, structure_break,
         )
         gates["step_8_risk_reward"] = step8
         if not step8["passed"]:
             return _reject(gates, step8["reason"], direction=direction)
 
-        # ─── All Gates Passed ────────────────────────────────────────────────
+        # ─── All Gates Passed ────────────────────────────────────────
         return SignalResult(
             action="ENTER",
             direction=direction,
@@ -343,8 +337,15 @@ class SignalEngine:
         self,
         d1_df: pd.DataFrame,
         h4_df: pd.DataFrame,
+        w1_df: Optional[pd.DataFrame] = None,  # ✅ Weekly added
     ) -> Dict[str, Any]:
 
+        # ✅ FIX 1: Three-tier hierarchy — W1 → D1 → H4
+        w1_bias = (
+            self._infer_bias(w1_df, self.config.external_swing_window)
+            if w1_df is not None and len(w1_df) >= self.config.external_swing_window * 2 + 1
+            else "NEUTRAL"
+        )
         d1_bias = self._infer_bias(d1_df, self.config.external_swing_window)
         h4_bias = self._infer_bias(h4_df, self.config.external_swing_window)
 
@@ -353,73 +354,113 @@ class SignalEngine:
         else:
             ts = d1_df.index[-1]
 
-        def _log(direction, reason):
-            self._bias_debug_rows.append(
-                {
-                    "time": ts,
-                    "d1_bias": d1_bias,
-                    "h4_bias": h4_bias,
-                    "direction": direction,
-                    "reason": reason,
-                }
-            )
+        def _log(direction: Optional[str], reason: str, is_pullback: bool = False):
+            self._bias_debug_rows.append({
+                "time":        ts,
+                "w1_bias":     w1_bias,
+                "d1_bias":     d1_bias,
+                "h4_bias":     h4_bias,
+                "direction":   direction,
+                "reason":      reason,
+                "is_pullback": is_pullback,
+            })
 
-        # =========================
-        # ✅ CASE 1 — PERFECT ALIGNMENT
-        # =========================
-        if d1_bias == h4_bias and d1_bias in {"BULLISH", "BEARISH"}:
-            _log(d1_bias, "HTF_ALIGNED")
-
+        # ─────────────────────────────────────────────────────────────────
+        # CASE 1 — Full alignment W1 + D1 + H4
+        # Highest probability — all three agree
+        # ─────────────────────────────────────────────────────────────────
+        if (
+            w1_bias == d1_bias == h4_bias
+            and d1_bias in {"BULLISH", "BEARISH"}
+        ):
+            _log(d1_bias, "FULL_HTF_ALIGNED")
             return {
-                "passed": True,
-                "direction": d1_bias,
-                "reason": "HTF_ALIGNED",
-                "d1_bias": d1_bias,
-                "h4_bias": h4_bias,
-                "agreement_score": self.config.d1_weight + self.config.h4_weight,
+                "passed":          True,
+                "direction":       d1_bias,
+                "reason":          "FULL_HTF_ALIGNED",
+                "w1_bias":         w1_bias,
+                "d1_bias":         d1_bias,
+                "h4_bias":         h4_bias,
+                "is_pullback":     False,
+                "agreement_score": (
+                    self.config.d1_weight +
+                    self.config.h4_weight +
+                    getattr(self.config, "w1_weight", 1.0)
+                ),
             }
 
-        # =========================
-        # ✅ CASE 2 — D1 DOMINANT (H4 conflict or H4 neutral)
-        # =========================
-        if d1_bias in {"BULLISH", "BEARISH"}:
-            _log(d1_bias, "D1_DOMINANT")
-
+        # ─────────────────────────────────────────────────────────────────
+        # CASE 2 — W1 dominant, D1/H4 conflict or neutral
+        # W1 is the "boss" — lower TFs are pullbacks
+        # ─────────────────────────────────────────────────────────────────
+        if w1_bias in {"BULLISH", "BEARISH"}:
+            # ✅ FIX 2: Conflict = pullback, not skip
+            # D1 or H4 opposing = price seeking HTF POI before continuation
+            is_pullback = (
+                d1_bias not in {w1_bias, "NEUTRAL"} or
+                h4_bias not in {w1_bias, "NEUTRAL"}
+            )
+            _log(w1_bias, "W1_DOMINANT", is_pullback=is_pullback)
             return {
-                "passed": True,
-                "direction": d1_bias,
-                "reason": "D1_DOMINANT",
-                "d1_bias": d1_bias,
-                "h4_bias": h4_bias,
+                "passed":          True,
+                "direction":       w1_bias,
+                "reason":          "W1_DOMINANT",
+                "w1_bias":         w1_bias,
+                "d1_bias":         d1_bias,
+                "h4_bias":         h4_bias,
+                "is_pullback":     is_pullback,
+                "agreement_score": getattr(self.config, "w1_weight", 1.0),
+            }
+
+        # ─────────────────────────────────────────────────────────────────
+        # CASE 3 — W1 neutral, D1 dominant
+        # D1 defines objective; H4 conflict = pullback to HTF POI
+        # ─────────────────────────────────────────────────────────────────
+        if d1_bias in {"BULLISH", "BEARISH"}:
+            is_pullback = h4_bias not in {d1_bias, "NEUTRAL"}
+            reason = "D1_DOMINANT_H4_PULLBACK" if is_pullback else "D1_DOMINANT"
+            _log(d1_bias, reason, is_pullback=is_pullback)
+            return {
+                "passed":          True,
+                "direction":       d1_bias,
+                "reason":          reason,
+                "w1_bias":         w1_bias,
+                "d1_bias":         d1_bias,
+                "h4_bias":         h4_bias,
+                "is_pullback":     is_pullback,
                 "agreement_score": self.config.d1_weight,
             }
 
-        # =========================
-        # ✅ CASE 3 — D1 NEUTRAL → TRUST H4
-        # =========================
-        if d1_bias == "NEUTRAL" and h4_bias in {"BULLISH", "BEARISH"}:
+        # ─────────────────────────────────────────────────────────────────
+        # CASE 4 — W1 + D1 neutral, H4 has direction
+        # Lowest confidence — H4 alone
+        # ─────────────────────────────────────────────────────────────────
+        if h4_bias in {"BULLISH", "BEARISH"}:
             _log(h4_bias, "H4_DOMINANT")
-
             return {
-                "passed": True,
-                "direction": h4_bias,
-                "reason": "H4_DOMINANT",
-                "d1_bias": d1_bias,
-                "h4_bias": h4_bias,
+                "passed":          True,
+                "direction":       h4_bias,
+                "reason":          "H4_DOMINANT",
+                "w1_bias":         w1_bias,
+                "d1_bias":         d1_bias,
+                "h4_bias":         h4_bias,
+                "is_pullback":     False,
                 "agreement_score": self.config.h4_weight,
             }
 
-        # =========================
-        # ❌ CASE 4 — BOTH NEUTRAL (genuine no-trade)
-        # =========================
+        # ─────────────────────────────────────────────────────────────────
+        # CASE 5 — All neutral → genuine no-trade
+        # Creator: "wait for market to complete its story"
+        # ─────────────────────────────────────────────────────────────────
         _log(None, "NO_HTF_DIRECTION")
-
         return {
-            "passed": False,
-            "direction": None,
-            "reason": "NO_HTF_DIRECTION",
-            "d1_bias": d1_bias,
-            "h4_bias": h4_bias,
+            "passed":          False,
+            "direction":       None,
+            "reason":          "NO_HTF_DIRECTION",
+            "w1_bias":         w1_bias,
+            "d1_bias":         d1_bias,
+            "h4_bias":         h4_bias,
+            "is_pullback":     False,
             "agreement_score": 0,
         }
 
@@ -445,58 +486,32 @@ class SignalEngine:
             len(df) - recent_window
         )
 
-        now_ts = None
-        if "time" in df.columns:
-            try:
-                now_ts = pd.to_datetime(df["time"].iloc[-1])
-            except Exception:
-                now_ts = None
+        if direction == "BULLISH":
+            # Pre-build once — not inside per-candle loop
+            prior_lows_all = [
+                idx for idx in confirmed_lows
+                if start_idx <= idx < (len(df) - 1)
+            ]
 
-        max_sweep_age = 24
-        max_sweep_age_minutes = 24 * 15  # M15 sweep logic = 6 hours max wall-clock age
+            for i in range(len(df) - 1, start_idx - 1, -1):
+                curr_low   = float(df["low"].iat[i])
+                curr_close = float(df["close"].iat[i])
 
-        for i in range(len(df) - 1, start_idx - 1, -1):
-
-            curr_high = float(df["high"].iat[i])
-            curr_low = float(df["low"].iat[i])
-            curr_close = float(df["close"].iat[i])
-
-            atr = self._calc_atr(df, i, cfg.atr_period)
-            if atr is None:
-                continue
-            tolerance = atr * cfg.sweep_atr_tolerance
-
-            sweep_ts = None
-            if now_ts is not None and "time" in df.columns:
-                try:
-                    sweep_ts = pd.to_datetime(df["time"].iat[i])
-                except Exception:
-                    sweep_ts = None
-
-            candles_ago = (len(df) - 1) - i
-            if candles_ago > max_sweep_age:
-                continue
-
-            if now_ts is not None and sweep_ts is not None:
-                sweep_age_minutes = (now_ts - sweep_ts).total_seconds() / 60.0
-                if sweep_age_minutes > max_sweep_age_minutes:
+                atr = self._calc_atr(df, i, cfg.atr_period)
+                if atr is None:
                     continue
+                tolerance = atr * cfg.sweep_atr_tolerance
 
-            if direction == "BULLISH":
-
-                prior_lows = [
-                    idx for idx in confirmed_lows
-                    if start_idx <= idx < i
-                ]
-
+                # Only use swings that formed BEFORE this candle
+                prior_lows = [idx for idx in prior_lows_all if idx < i]
                 if not prior_lows:
                     continue
 
-                for ref_idx in reversed(prior_lows[-2:]):
-
+                # ✅ FIX 1: Check ALL unmitigated prior lows, newest first
+                for ref_idx in reversed(prior_lows):
                     ref_level = float(df["low"].iat[ref_idx])
 
-                    wick_break = curr_low < (ref_level - tolerance)
+                    wick_break = curr_low  < (ref_level - tolerance)
                     close_back = curr_close > ref_level
 
                     if wick_break and close_back:
@@ -504,7 +519,6 @@ class SignalEngine:
                             idx for idx in confirmed_highs
                             if start_idx <= idx < i
                         ]
-
                         tp = (
                             float(df["high"].iat[left_highs[-1]])
                             if left_highs
@@ -534,21 +548,30 @@ class SignalEngine:
                             atr_at_sweep=atr,
                         )
 
-            else:
+        else:  # BEARISH
+            prior_highs_all = [
+                idx for idx in confirmed_highs
+                if start_idx <= idx < (len(df) - 1)
+            ]
 
-                prior_highs = [
-                    idx for idx in confirmed_highs
-                    if start_idx <= idx < i
-                ]
+            for i in range(len(df) - 1, start_idx - 1, -1):
+                curr_high  = float(df["high"].iat[i])
+                curr_close = float(df["close"].iat[i])
 
+                atr = self._calc_atr(df, i, cfg.atr_period)
+                if atr is None:
+                    continue
+                tolerance = atr * cfg.sweep_atr_tolerance
+
+                prior_highs = [idx for idx in prior_highs_all if idx < i]
                 if not prior_highs:
                     continue
 
-                for ref_idx in reversed(prior_highs[-2:]):
-
+                # ✅ FIX 1: All unmitigated prior highs, newest first
+                for ref_idx in reversed(prior_highs):
                     ref_level = float(df["high"].iat[ref_idx])
 
-                    wick_break = curr_high > (ref_level + tolerance)
+                    wick_break = curr_high  > (ref_level + tolerance)
                     close_back = curr_close < ref_level
 
                     if wick_break and close_back:
@@ -556,7 +579,6 @@ class SignalEngine:
                             idx for idx in confirmed_lows
                             if start_idx <= idx < i
                         ]
-
                         tp = (
                             float(df["low"].iat[left_lows[-1]])
                             if left_lows
@@ -740,44 +762,23 @@ class SignalEngine:
         structure_break: StructureBreak,
     ) -> Tuple[Dict[str, Any], List[POI]]:
 
-        break_time = self._get_candle_time(m5_df, structure_break.candle_index)
+        break_time    = self._get_candle_time(m5_df, structure_break.candle_index)
         break_m15_idx = self._find_bar_at_or_before(m15_df, break_time)
         if break_m15_idx is None:
             break_m15_idx = len(m15_df) - 1
 
         lookback = 36
         start = max(0, sweep.candle_index - lookback)
-        end = min(len(m15_df) - 1, break_m15_idx)
+        end   = min(len(m15_df) - 1, break_m15_idx)
+
         if end < start:
             return {"passed": False, "reason": "NO_VALID_M15_POI"}, []
 
-        segment = m15_df.iloc[start:end + 1]
+        segment = m15_df.iloc[start : end + 1]
         if segment.empty:
             return {"passed": False, "reason": "NO_VALID_M15_POI"}, []
 
-        candidates: List[POI] = []
-
-        if sweep.direction == "BULLISH":
-            candidate_indices = (
-                segment["low"]
-                .nsmallest(min(5, len(segment)))
-                .index.tolist()
-            )
-        else:
-            candidate_indices = (
-                segment["high"]
-                .nlargest(min(5, len(segment)))
-                .index.tolist()
-            )
-
-        for idx_label in candidate_indices:
-            abs_idx = m15_df.index.get_loc(idx_label)
-            candidates.append(self._build_poi(m15_df, "OB", int(abs_idx)))
-
-        candidates = self._dedupe_pois(candidates)
-        if not candidates:
-            return {"passed": False, "reason": "NO_VALID_M15_POI"}, []
-
+        # ─── HTF POIs first ───────────────────────────────────────────────
         htf_pois = self._select_htf_institutional_pois(
             m15_df=m15_df,
             h4_df=h4_df,
@@ -785,66 +786,150 @@ class SignalEngine:
             sweep=sweep,
             structure_break=structure_break,
         )
-
         if not htf_pois:
             return {"passed": False, "reason": "NO_HTF_POI"}, []
 
-        htf_aligned: List[POI] = []
-        matched_zone: Optional[Tuple[float, float]] = None
-        matched_type: Optional[str] = None
+        # ─── Valid OB = last opposing candle before displacement ──────────
+        def _find_valid_obs(
+            df: pd.DataFrame,
+            seg_start: int,
+            seg_end: int,
+            direction: str,
+        ) -> List[int]:
+            valid = []
+            for idx in range(seg_end, seg_start - 1, -1):
+                o = float(df["open"].iat[idx])
+                c = float(df["close"].iat[idx])
+
+                is_opposing = (
+                    (direction == "BULLISH" and c < o) or
+                    (direction == "BEARISH" and c > o)
+                )
+                if not is_opposing:
+                    continue
+
+                atr = self._calc_atr(df, idx, self.config.atr_period)
+                if atr is None:
+                    continue
+
+                look_fwd = min(len(df) - 1, idx + 5)
+                fvgs = self._find_fvgs(
+                    df, direction,
+                    start=idx + 1,
+                    end=look_fwd,
+                )
+                if fvgs:
+                    valid.append(idx)
+
+            return valid
+
+        seg_abs_start = int(m15_df.index.get_loc(segment.index[0]))
+        seg_abs_end   = int(m15_df.index.get_loc(segment.index[-1]))
+
+        ob_indices = _find_valid_obs(
+            m15_df, seg_abs_start, seg_abs_end,
+            sweep.direction,
+        )
+
+        if not ob_indices:
+            return {"passed": False, "reason": "NO_VALID_M15_POI"}, []
+
+        candidates = [
+            self._build_poi(m15_df, "OB", idx)
+            for idx in ob_indices
+        ]
+        candidates = self._dedupe_pois(candidates)
+
+        # ─── HTF alignment + mitigation checks ───────────────────────────
+        htf_aligned: List[Tuple[POI, POI]] = []
 
         for poi in candidates:
+
             if self.poi_mitigation.is_breached(poi):
                 continue
 
-            for htf_poi in htf_pois:
-                overlap = not (poi.high < htf_poi.low or poi.low > htf_poi.high)
-                if overlap:
-                    htf_aligned.append(poi)
-                    matched_zone = (htf_poi.low, htf_poi.high)
-                    matched_type = htf_poi.poi_type
+            # ✅ FIX 2: 50% MT — check if any candle in segment already
+            # closed its BODY through the OB midpoint (= zone invalidated)
+            poi_mid  = (poi.low + poi.high) / 2.0
+            poi_size = max(poi.high - poi.low, 1e-9)
+            mt_breached = False
+
+            for seg_idx in range(seg_abs_start, seg_abs_end + 1):
+                body_low  = min(
+                    float(m15_df["open"].iat[seg_idx]),
+                    float(m15_df["close"].iat[seg_idx]),
+                )
+                body_high = max(
+                    float(m15_df["open"].iat[seg_idx]),
+                    float(m15_df["close"].iat[seg_idx]),
+                )
+                if sweep.direction == "BULLISH" and body_low < poi_mid:
+                    mt_breached = True
+                    break
+                if sweep.direction == "BEARISH" and body_high > poi_mid:
+                    mt_breached = True
                     break
 
-        # print("\n[POI DEBUG] M15 candidates:")
-        # for poi in candidates:
-        #     print(f"  - {poi.poi_type} idx={poi.candle_index} low={poi.low} high={poi.high} breached={self.poi_mitigation.is_breached(poi)}")
+            if mt_breached:
+                continue
 
-        # print("[POI DEBUG] HTF POIs:")
-        # for htf_poi in htf_pois:
-        #     print(f"  - {htf_poi.poi_type} idx={htf_poi.candle_index} low={htf_poi.low} high={htf_poi.high}")
+            # ✅ FIX 1: 50% overlap threshold — not fully_inside
+            for htf_poi in htf_pois:
+                overlap_low  = max(poi.low,  htf_poi.low)
+                overlap_high = min(poi.high, htf_poi.high)
+                overlap_size = overlap_high - overlap_low
 
-        # print("[POI DEBUG] Overlap checks:")
-        # for poi in candidates:
-        #     for htf_poi in htf_pois:
-        #         overlap = not (poi.high < htf_poi.low or poi.low > htf_poi.high)
-        #         print(f"  - M15 idx={poi.candle_index} vs {htf_poi.poi_type} idx={htf_poi.candle_index} => overlap={overlap}")
+                # At least 50% of M15 OB must overlap with HTF zone
+                sufficiently_inside = (
+                    overlap_size > 0 and
+                    (overlap_size / poi_size) >= 0.50
+                )
+                if sufficiently_inside:
+                    htf_aligned.append((poi, htf_poi))
+                    break
 
         if not htf_aligned:
             return {"passed": False, "reason": "NO_POI_IN_HTF_POI"}, []
 
-        htf_aligned.sort(key=lambda p: p.candle_index)
+        # ─── Priority: First OB after IDM > Extreme OB ───────────────────
+        def _poi_priority(pair: Tuple[POI, POI]) -> int:
+            t = pair[1].poi_type
+            if "FIRST_OB" in t: return 0
+            if "EXTREME"  in t: return 1
+            return 2
 
-        extreme_ob = htf_aligned[0]
-        extreme_tagged = POI(
-            poi_type="EXTREME_OB",
-            candle_index=extreme_ob.candle_index,
-            low=extreme_ob.low,
-            high=extreme_ob.high,
-        )
+        htf_aligned.sort(key=_poi_priority)
 
-        if len(htf_aligned) > 1:
-            first_ob = htf_aligned[-1]
-            first_tagged = POI(
-                poi_type="FIRST_OB_AFTER_IDM",
-                candle_index=first_ob.candle_index,
-                low=first_ob.low,
-                high=first_ob.high,
+        valid_pois:   List[POI] = []
+        matched_zone: Optional[Tuple[float, float]] = None
+        matched_type: Optional[str] = None
+        seen_types:   set = set()
+
+        for m15_ob, htf_poi in htf_aligned:
+            label = (
+                "FIRST_OB_AFTER_IDM"
+                if "FIRST_OB" in htf_poi.poi_type
+                else "EXTREME_OB"
             )
-            valid_pois = [extreme_tagged, first_tagged]
-        else:
-            valid_pois = [extreme_tagged]
+            if label in seen_types:
+                continue
 
-        zone_low, zone_high = matched_zone if matched_zone is not None else (extreme_tagged.low, extreme_tagged.high)
+            valid_pois.append(POI(
+                poi_type=label,
+                candle_index=m15_ob.candle_index,
+                low=m15_ob.low,
+                high=m15_ob.high,
+            ))
+            seen_types.add(label)
+
+            if matched_zone is None:
+                matched_zone = (htf_poi.low, htf_poi.high)
+                matched_type = htf_poi.poi_type
+
+        if not valid_pois:
+            return {"passed": False, "reason": "NO_POI_IN_HTF_POI"}, []
+
+        zone_low, zone_high = matched_zone
 
         return {
             "passed": True,
@@ -863,41 +948,17 @@ class SignalEngine:
         sweep: SweepEvent,
         structure_break: StructureBreak,
     ) -> List[POI]:
-        """
-        Phase B HTF institutional-origin selector.
 
-        Doctrine-confirmed core:
-        - scan the structural leg between IDM and Protected Extreme,
-        - keep only the first OB after IDM and the Extreme OB,
-        - require displacement and immediate FVG,
-        - apply shift rule when the exact anchor candle lacks the valid immediate FVG.
-
-        Engineering approximations:
-        - derive IDM / Protected Extreme from pivot lists,
-        - reuse current displacement helper,
-        - keep optional near-price preference with fallback.
-
-        DEBUG TOTALS VERSION:
-        - preserves current behavior
-        - accumulates totals across the whole backtest on self._htf_poi_debug_totals
-        """
         htf_pois: List[POI] = []
 
         if not hasattr(self, "_htf_poi_debug_totals"):
             self._htf_poi_debug_totals = {
-                "calls": 0,
-                "timeframes_checked": 0,
-                "too_short_df": 0,
-                "not_enough_pivots": 0,
-                "bad_anchor_order": 0,
-                "empty_leg": 0,
-                "first_no_shift_fvg": 0,
-                "first_failed_displacement": 0,
-                "extreme_no_shift_fvg": 0,
-                "extreme_failed_displacement": 0,
-                "pois_added": 0,
-                "returned_empty": 0,
-                "returned_nonempty": 0,
+                "calls": 0, "timeframes_checked": 0,
+                "too_short_df": 0, "not_enough_pivots": 0,
+                "bad_anchor_order": 0, "empty_leg": 0,
+                "first_no_shift_fvg": 0, "first_failed_displacement": 0,
+                "extreme_no_shift_fvg": 0, "extreme_failed_displacement": 0,
+                "pois_added": 0, "returned_empty": 0, "returned_nonempty": 0,
             }
 
         debug_counts = self._htf_poi_debug_totals
@@ -908,36 +969,82 @@ class SignalEngine:
             return htf_pois
 
         current_price = float(m15_df["close"].iloc[-1])
-        piv_window = max(2, self.config.external_swing_window)
+        piv_window    = max(2, self.config.external_swing_window)
         immediate_window = 8
 
-        def _apply_shift_rule_within_leg(
+        # ✅ ATR-based proximity — replaces hardcoded 40.0
+        atr_proximity = self._calc_atr(m15_df, len(m15_df) - 1, self.config.atr_period)
+        proximity_threshold = (atr_proximity * 10.0) if atr_proximity else None
+
+        def _find_first_ob_after_idm(
             full_df: pd.DataFrame,
-            start_idx: int,
-            leg_end_idx: int,
+            idm_idx: int,
+            protected_idx: int,
         ) -> Optional[int]:
-            for idx in range(start_idx, leg_end_idx + 1):
-                fvg_start = idx + 1
-                fvg_end = min(len(full_df) - 2, leg_end_idx, idx + immediate_window)
-
-                if fvg_end < fvg_start:
-                    continue
-
+            """
+            ✅ FIX 2: Only the FIRST valid OB after IDM.
+            Scans forward from idm+1, returns on first hit.
+            """
+            for scan_idx in range(idm_idx + 1, protected_idx + 1):
+                fvg_end = min(len(full_df) - 2, protected_idx, scan_idx + immediate_window)
                 immediate_fvgs = self._find_fvgs(
+                    full_df, sweep.direction,
+                    start=scan_idx + 1, end=fvg_end,
+                )
+                if immediate_fvgs:
+                    return scan_idx  # has FVG — valid standard OB
+
+                # ✅ FIX 3: No FVG → Advanced OB rule (whole candle is OB)
+                # Still return this as valid but flag as advanced
+                # Don't silently skip — check displacement
+                debug_counts["first_no_shift_fvg"] += 1
+
+                candidate = self._build_poi(
                     full_df,
-                    sweep.direction,
-                    start=fvg_start,
-                    end=fvg_end,
+                    "HTF_FIRST_OB_ADVANCED",
+                    scan_idx,
+                )
+                if self.is_displacement_after_poi(candidate, full_df, sweep.direction):
+                    return scan_idx  # Advanced OB with displacement
+
+                debug_counts["first_failed_displacement"] += 1
+
+            return None
+
+        def _find_extreme_ob(
+            full_df: pd.DataFrame,
+            idm_idx: int,
+            protected_idx: int,
+        ) -> Optional[int]:
+            """
+            ✅ FIX 4: Extreme OB = last unmitigated block before protected extreme.
+            NO displacement prerequisite per creator — relaxed rules.
+            """
+            if sweep.direction == "BULLISH":
+                leg = full_df.iloc[idm_idx: protected_idx + 1]
+                extreme_rel = int(leg["low"].to_numpy().argmin())
+            else:
+                leg = full_df.iloc[idm_idx: protected_idx + 1]
+                extreme_rel = int(leg["high"].to_numpy().argmax())
+
+            extreme_abs = idm_idx + extreme_rel
+
+            # Try shift rule first
+            for idx in range(extreme_abs, protected_idx + 1):
+                fvg_end = min(len(full_df) - 2, protected_idx, idx + immediate_window)
+                immediate_fvgs = self._find_fvgs(
+                    full_df, sweep.direction,
+                    start=idx + 1, end=fvg_end,
                 )
                 if immediate_fvgs:
                     return idx
 
-            return None
+            # ✅ FIX 4: No FVG = still valid Extreme OB (last line of defense)
+            # Creator: "Extreme OB must be last unmitigated block before protected H/L"
+            debug_counts["extreme_no_shift_fvg"] += 1
+            return extreme_abs  # return raw extreme — no hard fail
 
-        timeframe_sets = [
-            ("D1", d1_df),
-            ("H4", h4_df),
-        ]
+        timeframe_sets = [("D1", d1_df), ("H4", h4_df)]
 
         for timeframe_name, full_df in timeframe_sets:
             debug_counts["timeframes_checked"] += 1
@@ -948,94 +1055,67 @@ class SignalEngine:
 
             ph, pl = self._find_pivots_debug(full_df, piv_window)
 
-            if sweep.direction == "BULLISH":
-                pivot_list = pl
-            else:
-                pivot_list = ph
+            pivot_list = pl if sweep.direction == "BULLISH" else ph
 
             if len(pivot_list) < 2:
                 debug_counts["not_enough_pivots"] += 1
                 continue
 
             protected_idx = pivot_list[-1]
-            idm_idx = pivot_list[-2]
+            idm_idx       = pivot_list[-2]
 
             if protected_idx <= idm_idx:
                 debug_counts["bad_anchor_order"] += 1
                 continue
 
-            leg_df = full_df.iloc[idm_idx : protected_idx + 1]
+            leg_df = full_df.iloc[idm_idx: protected_idx + 1]
             if leg_df.empty or len(leg_df) < 3:
                 debug_counts["empty_leg"] += 1
                 continue
 
-            if sweep.direction == "BULLISH":
-                extreme_rel_idx = int(leg_df["low"].to_numpy().argmin())
-            else:
-                extreme_rel_idx = int(leg_df["high"].to_numpy().argmax())
-
-            extreme_abs_idx = idm_idx + extreme_rel_idx
-
-            first_after_idm_abs_idx: Optional[int] = None
-            for scan_idx in range(idm_idx + 1, protected_idx + 1):
-                shifted_idx = _apply_shift_rule_within_leg(full_df, scan_idx, protected_idx)
-                if shifted_idx is None:
-                    debug_counts["first_no_shift_fvg"] += 1
-                    shifted_idx = scan_idx
-
-                candidate_poi = self._build_poi(
-                    full_df,
-                    f"{timeframe_name}_HTF_FIRST_OB_AFTER_IDM",
-                    int(shifted_idx),
-                )
-
-                if not self.is_displacement_after_poi(candidate_poi, full_df, sweep.direction):
-                    debug_counts["first_failed_displacement"] += 1
-                    continue
-
-                first_after_idm_abs_idx = shifted_idx
-                break
-
-            shifted_extreme_idx = _apply_shift_rule_within_leg(full_df, extreme_abs_idx, protected_idx)
-            if shifted_extreme_idx is None:
-                debug_counts["extreme_no_shift_fvg"] += 1
-                # NO fallback here — extreme OB must have an immediate FVG
-            else:
+            # ── Extreme OB (highest probability — add first) ──────────────
+            extreme_idx = _find_extreme_ob(full_df, idm_idx, protected_idx)
+            if extreme_idx is not None:
                 extreme_poi = self._build_poi(
                     full_df,
                     f"{timeframe_name}_HTF_EXTREME_OB",
-                    int(shifted_extreme_idx),
+                    int(extreme_idx),
                 )
-                if self.is_displacement_after_poi(extreme_poi, full_df, sweep.direction):
-                    htf_pois.append(extreme_poi)
-                    debug_counts["pois_added"] += 1
-                else:
-                    debug_counts["extreme_failed_displacement"] += 1
+                # ✅ FIX 4: displacement checked AFTER price taps — not as prerequisite
+                htf_pois.append(extreme_poi)
+                debug_counts["pois_added"] += 1
+            else:
+                debug_counts["extreme_failed_displacement"] += 1
 
-            if first_after_idm_abs_idx is not None:
+            # ── First OB after IDM ─────────────────────────────────────────
+            first_idx = _find_first_ob_after_idm(full_df, idm_idx, protected_idx)
+            if first_idx is not None:
                 first_poi = self._build_poi(
                     full_df,
                     f"{timeframe_name}_HTF_FIRST_OB_AFTER_IDM",
-                    int(first_after_idm_abs_idx),
+                    int(first_idx),
                 )
                 htf_pois.append(first_poi)
                 debug_counts["pois_added"] += 1
 
         htf_pois = self._dedupe_pois(htf_pois)
 
-        if sweep.direction == "BULLISH":
-            nearby_htf_pois = [
-                poi for poi in htf_pois
-                if poi.high >= current_price and (poi.high - current_price) <= 40.0
-            ]
-        else:
-            nearby_htf_pois = [
-                poi for poi in htf_pois
-                if poi.low <= current_price and (current_price - poi.low) <= 40.0
-            ]
-
-        if nearby_htf_pois:
-            htf_pois = nearby_htf_pois
+        # ✅ FIX 5: ATR-based proximity filter — no hardcoded 40.0
+        if proximity_threshold is not None:
+            if sweep.direction == "BULLISH":
+                nearby = [
+                    p for p in htf_pois
+                    if p.high >= current_price and
+                    (p.high - current_price) <= proximity_threshold
+                ]
+            else:
+                nearby = [
+                    p for p in htf_pois
+                    if p.low <= current_price and
+                    (current_price - p.low) <= proximity_threshold
+                ]
+            if nearby:
+                htf_pois = nearby
 
         if htf_pois:
             debug_counts["returned_nonempty"] += 1
@@ -1060,84 +1140,111 @@ class SignalEngine:
             m5_sweep_idx = len(m5_df) - 1
 
         fvg_start = structure_break.candle_index
-        fvg_end   = min(len(m5_df) - 2, structure_break.candle_index + 20)
+        fvg_end   = min(len(m5_df) - 2, structure_break.candle_index + 10)
         if fvg_end < fvg_start:
             fvg_end = len(m5_df) - 2
 
         fvg_list = self._find_fvgs(m5_df, direction, start=fvg_start, end=fvg_end)
         if not fvg_list:
+            fvg_end_wide = min(len(m5_df) - 2, structure_break.candle_index + 20)
+            fvg_list = self._find_fvgs(
+                m5_df, direction,
+                start=fvg_start,
+                end=fvg_end_wide,
+            )
+        if not fvg_list:
             return {"passed": False, "reason": "FVG_NOT_FOUND"}, None, None, None
+
+        # ✅ ATR-based proximity — computed once outside loop
+        atr = self._calc_atr(m5_df, len(m5_df) - 1, self.config.atr_period)
+        near_threshold = (atr * 0.25) if atr else None
 
         best: Optional[Tuple[POI, FVG, float, float]] = None
 
         for poi in poi_candidates:
             poi_size = max(poi.high - poi.low, 1e-9)
+            poi_mid  = (poi.low + poi.high) / 2.0
+
+            if not self.is_displacement_after_poi(poi, m5_df, direction):
+                continue
 
             for fvg in fvg_list:
 
-                overlap_low  = max(poi.low, fvg.low)
+                overlap_low  = max(poi.low,  fvg.low)
                 overlap_high = min(poi.high, fvg.high)
                 has_overlap  = overlap_high > overlap_low
 
-                distance = min(
-                    abs(poi.low - fvg.high),
-                    abs(poi.high - fvg.low),
-                )
-                is_near = distance <= poi_size
+                # ✅ FIX: overlap OR ATR-near (not hardcoded distance)
+                if not has_overlap:
+                    if near_threshold is None:
+                        continue
+                    distance = min(
+                        abs(poi.low  - fvg.high),
+                        abs(poi.high - fvg.low),
+                    )
+                    is_near = distance <= near_threshold
+                    if not is_near:
+                        continue
 
-                if not has_overlap and not is_near:
-                    continue
-
+                # Score — overlap gets quality score, near gets proximity score
                 if has_overlap:
                     score = (overlap_high - overlap_low) / poi_size
                 else:
+                    distance = min(
+                        abs(poi.low  - fvg.high),
+                        abs(poi.high - fvg.low),
+                    )
                     score = 1.0 - min(distance / poi_size, 1.0)
 
-                # -------------------------------------------------------
-                # HIGH-10 FIX: entry = zone boundary, NOT candle close
-                # -------------------------------------------------------
-                if direction == "BULLISH":
-                    zone_high = poi.high
-                    zone_low  = poi.low
-                    entry     = zone_high    # limit buy at TOP of OB/FVG zone
+                # Entry price
+                is_advanced = "ADVANCED" in poi.poi_type
+                if is_advanced:
+                    entry = poi_mid
                 else:
-                    zone_high = poi.high
-                    zone_low  = poi.low
-                    entry     = zone_low     # limit sell at BOTTOM of OB/FVG zone
+                    if direction == "BULLISH":
+                        entry = overlap_high if has_overlap else poi.high
+                    else:
+                        entry = overlap_low  if has_overlap else poi.low
 
+                # Zone for retest scan
+                zone_low  = overlap_low  if has_overlap else poi.low
+                zone_high = overlap_high if has_overlap else poi.high
+                zone_mid  = (zone_low + zone_high) / 2.0
+
+                # ─── Retest confirmation ──────────────────────────────
                 retest_found = False
                 scan_start   = structure_break.candle_index
-                scan_end     = min(len(m5_df), scan_start + 25)
+                scan_end     = min(len(m5_df), scan_start + 30)
 
                 for j in range(scan_start, scan_end):
                     candle = m5_df.iloc[j]
-                    high   = candle["high"]
-                    low    = candle["low"]
-                    open_  = candle["open"]
-                    close  = candle["close"]
+                    high_  = float(candle["high"])
+                    low_   = float(candle["low"])
+                    open_  = float(candle["open"])
+                    close_ = float(candle["close"])
 
-                    body       = abs(close - open_)
-                    range_     = max(high - low, 1e-9)
-                    strong_body = body > 0.5 * range_
+                    body   = abs(close_ - open_)
+                    range_ = max(high_ - low_, 1e-9)
 
-                    if not strong_body:
+                    # Body through 50% MT = zone failed
+                    if direction == "BULLISH" and close_ < zone_mid:
+                        continue
+                    if direction == "BEARISH" and close_ > zone_mid:
+                        continue
+
+                    if body <= 0.5 * range_:
                         continue
 
                     if direction == "BULLISH":
-                        wick_touch = (low >= zone_low) and (low <= zone_high)
-                        rejection  = close > zone_high
-
-                        if wick_touch and rejection:
-                            # entry stays at zone_high — DO NOT override with close
+                        wick_in_zone = zone_low <= low_ <= zone_high
+                        rejection    = close_ > zone_high
+                        if wick_in_zone and rejection:
                             retest_found = True
                             break
-
                     else:
-                        wick_touch = (high <= zone_high) and (high >= zone_low)
-                        rejection  = close < zone_low
-
-                        if wick_touch and rejection:
-                            # entry stays at zone_low — DO NOT override with close
+                        wick_in_zone = zone_low <= high_ <= zone_high
+                        rejection    = close_ < zone_low
+                        if wick_in_zone and rejection:
                             retest_found = True
                             break
 
@@ -1152,17 +1259,12 @@ class SignalEngine:
 
         poi, fvg, entry, score = best
 
-        # Displacement is a hard gate — no relaxed bypass (removed RELAXED_NO_DISPLACEMENT)
-        displacement_valid = self.is_displacement_after_poi(poi, m5_df, direction)
-        if not displacement_valid:
-            return {"passed": False, "reason": "NO_DISPLACEMENT_AFTER_POI"}, None, None, None
-
         return {
             "passed": True,
             "reason": "OK",
             "poi_type": poi.poi_type,
-            "poi_zone": (self._r(poi.low), self._r(poi.high)),
-            "fvg_zone": (self._r(fvg.low), self._r(fvg.high)),
+            "poi_zone": (self._r(poi.low),  self._r(poi.high)),
+            "fvg_zone": (self._r(fvg.low),  self._r(fvg.high)),
             "entry_price": self._r(entry),
             "confluence_score": round(float(score), 4),
         }, poi, fvg, entry
@@ -1570,64 +1672,121 @@ class SignalEngine:
         return float(np.mean(tr))
 
     def _infer_bias(self, df: pd.DataFrame, window: int) -> str:
-        # Require enough data to say anything
+        """
+        Creator-aligned bias inference:
+        Priority 1 — Liquidity sweep of key level + close back
+        Priority 2 — Body BOS beyond last confirmed swing
+        Priority 3 — Confirmed HH/HL or LL/LH sequence
+        Priority 4 — Last swing leg direction (lowest confidence)
+        """
         if len(df) < window + 5:
             return "NEUTRAL"
 
-        # Look back a reasonable window for HTF swings
         lookback = max(window * 6, 30)
-        recent = df.iloc[-lookback:]
+        recent   = df.iloc[-lookback:].reset_index(drop=True)
 
-        # Use the same pivot logic as elsewhere
         ph, pl = self._find_pivots_debug(recent, max(2, window))
 
-        # =========================
-        # 1) STRONG TREND VIA 3 PIVOTS
-        # =========================
-        if len(ph) >= 3:
-            vals = [float(recent["high"].iloc[i]) for i in ph[-3:]]
-            if vals[0] < vals[1] < vals[2]:
+        # ── Helpers ───────────────────────────────────────────────────────
+
+        def _body_high(idx: int) -> float:
+            return max(
+                float(recent["open"].iat[idx]),
+                float(recent["close"].iat[idx]),
+            )
+
+        def _body_low(idx: int) -> float:
+            return min(
+                float(recent["open"].iat[idx]),
+                float(recent["close"].iat[idx]),
+            )
+
+        last_idx   = len(recent) - 1
+        last_close = float(recent["close"].iat[last_idx])
+        last_open  = float(recent["open"].iat[last_idx])
+
+        # ═══════════════════════════════════════════════════════════════
+        # PRIORITY 1 — Liquidity Sweep of Key Level
+        # Creator: PDL wick + close back above → bullish bias
+        #          PDH wick + close back below → bearish bias
+        # Use the most recent confirmed swing high/low as key level
+        # ═══════════════════════════════════════════════════════════════
+        if pl:
+            key_low   = float(recent["low"].iat[pl[-1]])
+            curr_low  = float(recent["low"].iat[last_idx])
+            # Wick swept below key low AND body closed back above
+            wick_swept_low  = curr_low  < key_low
+            body_back_above = _body_low(last_idx) > key_low
+
+            if wick_swept_low and body_back_above:
                 return "BULLISH"
 
-        if len(pl) >= 3:
-            vals = [float(recent["low"].iloc[i]) for i in pl[-3:]]
-            if vals[0] > vals[1] > vals[2]:
+        if ph:
+            key_high  = float(recent["high"].iat[ph[-1]])
+            curr_high = float(recent["high"].iat[last_idx])
+            # Wick swept above key high AND body closed back below
+            wick_swept_high = curr_high > key_high
+            body_back_below = _body_high(last_idx) < key_high
+
+            if wick_swept_high and body_back_below:
                 return "BEARISH"
 
-        # =========================
-        # 2) STRONG TREND VIA BREAK OF LAST SWING EXTREME
-        # =========================
-        last_close = float(recent["close"].iat[-1])
-
-        if len(ph) >= 1:
-            last_swing_high = float(recent["high"].iloc[ph[-1]])
-            if last_close > last_swing_high:
+        # ═══════════════════════════════════════════════════════════════
+        # PRIORITY 2 — Body BOS beyond last confirmed swing
+        # Creator: body close (not wick) beyond swing = valid BOS
+        # ═══════════════════════════════════════════════════════════════
+        if ph:
+            last_swing_high = float(recent["high"].iat[ph[-1]])
+            # ✅ FIX 2: body close required — not just any close
+            if _body_high(last_idx) > last_swing_high:
                 return "BULLISH"
 
-        if len(pl) >= 1:
-            last_swing_low = float(recent["low"].iloc[pl[-1]])
-            if last_close < last_swing_low:
+        if pl:
+            last_swing_low = float(recent["low"].iat[pl[-1]])
+            if _body_low(last_idx) < last_swing_low:
                 return "BEARISH"
 
-        # =========================
-        # 3) FALLBACK — DIRECTION OF LAST SWING LEG
-        # =========================
-        # If we have at least one swing high and one swing low,
-        # use the ordering of the last pivots to infer leg direction.
-        if len(ph) >= 1 and len(pl) >= 1:
+        # ═══════════════════════════════════════════════════════════════
+        # PRIORITY 3 — Confirmed HH/HL or LL/LH sequence
+        # Creator: HH confirmed only after IDM taken
+        #          Single CHoCH sufficient — no need for 3 pivots
+        # ═══════════════════════════════════════════════════════════════
+        if len(ph) >= 2 and len(pl) >= 2:
+            hh_vals = [float(recent["high"].iat[i]) for i in ph[-2:]]
+            hl_vals = [float(recent["low"].iat[i])  for i in pl[-2:]]
+            ll_vals = [float(recent["low"].iat[i])  for i in pl[-2:]]
+            lh_vals = [float(recent["high"].iat[i]) for i in ph[-2:]]
+
+            # ✅ FIX 3/4: HH + HL both required (not just HH sequence)
+            has_hh = hh_vals[1] > hh_vals[0]
+            has_hl = hl_vals[1] > hl_vals[0]
+            has_ll = ll_vals[1] < ll_vals[0]
+            has_lh = lh_vals[1] < lh_vals[0]
+
+            if has_hh and has_hl:
+                return "BULLISH"
+            if has_ll and has_lh:
+                return "BEARISH"
+
+            # Partial — one confirmed leg (single CHoCH sufficient)
+            if has_hh and not has_lh:
+                return "BULLISH"
+            if has_ll and not has_hl:
+                return "BEARISH"
+
+        # ═══════════════════════════════════════════════════════════════
+        # PRIORITY 4 — Last swing leg direction (lowest confidence)
+        # Creator: temporary directional hint only
+        # ═══════════════════════════════════════════════════════════════
+        if ph and pl:
             last_high_idx = ph[-1]
-            last_low_idx = pl[-1]
+            last_low_idx  = pl[-1]
 
             if last_low_idx < last_high_idx:
-                # Last completed leg is from a low to a later high → bullish context
                 return "BULLISH"
-            elif last_high_idx < last_low_idx:
-                # Last completed leg is from a high to a later low → bearish context
+            if last_high_idx < last_low_idx:
                 return "BEARISH"
 
-        # =========================
-        # 4) OTHERWISE — GENUINELY NEUTRAL / TOO LITTLE DATA
-        # =========================
         return "NEUTRAL"
 
     def _find_pivots_debug(self, df: pd.DataFrame, window: int) -> Tuple[List[int], List[int]]:
