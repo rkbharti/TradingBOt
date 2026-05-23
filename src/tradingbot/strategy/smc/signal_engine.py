@@ -617,14 +617,15 @@ class SignalEngine:
         m15_df: pd.DataFrame,
     ) -> Tuple[Dict[str, Any], Optional[StructureBreak]]:
 
-        sweep_time = self._get_candle_time(m15_df, sweep.candle_index)
+        sweep_time   = self._get_candle_time(m15_df, sweep.candle_index)
         m5_sweep_idx = self._find_bar_at_or_after(m5_df, sweep_time)
 
         if m5_sweep_idx is None:
             return {"passed": False, "reason": "SWEEP_MAPPING_FAILED"}, None
 
-        structure_confirmation_window = 24  # ~2 hours on M5
-        pre_sweep_pivot_window = 48         # ~4 hours of local pre-sweep structure only
+        # ✅ FIX: 50 candles (~4hrs 10min) matches creator's invalidation window
+        structure_confirmation_window = 50
+        pre_sweep_pivot_window        = 48
 
         end_idx = min(
             len(m5_df),
@@ -667,9 +668,10 @@ class SignalEngine:
                 return {"passed": False, "reason": "INSUFFICIENT_STRUCTURE"}, None
 
         for i in range(m5_sweep_idx + 1, end_idx):
-            close_now = float(m5_df["close"].iat[i])
+            close_now  = float(m5_df["close"].iat[i])
             close_prev = float(m5_df["close"].iat[i - 1])
 
+            # Original pivot update logic — no inserted set
             for pivot_idx in raw_highs:
                 if m5_sweep_idx <= pivot_idx < i:
                     px = float(m5_df["high"].iat[pivot_idx])
@@ -688,7 +690,7 @@ class SignalEngine:
                 if not up_p:
                     continue
 
-                level = up_p[0]
+                level   = up_p[0]
                 crossed = close_prev <= level and close_now > level
 
                 if crossed:
@@ -704,7 +706,6 @@ class SignalEngine:
                         candle_index=i,
                         close_price=close_now,
                     )
-
                     up_p.clear()
                     up_n.clear()
 
@@ -721,7 +722,7 @@ class SignalEngine:
                 if not dn_p:
                     continue
 
-                level = dn_p[0]
+                level   = dn_p[0]
                 crossed = close_prev >= level and close_now < level
 
                 if crossed:
@@ -737,7 +738,6 @@ class SignalEngine:
                         candle_index=i,
                         close_price=close_now,
                     )
-
                     dn_p.clear()
                     dn_n.clear()
 
@@ -1145,6 +1145,7 @@ class SignalEngine:
             fvg_end = len(m5_df) - 2
 
         fvg_list = self._find_fvgs(m5_df, direction, start=fvg_start, end=fvg_end)
+
         if not fvg_list:
             fvg_end_wide = min(len(m5_df) - 2, structure_break.candle_index + 20)
             fvg_list = self._find_fvgs(
@@ -1155,9 +1156,8 @@ class SignalEngine:
         if not fvg_list:
             return {"passed": False, "reason": "FVG_NOT_FOUND"}, None, None, None
 
-        # ✅ ATR-based proximity — computed once outside loop
+        # ✅ ATR-based proximity threshold — computed once
         atr = self._calc_atr(m5_df, len(m5_df) - 1, self.config.atr_period)
-        near_threshold = (atr * 0.25) if atr else None
 
         best: Optional[Tuple[POI, FVG, float, float]] = None
 
@@ -1174,30 +1174,27 @@ class SignalEngine:
                 overlap_high = min(poi.high, fvg.high)
                 has_overlap  = overlap_high > overlap_low
 
-                # ✅ FIX: overlap OR ATR-near (not hardcoded distance)
-                if not has_overlap:
-                    if near_threshold is None:
-                        continue
-                    distance = min(
-                        abs(poi.low  - fvg.high),
-                        abs(poi.high - fvg.low),
-                    )
-                    is_near = distance <= near_threshold
-                    if not is_near:
-                        continue
+                # ✅ ATR-based proximity — 0.25 ATR or 50% poi_size fallback
+                near_threshold = (atr * 0.25) if atr else (poi_size * 0.5)
+                distance = min(
+                    abs(poi.low  - fvg.high),
+                    abs(poi.high - fvg.low),
+                )
+                is_near = distance <= near_threshold
 
-                # Score — overlap gets quality score, near gets proximity score
+                # Physical overlap = Power Setup (score 1.0 base)
+                # Near = valid but lower score
+                if not has_overlap and not is_near:
+                    continue
+
                 if has_overlap:
                     score = (overlap_high - overlap_low) / poi_size
                 else:
-                    distance = min(
-                        abs(poi.low  - fvg.high),
-                        abs(poi.high - fvg.low),
-                    )
-                    score = 1.0 - min(distance / poi_size, 1.0)
+                    # ✅ Near but no overlap — penalised score
+                    score = 0.3 * (1.0 - min(distance / near_threshold, 1.0))
 
-                # Entry price
                 is_advanced = "ADVANCED" in poi.poi_type
+
                 if is_advanced:
                     entry = poi_mid
                 else:
@@ -1206,15 +1203,14 @@ class SignalEngine:
                     else:
                         entry = overlap_low  if has_overlap else poi.low
 
-                # Zone for retest scan
-                zone_low  = overlap_low  if has_overlap else poi.low
-                zone_high = overlap_high if has_overlap else poi.high
-                zone_mid  = (zone_low + zone_high) / 2.0
-
-                # ─── Retest confirmation ──────────────────────────────
+                # ─── Retest confirmation ──────────────────────────────────
                 retest_found = False
                 scan_start   = structure_break.candle_index
                 scan_end     = min(len(m5_df), scan_start + 30)
+
+                zone_low  = overlap_low  if has_overlap else poi.low
+                zone_high = overlap_high if has_overlap else poi.high
+                zone_mid  = (zone_low + zone_high) / 2.0
 
                 for j in range(scan_start, scan_end):
                     candle = m5_df.iloc[j]
@@ -1226,23 +1222,25 @@ class SignalEngine:
                     body   = abs(close_ - open_)
                     range_ = max(high_ - low_, 1e-9)
 
-                    # Body through 50% MT = zone failed
-                    if direction == "BULLISH" and close_ < zone_mid:
-                        continue
-                    if direction == "BEARISH" and close_ > zone_mid:
+                    if direction == "BULLISH":
+                        body_through_mt = close_ < zone_mid
+                    else:
+                        body_through_mt = close_ > zone_mid
+
+                    if body_through_mt:
                         continue
 
                     if body <= 0.5 * range_:
                         continue
 
                     if direction == "BULLISH":
-                        wick_in_zone = zone_low <= low_ <= zone_high
+                        wick_in_zone = (low_ >= zone_low) and (low_ <= zone_high)
                         rejection    = close_ > zone_high
                         if wick_in_zone and rejection:
                             retest_found = True
                             break
                     else:
-                        wick_in_zone = zone_low <= high_ <= zone_high
+                        wick_in_zone = (high_ <= zone_high) and (high_ >= zone_low)
                         rejection    = close_ < zone_low
                         if wick_in_zone and rejection:
                             retest_found = True
@@ -1255,7 +1253,10 @@ class SignalEngine:
                     best = (poi, fvg, entry, score)
 
         if best is None:
-            return {"passed": False, "reason": "OB_FVG_CONFLUENCE_MISSING"}, None, None, None
+            return {
+                "passed": False,
+                "reason": "OB_FVG_CONFLUENCE_MISSING",
+            }, None, None, None
 
         poi, fvg, entry, score = best
 

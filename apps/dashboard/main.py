@@ -1705,7 +1705,7 @@ html_content = """
                 toggleBot(statusState) {
                     this.bot_status = statusState;
                     
-                    // 1. Send WebSocket message to dashboard server
+                    // 1. Send WebSocket message to VPS (PRIMARY control path)
                     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                         this.ws.send(JSON.stringify({
                             action: "toggle_bot",
@@ -1713,21 +1713,9 @@ html_content = """
                         }));
                     }
                     
-                    // 2. Call dashboard's own pause/resume endpoints
+                    // 2. Call dashboard's own pause/resume endpoints (backup)
                     const dashboardEndpoint = statusState ? '/bot/resume' : '/bot/pause';
                     fetch(dashboardEndpoint, { method: 'POST' }).catch(e => console.error(e));
-                    
-                    // 3. Call TRADER BOT control endpoints (NEW)
-                    const traderEndpoint = statusState ? '/control/resume' : '/control/pause';
-                    const traderUrl = `http://${window.location.hostname}:5000${traderEndpoint}`;
-                    fetch(traderUrl, { 
-                        method: 'POST',
-                        timeout: 5000 
-                    }).then(r => {
-                        console.log(`✅ Trader bot command sent: ${statusState ? 'RESUME' : 'PAUSE'}`);
-                    }).catch(e => {
-                        console.warn(`⚠️ Could not reach trader bot at ${traderUrl}:`, e);
-                    });
                 },
 
                 changeTimeframe(selectedTf) {
@@ -1750,37 +1738,19 @@ html_content = """
                         })
                         .catch(e => console.error('Bot status poll error:', e));
                 },
-                
-                pollTraderBotStatus() {
-                    const traderUrl = `http://${window.location.hostname}:5000/control/status`;
-                    fetch(traderUrl, { timeout: 3000 })
-                        .then(r => r.json())
-                        .then(data => {
-                            if (data.paused !== undefined) {
-                                console.log("🤖 Trader bot status:", data.paused ? "PAUSED" : "RUNNING");
-                            }
-                        })
-                        .catch(e => {
-                            // Trader bot unreachable — that's okay, not a critical error
-                        });
-                },
 
                 init() {
-                    // [PATCH 3 FIX] Remove duplicate init() block. This is the ONLY init() now.
-                    // Apply theme on init
                     if (this.theme_mode === 'light') {
                         document.body.classList.add('light-theme');
                     }
                     
                     this.connect();
-                    this.pollBotStatus();  // Poll dashboard server
-                    this.pollTraderBotStatus();  // Poll trader bot
+                    this.pollBotStatus();
                     
                     // Poll bot status every 10 seconds
                     setInterval(() => this.pollBotStatus(), 10000);
-                    setInterval(() => this.pollTraderBotStatus(), 15000);
                 },
-
+                
                 connect() {
                     // FIX: Use relative WebSocket URL (no hardcoded IP)
                     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';

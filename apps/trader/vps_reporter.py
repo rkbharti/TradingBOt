@@ -1,6 +1,6 @@
 import requests
 from datetime import datetime
-
+import logging 
 
 VPS_BASE_URL = "http://68.233.99.145:8000"
 TIMEOUT = 5
@@ -118,9 +118,15 @@ def check_bot_active() -> bool:
     try:
         resp = requests.get(f"{VPS_BASE_URL}/bot/status", timeout=3)
         if resp.status_code == 200:
-            return resp.json().get("trading", True)
-        print(f"⚠️ VPS /bot/status returned {resp.status_code}")
+            state = resp.json()
+            is_active = state.get("trading", True)
+            logging.info(
+                f"[BOT STATUS POLL] trading={is_active} | "
+                f"updated_at={state.get('updated_at', 'N/A')}"
+            )
+            return is_active
+        logging.warning(f"[BOT STATUS POLL] VPS returned {resp.status_code} — defaulting to ACTIVE")
         return True
     except Exception as e:
-        print(f"⚠️ VPS bot status check failed (bot continues): {e}")
+        logging.warning(f"[BOT STATUS POLL] VPS unreachable — defaulting to ACTIVE. Error: {e}")
         return True
