@@ -1004,7 +1004,7 @@ class XAUUSDTradingBot:
                         wins=cp.daily_wins,
                         losses=cp.daily_losses,
                         net_pnl=round(self._daily_pnl_pct, 2),
-                        max_drawdown=round(cp.max_daily_drawdown, 2),
+                        max_drawdown=round(cp.max_drawdown_pct, 2),
                         session=str(self._session_date),
                     )
                 except Exception as e:
