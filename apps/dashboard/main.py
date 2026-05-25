@@ -381,7 +381,7 @@ def update_bot_state_v2(bot_instance, analysis_data):
             "signal_engine":  {
                 "action":       signal_eng.get("action", "NO_TRADE"),
                 "direction":    signal_eng.get("direction", "NEUTRAL"),
-                "confidence":   int(signal_eng.get("confidence", 0)),
+                "confidence":   int(signal_eng.get("confidence", signal_eng.get("confidence_score", 0))),
                 "reason":       signal_eng.get("reason", "--"),
                 "reason_code":  signal_eng.get("reason_code"),
                 "entry_price":  signal_eng.get("entry_price"),
