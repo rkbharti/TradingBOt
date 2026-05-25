@@ -89,3 +89,19 @@ desktop.ini
 tmp/
 temp/
 *.swp
+
+# Local research & scratch
+research/
+scripts/
+apps/trader/research/
+*.pyc
+__pycache__/
+
+# Config examples (keep template but ignore actual secrets)
+config/config.local.json
+config/*.secret.json
+
+# Temporary data
+*.log
+*.tmp
+data/

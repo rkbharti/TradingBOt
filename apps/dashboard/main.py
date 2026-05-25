@@ -24,6 +24,7 @@ import math
 import os
 import time as _time
 import httpx
+import psutil
 
 # ─── Path resolution ────────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -448,6 +449,26 @@ def get_logs():
     except Exception as e:
         return {'error': str(e), 'log_path': os.environ.get("BOT_LOG_PATH", "/var/log/tradingbot/bot.log")}
 
+def is_trader_running():
+    """
+    Detect if trader/main.py process is actually alive.
+    """
+    try:
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            cmdline = proc.info.get('cmdline') or []
+
+            joined = ' '.join(cmdline).lower()
+
+            if 'trader/main.py' in joined:
+                return True
+
+            if 'apps.trader.main' in joined:
+                return True
+
+        return False
+
+    except Exception:
+        return False
 # ═══════════════════════════════════════════════════════════════════════════
 # /health — unchanged
 # ═══════════════════════════════════════════════════════════════════════════
@@ -471,7 +492,7 @@ async def health_check():
         "mt5_connected":       mt5_status,
         "websocket_active":    len(active_connections) > 0,
         "active_ws_clients":   len(active_connections),
-        "trader_alive":        mt5_status != "down",
+        "trader_alive":        is_trader_running(),
         "strategy_engine":     se.get("action") is not None,
         "data_feed":           chart_len > 0,
         "data_feed_candles":   chart_len,
@@ -1555,284 +1576,23 @@ html_content = """
     </footer>
 
     <script>
-        function updateClocks() {
-            const now = new Date();
-            document.getElementById('utc-clock').innerText = now.toUTCString().split(' ')[4];
-            document.getElementById('ist-clock').innerText = now.toLocaleTimeString('en-IN', {
-                timeZone: 'Asia/Kolkata',
-                hour12: false
-            });
-        }
-        setInterval(updateClocks, 1000);
-        updateClocks();
-
-        // Lightweight Chart initialization
-        const container = document.getElementById('chart-container');
-        const chart = LightweightCharts.createChart(container, {
-            layout: {
-                background: { color: '#050505' },
-                textColor: '#a0a0a5',
-                fontSize: 11,
-                fontFamily: 'JetBrains Mono'
-            },
-            grid: {
-                vertLines: { color: '#121215' },
-                horzLines: { color: '#121215' }
-            },
-            rightPriceScale: { borderColor: '#1f1f24', alignLabels: true },
-            timeScale: { borderColor: '#1f1f24', timeVisible: true, secondsVisible: false },
-            crosshair: {
-                vertLine: { color: '#3a3a42', style: 3 },
-                horzLine: { color: '#3a3a42', style: 3 }
-            }
-        });
-
-        const series = chart.addCandlestickSeries({
-            upColor: '#00ff88',
-            downColor: '#ff4d4d',
-            borderVisible: false,
-            wickUpColor: '#00ff88',
-            wickDownColor: '#ff4d4d'
-        });
-
-        const resizeObserver = new ResizeObserver(entries => {
-            if (entries.length === 0 || !entries[0].contentRect) return;
-            chart.resize(entries[0].contentRect.width, entries[0].contentRect.height);
-        });
-        resizeObserver.observe(container);
-
-        // Gate names mapping for display
-        const GATE_NAMES = {
-            'step_1_htf_bias': '1. HTF BIAS',
-            'step_2_external_liquidity_sweep': '2. LIQ. SWEEP',
-            'step_3_choch_mss_body_close': '3. CHOCH / MSS',
-            'step_4_valid_poi': '4. VALID POI',
-            'step_5_ob_fvg_confluence': '5. OB / FVG CONF.',
-            'step_6_dealing_range': '6. DEALING RANGE',
-            'step_7_killzone': '7. KILLZONE',
-            'step_8_risk_reward': '8. RISK / REWARD'
-        };
-
-        // Alpine.js Reactive Controller
-        function DS() {
-            return {
-                ws: null,
-                ws_connected: false,
-                bot_status: true,
-                current_tf: 'M15',
-                theme_mode: localStorage.getItem('gos_theme') || 'dark',
-                webhook_age_seconds: 0,
-                
-                // Account metrics
-                account_login: '--',
-                account_server: '--',
-                account_name: 'REAL-01',
-                equity: 0,
-                balance: 0,
-                pnl_today: 0,
-                pnl_week: 0,
-                pnl_total: 0,
-                pnl_today_pct: 0,
-                current_price: 0,
-                
-                // Narrative matrix
-                structure: '--',
-                session: '--',
-                d1_bias: '--',
-                h4_bias: '--',
-                
-                // Subordinate arrays
-                trades: [],
-                closed_trades: [],
-                news_items: [],
-                news_filter: 'HIGH',
-                
-                signal_engine: {
-                    action: 'NO_TRADE',
-                    confidence: 0,
-                    direction: '--',
-                    reason: 'Parsing stream data...',
-                    reason_code: 'SCANNING',
-                    gates: {}
-                },
-                news: { time: '--' },
-
-                // --- METHODS ---
-
-                fmt(v) {
-                    return '$' + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-                },
-                fmt_price(v) {
-                    if (!v) return '$--';
-                    return '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-                },
-
-                getPassedGatesCount() {
-                    try {
-                        return Object.values(this.signal_engine.gates || {}).filter(g => {
-                            if (typeof g === 'boolean') return g;
-                            if (typeof g === 'object' && g !== null) return g.passed === true;
-                            return false;
-                        }).length;
-                    } catch (e) {
-                        return 0;
-                    }
-                },
-
-                getGatesArray() {
-                    try {
-                        const gates = [];
-                        for (const [key, value] of Object.entries(this.signal_engine.gates || {})) {
-                            const name = GATE_NAMES[key] || key;
-                            const passed = typeof value === 'boolean' ? value : (value?.passed === true);
-                            gates.push({ name, passed });
-                        }
-                        return gates;
-                    } catch (e) {
-                        return [];
-                    }
-                },
-
-                getFilteredNews() {
-                    if (this.news_filter === 'ALL') return this.news_items;
-                    return this.news_items.filter(item => item.impact === this.news_filter);
-                },
-
-                getOpenTotalPnl() {
-                    return this.trades.reduce((sum, t) => sum + Number(t.pnl || 0), 0);
-                },
-
-                getClosedTotalPnl() {
-                    return this.closed_trades.reduce((sum, ct) => sum + Number(ct.pnl || 0), 0);
-                },
-
-                toggleTheme() {
-                    this.theme_mode = this.theme_mode === 'dark' ? 'light' : 'dark';
-                    localStorage.setItem('gos_theme', this.theme_mode);
-                    document.body.classList.toggle('light-theme', this.theme_mode === 'light');
-                },
-
-                toggleBot(statusState) {
-                    this.bot_status = statusState;
-                    
-                    // 1. Send WebSocket message to VPS (PRIMARY control path)
-                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                        this.ws.send(JSON.stringify({
-                            action: "toggle_bot",
-                            status: statusState ? "ON" : "OFF"
-                        }));
-                    }
-                    
-                    // 2. Call dashboard's own pause/resume endpoints (backup)
-                    const dashboardEndpoint = statusState ? '/bot/resume' : '/bot/pause';
-                    fetch(dashboardEndpoint, { method: 'POST' }).catch(e => console.error(e));
-                },
-
-                changeTimeframe(selectedTf) {
-                    this.current_tf = selectedTf;
-                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                        this.ws.send(JSON.stringify({
-                            action: "change_timeframe",
-                            timeframe: selectedTf
-                        }));
-                    }
-                },
-
-                pollBotStatus() {
-                    fetch('/bot/status')
-                        .then(r => r.json())
-                        .then(data => {
-                            if (data.status) {
-                                this.bot_status = (data.status === "ACTIVE" || data.status === "ON");
-                            }
-                        })
-                        .catch(e => console.error('Bot status poll error:', e));
-                },
-
-                init() {
-                    if (this.theme_mode === 'light') {
-                        document.body.classList.add('light-theme');
-                    }
-                    
-                    this.connect();
-                    this.pollBotStatus();
-                    
-                    // Poll bot status every 10 seconds
-                    setInterval(() => this.pollBotStatus(), 10000);
-                },
-                
-                connect() {
-                    // FIX: Use relative WebSocket URL (no hardcoded IP)
-                    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                    const wsUrl = `${protocol}//${window.location.host}/ws`;
-                    
-                    this.ws = new WebSocket(wsUrl);
-
-                    this.ws.onopen = () => {
-                        this.ws_connected = true;
-                        console.log('✅ WebSocket connected to', wsUrl);
-                    };
-
-                    this.ws.onmessage = (event) => {
-                        try {
-                            const data = JSON.parse(event.data);
-                            document.getElementById('last-update-ts').innerText = new Date().toLocaleTimeString('en-IN', { hour12: false });
-
-                            // Account fields
-                            if (data.webhook_age_seconds !== undefined) this.webhook_age_seconds = data.webhook_age_seconds;
-                            if (data.account_login !== undefined) this.account_login = data.account_login;
-                            if (data.account_server !== undefined) this.account_server = data.account_server;
-                            if (data.account_name !== undefined) this.account_name = data.account_name;
-
-                            // Core assignments from bot_state
-                            if (data.equity !== undefined) this.equity = data.equity;
-                            if (data.balance !== undefined) this.balance = data.balance;
-                            if (data.pnl_today !== undefined) this.pnl_today = data.pnl_today;
-                            if (data.pnl_week !== undefined) this.pnl_week = data.pnl_week;
-                            if (data.pnl_total !== undefined) this.pnl_total = data.pnl_total;
-                            if (data.price !== undefined) this.current_price = data.price;
-                            if (data.market_structure !== undefined) this.structure = data.market_structure;
-                            if (data.session !== undefined) this.session = data.session;
-                            if (data.d1_bias !== undefined) this.d1_bias = data.d1_bias;  // [FIXED] Now populated!
-                            if (data.h4_bias !== undefined) this.h4_bias = data.h4_bias;  // [FIXED] Now populated!
-                            if (data.bot_status !== undefined) this.bot_status = (data.bot_status === true || data.bot_status === "ON");
-                            
-                            // Calculate P&L percentage
-                            if (this.balance > 0) {
-                                this.pnl_today_pct = (this.pnl_today / this.balance) * 100;
-                            }
-
-                            // Array overrides
-                            if (data.trades) this.trades = data.trades;
-                            if (data.closed_trades) this.closed_trades = data.closed_trades;  // [FIXED] Now received!
-                            if (data.news_items) this.news_items = data.news_items;
-                            if (data.news_countdown) this.news.time = data.news_countdown;
-
-                            if (data.signal_engine) {
-                                this.signal_engine = { ...this.signal_engine, ...data.signal_engine };
-                            }
-
-                            // Render chart data with overlays
-                            if (data.chart_data?.length) {
-                                series.setData(data.chart_data);
-                                chart.timeScale().fitContent();
-                            }
-
-                        } catch (e) {
-                            console.error('WebSocket message parse error:', e);
-                        }
-                    };
-
-                    this.ws.onclose = () => {
-                        this.ws_connected = false;
-                        console.log('❌ WebSocket disconnected. Reconnecting in 3s...');
-                        setTimeout(() => this.connect(), 3000);
-                    };
-
-                    this.ws.onerror = (e) => {
-                        console.error('❌ WebSocket error:', e);
-                    };
+        // Custom colour picker – overrides any palette
+        const picker = document.getElementById("customColorPicker");
+        if (picker) {
+            picker.addEventListener("input", (e) => {
+                const color = e.target.value;
+                document.body.setAttribute("data-palette", "custom");
+                document.body.style.setProperty("--accent", color);
+                localStorage.setItem("gos_palette", "custom");
+                localStorage.setItem("custom_accent", color);
+                if (window.Alpine && Alpine.store("theme")) {
+                    Alpine.store("theme").setCustomColor(color);
                 }
+            });
+            const saved = localStorage.getItem("custom_accent");
+            if (saved && localStorage.getItem("gos_palette") === "custom") {
+                picker.value = saved;
+                document.body.style.setProperty("--accent", saved);
             }
         }
     </script>
