@@ -1,0 +1,667 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=yes"
+    />
+    <title>GUARDEER OS – Themed Terminal</title>
+    <script src="https://unpkg.com/lightweight-charts@4.0.0/dist/lightweight-charts.standalone.production.js"></script>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Gaegu&family=Short+Stack&family=Courier+Prime:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/style.css" />
+    <script defer src="/static/terminal.js"></script>
+    <script
+      defer
+      src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"
+    ></script>
+  </head>
+  <body x-data="DS()">
+    <header class="terminal-header">
+      <div class="header-left">
+        <div class="timezone-block">
+          <span class="timezone-label">TIMEZONE</span>
+          <div class="time-row mono">
+            <div>
+              <span class="txt-amber">IST</span>
+              <span id="ist-clock">--:--:--</span>
+            </div>
+            <div>
+              <span class="txt-muted">UTC</span>
+              <span id="utc-clock">--:--:--</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="header-center">
+        <h1>GUARDEER OS</h1>
+        <div class="subtitle">INSTITUTIONAL SMC COMMAND TERMINAL</div>
+      </div>
+      <div class="header-right">
+        <!-- Palette selector -->
+        <div class="control-panel">
+          <span class="meta-label">THEME</span>
+          <button class="palette-btn" @click="setPalette('stranger-things')">
+            ST
+          </button>
+          <button class="palette-btn" @click="setPalette('breaking-bad')">
+            BB
+          </button>
+          <button class="palette-btn" @click="setPalette('dark')">DK</button>
+          <button class="palette-btn" @click="setPalette('demon-slayer')">
+            DS
+          </button>
+          <button class="palette-btn" @click="setPalette('pirates')">PR</button>
+          <input
+            type="color"
+            id="customColorPicker"
+            class="custom-picker"
+            value="#b53b2a"
+            title="Custom accent colour"
+          />
+        </div>
+        <!-- Theme toggle -->
+        <div class="control-panel">
+          <span class="meta-label">MODE</span>
+          <button
+            class="theme-toggle"
+            :class="theme_mode"
+            @click="toggleTheme()"
+          >
+            🌓
+          </button>
+        </div>
+        <!-- Bot control -->
+        <div class="control-panel">
+          <span class="meta-label">CONTROL</span>
+          <span class="status-dot" :class="bot_status ? '' : 'inactive'"></span>
+          <span
+            :class="bot_status ? 'txt-green' : 'txt-red'"
+            x-text="bot_status ? 'RUNNING' : 'STOPPED'"
+          ></span>
+          <button
+            class="btn-toggle"
+            :class="bot_status ? 'active-on' : ''"
+            @click="toggleBot(true)"
+          >
+            ON
+          </button>
+          <button
+            class="btn-toggle"
+            :class="!bot_status ? 'active-off' : ''"
+            @click="toggleBot(false)"
+          >
+            OFF
+          </button>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">SERVER</span>
+          <span class="meta-val mono"
+            >VPS-01 <span class="txt-muted">v4.1</span></span
+          >
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">ACCOUNT</span>
+          <span
+            class="meta-val mono txt-amber"
+            x-text="account_name || 'REAL-01'"
+            >REAL-01</span
+          >
+        </div>
+      </div>
+    </header>
+
+    <main class="dashboard-container">
+      <section class="top-row-grid">
+        <!-- Account Overview -->
+        <div class="terminal-panel">
+          <div class="panel-header">
+            <div class="panel-title">Account Overview</div>
+          </div>
+          <div class="panel-body">
+            <div class="data-row">
+              <span class="data-label">LOGIN</span
+              ><span class="data-value mono" x-text="account_login || '--'"
+                >--</span
+              >
+            </div>
+            <div class="data-row">
+              <span class="data-label">SERVER</span
+              ><span class="data-value mono" x-text="account_server || '--'"
+                >--</span
+              >
+            </div>
+            <div class="data-row">
+              <span class="data-label">EQUITY</span
+              ><span class="data-value mono txt-green" x-text="fmt(equity)"
+                >$0.00</span
+              >
+            </div>
+            <div class="data-row">
+              <span class="data-label">BALANCE</span
+              ><span class="data-value mono txt-green" x-text="fmt(balance)"
+                >$0.00</span
+              >
+            </div>
+            <div class="data-row">
+              <span class="data-label">DAILY P&L</span
+              ><span
+                class="data-value mono"
+                :class="pnl_today >= 0 ? 'txt-green' : 'txt-red'"
+                x-text="fmt(pnl_today)"
+                >$0.00</span
+              >
+            </div>
+            <div class="data-row">
+              <span class="data-label">DAILY %</span
+              ><span
+                class="data-value mono"
+                :class="pnl_today_pct >= 0 ? 'txt-green' : 'txt-red'"
+                x-text="(pnl_today_pct >= 0 ? '+' : '') + pnl_today_pct.toFixed(2) + '%'"
+                >+0.00%</span
+              >
+            </div>
+            <div class="data-row">
+              <span class="data-label">WEEKLY P&L</span
+              ><span
+                class="data-value mono"
+                :class="pnl_week >= 0 ? 'txt-green' : 'txt-red'"
+                x-text="fmt(pnl_week)"
+                >$0.00</span
+              >
+            </div>
+            <div class="data-row">
+              <span class="data-label">OVERALL P&L</span
+              ><span
+                class="data-value mono"
+                :class="pnl_total >= 0 ? 'txt-green' : 'txt-red'"
+                x-text="fmt(pnl_total)"
+                >$0.00</span
+              >
+            </div>
+          </div>
+        </div>
+        <!-- News Filter -->
+        <div class="terminal-panel">
+          <div class="panel-header">
+            <div class="panel-title">News Filter</div>
+          </div>
+          <div class="panel-body">
+            <div class="filter-tabs">
+              <span class="txt-muted">IMPACT:</span>
+              <span
+                class="filter-tab"
+                :class="news_filter === 'ALL' ? 'active' : ''"
+                @click="news_filter='ALL'"
+                >ALL</span
+              >
+              <span
+                class="filter-tab"
+                :class="news_filter === 'HIGH' ? 'active' : ''"
+                @click="news_filter='HIGH'"
+                >HIGH</span
+              >
+              <span
+                class="filter-tab"
+                :class="news_filter === 'MED' ? 'active' : ''"
+                @click="news_filter='MED'"
+                >MED</span
+              >
+              <span
+                class="filter-tab"
+                :class="news_filter === 'LOW' ? 'active' : ''"
+                @click="news_filter='LOW'"
+                >LOW</span
+              >
+            </div>
+            <div>
+              <template x-for="item in getFilteredNews()"
+                ><div class="data-row mono" style="font-size: 12px">
+                  <span class="txt-muted" x-text="item.time"></span
+                  ><span
+                    :class="item.impact === 'HIGH' ? 'txt-red' : item.impact === 'MED' ? 'txt-amber' : 'txt-muted'"
+                    x-text="item.impact"
+                  ></span
+                  ><span
+                    class="txt-main"
+                    style="flex: 1; text-align: right"
+                    x-text="item.title"
+                  ></span></div
+              ></template>
+              <div
+                x-show="getFilteredNews().length === 0"
+                class="txt-muted mono"
+                style="text-align: center"
+              >
+                NO EVENTS (<span x-text="news_filter"></span>)
+              </div>
+            </div>
+            <div class="data-row mono">
+              <span class="txt-muted">NEXT EVENT:</span
+              ><span class="txt-amber" x-text="news.time">--</span>
+            </div>
+          </div>
+        </div>
+        <!-- System Status -->
+        <div class="terminal-panel">
+          <div class="panel-header">
+            <div class="panel-title">System Status</div>
+          </div>
+          <div class="panel-body">
+            <div class="status-indicator-row">
+              <span>MT5 CONNECTED</span>
+              <div class="status-dot-group">
+                <div
+                  class="status-dot"
+                  :class="(_health.mt5_connected === 'ok') ? '' : 'inactive'"
+                ></div>
+                <span
+                  class="mono"
+                  :class="_health.mt5_connected === 'ok' ? 'txt-green' : _health.mt5_connected === 'warning' ? 'txt-amber' : 'txt-red'"
+                  x-text="_health.mt5_connected === 'ok' ? 'LIVE' : _health.mt5_connected === 'warning' ? 'DELAYED' : 'DOWN'"
+                ></span>
+              </div>
+            </div>
+            <div class="status-indicator-row">
+              <span>DATA FETCHING</span>
+              <div class="status-dot-group">
+                <div
+                  class="status-dot"
+                  :class="ws_connected ? '' : 'inactive'"
+                ></div>
+                <span
+                  class="mono"
+                  :class="ws_connected ? 'txt-green' : 'txt-red'"
+                  x-text="ws_connected ? 'LIVE' : 'DOWN'"
+                ></span>
+              </div>
+            </div>
+            <div class="status-indicator-row">
+              <span>VPS RECEIVING</span>
+              <div class="status-dot-group">
+                <div
+                  class="status-dot"
+                  :class="(_health.mt5_connected !== 'down') ? '' : 'inactive'"
+                ></div>
+                <span
+                  class="mono"
+                  :class="_health.mt5_connected !== 'down' ? 'txt-green' : 'txt-red'"
+                  x-text="_health.mt5_connected !== 'down' ? 'LIVE' : 'DOWN'"
+                ></span>
+              </div>
+            </div>
+            <div class="status-indicator-row">
+              <span>STRATEGY ENGINE</span>
+              <div class="status-dot-group">
+                <div
+                  class="status-dot"
+                  :class="_health.strategy_engine ? '' : 'inactive'"
+                ></div>
+                <span
+                  class="mono"
+                  :class="_health.strategy_engine ? 'txt-green' : 'txt-red'"
+                  x-text="_health.strategy_engine ? 'LIVE' : 'DOWN'"
+                ></span>
+              </div>
+            </div>
+            <div class="status-indicator-row">
+              <span>SYNC STATUS</span>
+              <div class="status-dot-group">
+                <div
+                  class="status-dot"
+                  :class="ws_connected ? '' : 'inactive'"
+                ></div>
+                <span
+                  class="mono"
+                  :class="ws_connected ? 'txt-green' : 'txt-red'"
+                  x-text="ws_connected ? 'WORKING' : 'HALTED'"
+                ></span>
+              </div>
+            </div>
+            <div class="status-indicator-row">
+              <span class="txt-muted">LAST WEBHOOK:</span
+              ><span
+                class="mono txt-amber"
+                x-text="_health.webhook_age_seconds + 's ago'"
+              ></span>
+            </div>
+            <div class="data-row mono">
+              <span class="txt-muted">LAST UPDATE:</span
+              ><span class="txt-main" id="last-update-ts">--:--:--</span>
+            </div>
+          </div>
+        </div>
+        <!-- Narrative Engine -->
+        <div class="terminal-panel">
+          <div class="panel-header">
+            <div class="panel-title">Narrative Engine</div>
+          </div>
+          <div class="panel-body">
+            <div
+              style="display: grid; grid-template-columns: 1fr 1.2fr; gap: 12px"
+            >
+              <div>
+                <div class="data-row">
+                  <span class="data-label">D1 BIAS</span
+                  ><span
+                    class="data-value"
+                    :class="d1_bias === 'BULLISH' ? 'txt-green' : d1_bias === 'BEARISH' ? 'txt-red' : 'txt-muted'"
+                    x-text="d1_bias"
+                    >--</span
+                  >
+                </div>
+                <div class="data-row">
+                  <span class="data-label">H4 BIAS</span
+                  ><span
+                    class="data-value"
+                    :class="h4_bias === 'BULLISH' ? 'txt-green' : h4_bias === 'BEARISH' ? 'txt-red' : 'txt-muted'"
+                    x-text="h4_bias"
+                    >--</span
+                  >
+                </div>
+                <div class="data-row">
+                  <span class="data-label">STRUCTURE</span
+                  ><span class="data-value txt-amber" x-text="structure || '--'"
+                    >--</span
+                  >
+                </div>
+                <div class="data-row">
+                  <span class="data-label">SESSION</span
+                  ><span class="data-value txt-amber" x-text="session || '--'"
+                    >--</span
+                  >
+                </div>
+                <div class="data-row">
+                  <span class="data-label">SIGNAL</span
+                  ><span
+                    class="data-value"
+                    :class="signal_engine.action === 'BUY' ? 'txt-green' : signal_engine.action === 'SELL' ? 'txt-red' : 'txt-muted'"
+                    x-text="signal_engine.action || 'NO_TRADE'"
+                  ></span>
+                </div>
+                <div class="data-row">
+                  <span class="data-label">CONFIDENCE</span
+                  ><span
+                    class="data-value mono txt-gold"
+                    x-text="signal_engine.confidence + '%'"
+                    >0%</span
+                  >
+                </div>
+                <div class="narrative-box">
+                  <span x-text="signal_engine.reason || 'Scanning...'"></span>
+                </div>
+              </div>
+              <div class="mono">
+                <div style="font-size: 10px">SMC GATES (8 REQUIRED)</div>
+                <div>
+                  <template x-for="(gate_info, idx) in getGatesArray()"
+                    ><div class="gate-list-item">
+                      <span x-text="(idx+1)+'.'"></span
+                      ><span x-text="gate_info.name" style="flex: 1"></span
+                      ><span
+                        :class="gate_info.passed ? 'txt-green' : 'txt-red'"
+                        x-text="gate_info.passed ? '✔' : '✘'"
+                      ></span></div
+                  ></template>
+                  <div
+                    x-show="getGatesArray().length === 0"
+                    class="txt-muted"
+                    style="text-align: center"
+                  >
+                    NO GATES REGISTERED
+                  </div>
+                </div>
+                <div style="margin-top: 4px">
+                  <div class="progress-bar-bg">
+                    <div
+                      class="progress-bar-fill"
+                      :style="`width: ${signal_engine.confidence}%`"
+                    ></div>
+                  </div>
+                  <div style="display: flex; justify-content: space-between">
+                    <span
+                      >MATCH:
+                      <span x-text="getPassedGatesCount()">0</span>/8</span
+                    ><span x-text="signal_engine.confidence + '%'">0%</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Chart Region -->
+      <div class="terminal-panel">
+        <div class="chart-controls-bar">
+          <div class="chart-meta-left">
+            <span class="chart-symbol mono">XAUUSD</span>
+            <span
+              class="badge"
+              x-text="'$' + (current_price ? Number(current_price).toFixed(2) : '--')"
+              >$--</span
+            >
+            <span class="badge" x-text="session || '--'">--</span>
+            <span class="badge" x-text="d1_bias || '--'">--</span>
+          </div>
+          <div class="timeframe-selector">
+            <template x-for="tf in ['M1','M5','M15','M30','H1','H4','D1']">
+              <button
+                class="tf-btn"
+                :class="current_tf === tf ? 'active' : ''"
+                @click="changeTimeframe(tf)"
+                x-text="tf"
+              ></button>
+            </template>
+          </div>
+        </div>
+        <div class="chart-container-shell">
+          <div id="chart-container" style="width: 100%; height: 100%"></div>
+        </div>
+      </div>
+
+      <!-- Bottom row: Open Positions + Closed Trades -->
+      <section class="bottom-row-grid">
+        <div class="terminal-panel">
+          <div class="panel-header">
+            <div class="panel-title">Open Positions</div>
+            <span class="txt-muted mono" x-text="trades.length + ' ACTIVE'"
+              >0 ACTIVE</span
+            >
+          </div>
+          <div class="panel-body" style="padding: 0">
+            <div class="table-wrapper">
+              <table class="terminal-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>SYMBOL</th>
+                    <th>TYPE</th>
+                    <th>LOT</th>
+                    <th>ENTRY</th>
+                    <th>P&L</th>
+                    <th>SL</th>
+                    <th>TP</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="t in trades" :key="t.id"
+                    ><tr>
+                      <td class="mono" x-text="t.id">--</td>
+                      <td class="mono" x-text="t.symbol">XAUUSD</td>
+                      <td
+                        class="mono"
+                        :class="t.type === 'BUY' ? 'txt-green' : 'txt-red'"
+                        x-text="t.type"
+                      >
+                        --
+                      </td>
+                      <td class="mono" x-text="t.lot_size">0.000</td>
+                      <td class="mono" x-text="t.entry">0.00</td>
+                      <td
+                        class="mono"
+                        :class="t.pnl >= 0 ? 'txt-green' : 'txt-red'"
+                        x-text="(t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2)"
+                      >
+                        0.00
+                      </td>
+                      <td class="mono" x-text="t.sl || '--'">--</td>
+                      <td class="mono" x-text="t.tp || '--'">--</td>
+                    </tr></template
+                  >
+                  <tr x-show="trades.length === 0">
+                    <td
+                      colspan="8"
+                      class="txt-muted"
+                      style="text-align: center"
+                    >
+                      NO OPEN POSITIONS
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="table-footer mono">
+              FLOAT P&L:
+              <span
+                :class="getOpenTotalPnl() >= 0 ? 'txt-green' : 'txt-red'"
+                x-text="(getOpenTotalPnl() >= 0 ? '+$' : '-$') + Math.abs(getOpenTotalPnl()).toFixed(2)"
+                >$0.00</span
+              >
+            </div>
+          </div>
+        </div>
+        <div class="terminal-panel">
+          <div class="panel-header">
+            <div class="panel-title">Closed Trades</div>
+            <span
+              class="txt-muted mono"
+              x-text="closed_trades.length + ' TODAY'"
+              >0 TODAY</span
+            >
+          </div>
+          <div class="panel-body" style="padding: 0">
+            <div class="table-wrapper">
+              <table class="terminal-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>SYMBOL</th>
+                    <th>TYPE</th>
+                    <th>ENTRY</th>
+                    <th>EXIT</th>
+                    <th>P&L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="ct in closed_trades" :key="ct.id"
+                    ><tr>
+                      <td class="mono" x-text="ct.id">--</td>
+                      <td class="mono" x-text="ct.symbol">XAUUSD</td>
+                      <td
+                        class="mono"
+                        :class="ct.type === 'BUY' ? 'txt-green' : 'txt-red'"
+                        x-text="ct.type"
+                      >
+                        --
+                      </td>
+                      <td class="mono" x-text="ct.entry">0.00</td>
+                      <td class="mono" x-text="ct.exit">0.00</td>
+                      <td
+                        class="mono"
+                        :class="ct.pnl >= 0 ? 'txt-green' : 'txt-red'"
+                        x-text="(ct.pnl >= 0 ? '+' : '') + ct.pnl.toFixed(2)"
+                      >
+                        0.00
+                      </td>
+                    </tr></template
+                  >
+                  <tr x-show="closed_trades.length === 0">
+                    <td
+                      colspan="6"
+                      class="txt-muted"
+                      style="text-align: center"
+                    >
+                      NO CLOSED TRADES TODAY
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="table-footer mono">
+              REALIZED P&L:
+              <span
+                :class="getClosedTotalPnl() >= 0 ? 'txt-green' : 'txt-red'"
+                x-text="(getClosedTotalPnl() >= 0 ? '+$' : '-$') + Math.abs(getClosedTotalPnl()).toFixed(2)"
+                >$0.00</span
+              >
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="terminal-footer mono">
+      <div class="footer-left-meta">
+        <span>GUARDEER OS v4.1</span
+        ><span>INSTITUTIONAL SMC COMMAND TERMINAL</span
+        ><span
+          >UPTIME:
+          <span
+            x-text="Math.floor(_health.vps_uptime_seconds/3600) + 'h ' + (Math.floor(_health.vps_uptime_seconds/60)%60) + 'm'"
+            >--</span
+          ></span
+        >
+      </div>
+      <div class="footer-right-meta">
+        <span
+          >VPS:
+          <span
+            :class="ws_connected ? 'txt-green' : 'txt-red'"
+            x-text="ws_connected ? 'ONLINE' : 'OFFLINE'"
+          ></span></span
+        ><span
+          >WEBSOCKET:
+          <span
+            :class="ws_connected ? 'txt-green' : 'txt-red'"
+            x-text="ws_connected ? 'ACTIVE' : 'DISCONNECTED'"
+          ></span></span
+        ><span
+          >PRICE:
+          <span class="txt-gold mono" x-text="fmt_price(current_price)"
+            >$--</span
+          ></span
+        ><span
+          >SESSION:
+          <span class="txt-amber" x-text="session || '--'">--</span></span
+        >
+      </div>
+    </footer>
+
+    <script>
+      // Custom colour picker – overrides any palette
+      const picker = document.getElementById("customColorPicker");
+      if (picker) {
+        picker.addEventListener("input", (e) => {
+          const color = e.target.value;
+          document.body.setAttribute("data-palette", "custom");
+          document.body.style.setProperty("--accent", color);
+          localStorage.setItem("gos_palette", "custom");
+          localStorage.setItem("custom_accent", color);
+          // Also update the Alpine store if needed
+          if (window.Alpine && Alpine.store("theme")) {
+            Alpine.store("theme").setCustomColor(color);
+          }
+        });
+        const saved = localStorage.getItem("custom_accent");
+        if (saved && localStorage.getItem("gos_palette") === "custom") {
+          picker.value = saved;
+          document.body.style.setProperty("--accent", saved);
+        }
+      }
+    </script>
+  </body>
+</html>

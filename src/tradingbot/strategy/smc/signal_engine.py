@@ -623,9 +623,8 @@ class SignalEngine:
         if m5_sweep_idx is None:
             return {"passed": False, "reason": "SWEEP_MAPPING_FAILED"}, None
 
-        # ✅ FIX: 50 candles (~4hrs 10min) matches creator's invalidation window
         structure_confirmation_window = 50
-        pre_sweep_pivot_window        = 48
+        pre_sweep_pivot_window        = 96
 
         end_idx = min(
             len(m5_df),
@@ -667,11 +666,18 @@ class SignalEngine:
             if not dn_p:
                 return {"passed": False, "reason": "INSUFFICIENT_STRUCTURE"}, None
 
+        def _has_displacement(start_idx: int, end_idx: int) -> bool:
+            fvgs = self._find_fvgs(
+                m5_df, sweep.direction,
+                start=start_idx,
+                end=min(len(m5_df) - 2, end_idx),
+            )
+            return len(fvgs) > 0
+
         for i in range(m5_sweep_idx + 1, end_idx):
             close_now  = float(m5_df["close"].iat[i])
             close_prev = float(m5_df["close"].iat[i - 1])
 
-            # Original pivot update logic — no inserted set
             for pivot_idx in raw_highs:
                 if m5_sweep_idx <= pivot_idx < i:
                     px = float(m5_df["high"].iat[pivot_idx])
@@ -694,6 +700,11 @@ class SignalEngine:
                 crossed = close_prev <= level and close_now > level
 
                 if crossed:
+                    # ✅ FIX: Keep level — wait for fresh displacement
+                    # Creator: slow move = lethargic PA = stay out, don't invalidate
+                    if not _has_displacement(m5_sweep_idx, i):
+                        continue  # level preserved — next candle may have displacement
+
                     choch_label = self._classify_structure_break("BULLISH")
 
                     if choch_label == "CHOCH" and len(dn_p) >= 2 and dn_p[0] > dn_p[1]:
@@ -726,6 +737,10 @@ class SignalEngine:
                 crossed = close_prev >= level and close_now < level
 
                 if crossed:
+                    # ✅ FIX: Keep level — wait for fresh displacement
+                    if not _has_displacement(m5_sweep_idx, i):
+                        continue  # level preserved — next candle may have displacement
+
                     choch_label = self._classify_structure_break("BEARISH")
 
                     if choch_label == "CHOCH" and len(up_p) >= 2 and up_p[0] < up_p[1]:
@@ -848,38 +863,19 @@ class SignalEngine:
             if self.poi_mitigation.is_breached(poi):
                 continue
 
-            # ✅ FIX 2: 50% MT — check if any candle in segment already
-            # closed its BODY through the OB midpoint (= zone invalidated)
-            poi_mid  = (poi.low + poi.high) / 2.0
+            # ❌ MT segment check REMOVED — was self-invalidating
+            # OB candle's own body sits inside segment and triggers
+            # the check against itself. MT validation stays in
+            # _step_ob_fvg_confluence retest scan only.
+
             poi_size = max(poi.high - poi.low, 1e-9)
-            mt_breached = False
 
-            for seg_idx in range(seg_abs_start, seg_abs_end + 1):
-                body_low  = min(
-                    float(m15_df["open"].iat[seg_idx]),
-                    float(m15_df["close"].iat[seg_idx]),
-                )
-                body_high = max(
-                    float(m15_df["open"].iat[seg_idx]),
-                    float(m15_df["close"].iat[seg_idx]),
-                )
-                if sweep.direction == "BULLISH" and body_low < poi_mid:
-                    mt_breached = True
-                    break
-                if sweep.direction == "BEARISH" and body_high > poi_mid:
-                    mt_breached = True
-                    break
-
-            if mt_breached:
-                continue
-
-            # ✅ FIX 1: 50% overlap threshold — not fully_inside
+            # ✅ 50% overlap threshold — not fully_inside
             for htf_poi in htf_pois:
                 overlap_low  = max(poi.low,  htf_poi.low)
                 overlap_high = min(poi.high, htf_poi.high)
                 overlap_size = overlap_high - overlap_low
 
-                # At least 50% of M15 OB must overlap with HTF zone
                 sufficiently_inside = (
                     overlap_size > 0 and
                     (overlap_size / poi_size) >= 0.50
@@ -968,23 +964,21 @@ class SignalEngine:
             debug_counts["returned_empty"] += 1
             return htf_pois
 
-        current_price = float(m15_df["close"].iloc[-1])
-        piv_window    = max(2, self.config.external_swing_window)
+        current_price    = float(m15_df["close"].iloc[-1])
+        piv_window       = max(2, self.config.external_swing_window)
         immediate_window = 8
 
-        # ✅ ATR-based proximity — replaces hardcoded 40.0
-        atr_proximity = self._calc_atr(m15_df, len(m15_df) - 1, self.config.atr_period)
-        proximity_threshold = (atr_proximity * 10.0) if atr_proximity else None
+        # ✅ FIX 1: No proximity filter — creator considers all valid POIs
+        # regardless of distance to current price
+
+        # ✅ FIX 2: Only current dealing range leg — creator doctrine confirmed
+        MAX_PAIRS_TO_SCAN = 1
 
         def _find_first_ob_after_idm(
             full_df: pd.DataFrame,
             idm_idx: int,
             protected_idx: int,
         ) -> Optional[int]:
-            """
-            ✅ FIX 2: Only the FIRST valid OB after IDM.
-            Scans forward from idm+1, returns on first hit.
-            """
             for scan_idx in range(idm_idx + 1, protected_idx + 1):
                 fvg_end = min(len(full_df) - 2, protected_idx, scan_idx + immediate_window)
                 immediate_fvgs = self._find_fvgs(
@@ -992,20 +986,15 @@ class SignalEngine:
                     start=scan_idx + 1, end=fvg_end,
                 )
                 if immediate_fvgs:
-                    return scan_idx  # has FVG — valid standard OB
+                    return scan_idx
 
-                # ✅ FIX 3: No FVG → Advanced OB rule (whole candle is OB)
-                # Still return this as valid but flag as advanced
-                # Don't silently skip — check displacement
                 debug_counts["first_no_shift_fvg"] += 1
 
                 candidate = self._build_poi(
-                    full_df,
-                    "HTF_FIRST_OB_ADVANCED",
-                    scan_idx,
+                    full_df, "HTF_FIRST_OB_ADVANCED", scan_idx,
                 )
                 if self.is_displacement_after_poi(candidate, full_df, sweep.direction):
-                    return scan_idx  # Advanced OB with displacement
+                    return scan_idx
 
                 debug_counts["first_failed_displacement"] += 1
 
@@ -1016,20 +1005,15 @@ class SignalEngine:
             idm_idx: int,
             protected_idx: int,
         ) -> Optional[int]:
-            """
-            ✅ FIX 4: Extreme OB = last unmitigated block before protected extreme.
-            NO displacement prerequisite per creator — relaxed rules.
-            """
             if sweep.direction == "BULLISH":
-                leg = full_df.iloc[idm_idx: protected_idx + 1]
+                leg         = full_df.iloc[idm_idx: protected_idx + 1]
                 extreme_rel = int(leg["low"].to_numpy().argmin())
             else:
-                leg = full_df.iloc[idm_idx: protected_idx + 1]
+                leg         = full_df.iloc[idm_idx: protected_idx + 1]
                 extreme_rel = int(leg["high"].to_numpy().argmax())
 
             extreme_abs = idm_idx + extreme_rel
 
-            # Try shift rule first
             for idx in range(extreme_abs, protected_idx + 1):
                 fvg_end = min(len(full_df) - 2, protected_idx, idx + immediate_window)
                 immediate_fvgs = self._find_fvgs(
@@ -1039,10 +1023,20 @@ class SignalEngine:
                 if immediate_fvgs:
                     return idx
 
-            # ✅ FIX 4: No FVG = still valid Extreme OB (last line of defense)
-            # Creator: "Extreme OB must be last unmitigated block before protected H/L"
             debug_counts["extreme_no_shift_fvg"] += 1
-            return extreme_abs  # return raw extreme — no hard fail
+            return extreme_abs
+
+        def _is_valid_leg(
+            full_df: pd.DataFrame,
+            idm_idx: int,
+            protected_idx: int,
+        ) -> bool:
+            if protected_idx <= idm_idx:
+                return False
+            leg = full_df.iloc[idm_idx: protected_idx + 1]
+            if len(leg) < 3:
+                return False
+            return True
 
         timeframe_sets = [("D1", d1_df), ("H4", h4_df)]
 
@@ -1054,69 +1048,64 @@ class SignalEngine:
                 continue
 
             ph, pl = self._find_pivots_debug(full_df, piv_window)
-
             pivot_list = pl if sweep.direction == "BULLISH" else ph
 
             if len(pivot_list) < 2:
                 debug_counts["not_enough_pivots"] += 1
                 continue
 
-            protected_idx = pivot_list[-1]
-            idm_idx       = pivot_list[-2]
+            leg_found   = False
+            pairs_tried = 0
 
-            if protected_idx <= idm_idx:
-                debug_counts["bad_anchor_order"] += 1
-                continue
+            for pair_end in range(len(pivot_list) - 1, 0, -1):
+                if pairs_tried >= MAX_PAIRS_TO_SCAN:
+                    break
 
-            leg_df = full_df.iloc[idm_idx: protected_idx + 1]
-            if leg_df.empty or len(leg_df) < 3:
-                debug_counts["empty_leg"] += 1
-                continue
+                protected_idx = pivot_list[pair_end]
+                idm_idx       = pivot_list[pair_end - 1]
+                pairs_tried  += 1
 
-            # ── Extreme OB (highest probability — add first) ──────────────
-            extreme_idx = _find_extreme_ob(full_df, idm_idx, protected_idx)
-            if extreme_idx is not None:
-                extreme_poi = self._build_poi(
-                    full_df,
-                    f"{timeframe_name}_HTF_EXTREME_OB",
-                    int(extreme_idx),
-                )
-                # ✅ FIX 4: displacement checked AFTER price taps — not as prerequisite
-                htf_pois.append(extreme_poi)
-                debug_counts["pois_added"] += 1
-            else:
-                debug_counts["extreme_failed_displacement"] += 1
+                if not _is_valid_leg(full_df, idm_idx, protected_idx):
+                    debug_counts["bad_anchor_order"] += 1
+                    continue
 
-            # ── First OB after IDM ─────────────────────────────────────────
-            first_idx = _find_first_ob_after_idm(full_df, idm_idx, protected_idx)
-            if first_idx is not None:
-                first_poi = self._build_poi(
-                    full_df,
-                    f"{timeframe_name}_HTF_FIRST_OB_AFTER_IDM",
-                    int(first_idx),
-                )
-                htf_pois.append(first_poi)
-                debug_counts["pois_added"] += 1
+                leg_df = full_df.iloc[idm_idx: protected_idx + 1]
+                if leg_df.empty or len(leg_df) < 3:
+                    debug_counts["empty_leg"] += 1
+                    continue
+
+                extreme_idx = _find_extreme_ob(full_df, idm_idx, protected_idx)
+                if extreme_idx is not None:
+                    extreme_poi = self._build_poi(
+                        full_df,
+                        f"{timeframe_name}_HTF_EXTREME_OB",
+                        int(extreme_idx),
+                    )
+                    htf_pois.append(extreme_poi)
+                    debug_counts["pois_added"] += 1
+                else:
+                    debug_counts["extreme_failed_displacement"] += 1
+
+                first_idx = _find_first_ob_after_idm(full_df, idm_idx, protected_idx)
+                if first_idx is not None:
+                    first_poi = self._build_poi(
+                        full_df,
+                        f"{timeframe_name}_HTF_FIRST_OB_AFTER_IDM",
+                        int(first_idx),
+                    )
+                    htf_pois.append(first_poi)
+                    debug_counts["pois_added"] += 1
+
+                if extreme_idx is not None or first_idx is not None:
+                    leg_found = True
+                    break
+
+            if not leg_found:
+                debug_counts["not_enough_pivots"] += 1
 
         htf_pois = self._dedupe_pois(htf_pois)
 
-        # ✅ FIX 5: ATR-based proximity filter — no hardcoded 40.0
-        if proximity_threshold is not None:
-            if sweep.direction == "BULLISH":
-                nearby = [
-                    p for p in htf_pois
-                    if p.high >= current_price and
-                    (p.high - current_price) <= proximity_threshold
-                ]
-            else:
-                nearby = [
-                    p for p in htf_pois
-                    if p.low <= current_price and
-                    (current_price - p.low) <= proximity_threshold
-                ]
-            if nearby:
-                htf_pois = nearby
-
+        # ✅ FIX 1: Proximity filter removed — all valid POIs returned
         if htf_pois:
             debug_counts["returned_nonempty"] += 1
         else:
@@ -1156,8 +1145,9 @@ class SignalEngine:
         if not fvg_list:
             return {"passed": False, "reason": "FVG_NOT_FOUND"}, None, None, None
 
-        # ✅ ATR-based proximity threshold — computed once
-        atr = self._calc_atr(m5_df, len(m5_df) - 1, self.config.atr_period)
+        # ATR computed once — used for proximity and wick tolerance
+        atr     = self._calc_atr(m5_df, len(m5_df) - 1, self.config.atr_period)
+        atr_tol = (atr * 0.1) if atr else 0.0  # ✅ wick tolerance
 
         best: Optional[Tuple[POI, FVG, float, float]] = None
 
@@ -1174,7 +1164,7 @@ class SignalEngine:
                 overlap_high = min(poi.high, fvg.high)
                 has_overlap  = overlap_high > overlap_low
 
-                # ✅ ATR-based proximity — 0.25 ATR or 50% poi_size fallback
+                # ATR-based proximity fallback
                 near_threshold = (atr * 0.25) if atr else (poi_size * 0.5)
                 distance = min(
                     abs(poi.low  - fvg.high),
@@ -1182,15 +1172,12 @@ class SignalEngine:
                 )
                 is_near = distance <= near_threshold
 
-                # Physical overlap = Power Setup (score 1.0 base)
-                # Near = valid but lower score
                 if not has_overlap and not is_near:
                     continue
 
                 if has_overlap:
                     score = (overlap_high - overlap_low) / poi_size
                 else:
-                    # ✅ Near but no overlap — penalised score
                     score = 0.3 * (1.0 - min(distance / near_threshold, 1.0))
 
                 is_advanced = "ADVANCED" in poi.poi_type
@@ -1206,7 +1193,8 @@ class SignalEngine:
                 # ─── Retest confirmation ──────────────────────────────────
                 retest_found = False
                 scan_start   = structure_break.candle_index
-                scan_end     = min(len(m5_df), scan_start + 30)
+                # ✅ FIX: extended from 30 → 50 candles
+                scan_end     = min(len(m5_df), scan_start + 50)
 
                 zone_low  = overlap_low  if has_overlap else poi.low
                 zone_high = overlap_high if has_overlap else poi.high
@@ -1222,6 +1210,7 @@ class SignalEngine:
                     body   = abs(close_ - open_)
                     range_ = max(high_ - low_, 1e-9)
 
+                    # Body must not close through 50% MT — creator confirmed
                     if direction == "BULLISH":
                         body_through_mt = close_ < zone_mid
                     else:
@@ -1230,18 +1219,32 @@ class SignalEngine:
                     if body_through_mt:
                         continue
 
+                    # Strong body required — creator confirmed displacement needed
                     if body <= 0.5 * range_:
                         continue
 
                     if direction == "BULLISH":
-                        wick_in_zone = (low_ >= zone_low) and (low_ <= zone_high)
-                        rejection    = close_ > zone_high
+                        # ✅ FIX: ATR tolerance on wick lower bound
+                        wick_in_zone = (
+                            low_ <= zone_high and
+                            low_ >= (zone_low - atr_tol)
+                        )
+                        # ✅ FIX: close back inside zone sufficient
+                        # (not required to close fully above zone_high)
+                        rejection = close_ > zone_low
+
                         if wick_in_zone and rejection:
                             retest_found = True
                             break
                     else:
-                        wick_in_zone = (high_ <= zone_high) and (high_ >= zone_low)
-                        rejection    = close_ < zone_low
+                        # ✅ FIX: ATR tolerance on wick upper bound
+                        wick_in_zone = (
+                            high_ >= zone_low and
+                            high_ <= (zone_high + atr_tol)
+                        )
+                        # ✅ FIX: close back inside zone sufficient
+                        rejection = close_ < zone_high
+
                         if wick_in_zone and rejection:
                             retest_found = True
                             break

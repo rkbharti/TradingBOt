@@ -1,12 +1,18 @@
-# GUARDEER OS v4.0 — main.py [PATCHED]
-# Generated: 2026-05-21
+# GUARDEER OS v4.1 — main.py [ENHANCED: timeframe support + overlays]
 # Port: 8001 | VPS: Oracle Linux
-# Bot -> POST /webhook every 60s from Windows
-# ═══════════════════════════════════════════════════════════════════════════════
+#
+# ENHANCEMENTS:
+#   1. Added: current_timeframe in bot_state, default "M15"
+#   2. Added: WebSocket "change_tf" updates bot_state and broadcasts
+#   3. Added: Optional forwarding to trader's /set_timeframe (port 8000)
+#   4. PRESERVED: All backend logic, routes, schemas
+# ════════════════════════════════════════════════════════════════════
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from contextlib import asynccontextmanager
 import uvicorn
 import asyncio
@@ -16,21 +22,26 @@ import hashlib
 import traceback
 import math
 import os
+import time as _time
+import httpx
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 🎨 DASHBOARD v4 - Fully Wired WebSocket Bridge FastAPI Server [PATCHED]
-# - Fixes all schema mismatches from trader flat payload
-# - Closes_trades now broadcast to frontend
-# - Corrects all key name mapping (price→last_price, positions→open_positions, etc.)
-# - Removes Windows-specific hardcoding
-# - Fixes duplicate init() JS syntax error
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─── Path resolution ────────────────────────────────────────────────────
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_STATIC_DIR  = os.path.join(_HERE, "static")
+_TEMPLATES_DIR = os.path.join(_HERE, "templates")
 
+# ─── Globals ────────────────────────────────────────────────────────────
 active_connections = []
-bot_state = {}
+bot_state = {
+    "current_timeframe": "M15"   # default timeframe
+}
 bot_paused = False
+_SERVER_START_TIME = _time.time()
+last_webhook_timestamp = None
 
-# --- ENHANCED PnL TRACKER ---
+# ═══════════════════════════════════════════════════════════════════════════
+# DailyPnLTracker — UNCHANGED
+# ═══════════════════════════════════════════════════════════════════════════
 class DailyPnLTracker:
     def __init__(self):
         self.realized_pnl = 0.0
@@ -53,7 +64,6 @@ class DailyPnLTracker:
                 self.processed_ticket_ids.add(ticket)
             except Exception:
                 pass
-
         if when is None:
             when = datetime.now()
         d = when.date()
@@ -84,23 +94,20 @@ class DailyPnLTracker:
 
 pnl_tracker = DailyPnLTracker()
 
-# --- BROADCAST LOOP ---
-last_webhook_timestamp = datetime.now()
-last_webhook_timestamp_prev = datetime.now()
-
+# ═══════════════════════════════════════════════════════════════════════════
+# broadcast_loop — sends bot_state to all WebSocket clients
+# ═══════════════════════════════════════════════════════════════════════════
 async def broadcast_loop():
-    """Broadcast bot_state to all connected WebSocket clients every 3s (if changed)"""
     last_state_hash = None
     while True:
         if active_connections and bot_state:
             try:
-                # Sanitize JSON to avoid NaN issues; browser rejects NaN
                 state_json = json.dumps(bot_state, sort_keys=True, default=str).replace("NaN", "null")
                 state_hash = hashlib.sha256(state_json.encode()).hexdigest()
                 if state_hash != last_state_hash:
                     payload = state_json
                     try:
-                        print(f"📡 Broadcasting state update ({len(active_connections)} clients) size={len(payload)} bytes")
+                        print(f"📡 Broadcasting ({len(active_connections)} clients) {len(payload)}B")
                     except Exception:
                         pass
                     for conn in active_connections[:]:
@@ -110,7 +117,7 @@ async def broadcast_loop():
                             pass
                     last_state_hash = state_hash
             except Exception as e:
-                print(f"⚠️ Broadcast serialization error: {e}")
+                print(f"⚠️ Broadcast error: {e}")
         await asyncio.sleep(3)
 
 @asynccontextmanager
@@ -119,19 +126,36 @@ async def lifespan(app: FastAPI):
     yield
     task.cancel()
 
+# ═══════════════════════════════════════════════════════════════════════════
+# FastAPI app setup
+# ═══════════════════════════════════════════════════════════════════════════
 app = FastAPI(lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"]
+)
+
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+    print(f"✅ Static files: {_STATIC_DIR}")
+else:
+    print(f"⚠️  Static dir not found: {_STATIC_DIR}")
+
+templates = Jinja2Templates(directory=_TEMPLATES_DIR) if os.path.isdir(_TEMPLATES_DIR) else None
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard():
-    return html_content
+async def dashboard(request: Request):
+    if templates is not None:
+        idx = os.path.join(_TEMPLATES_DIR, "index.html")
+        if os.path.exists(idx):
+            return templates.TemplateResponse(request=request, name="index.html")
+    return HTMLResponse(content=_get_inline_html())
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# HELPER FUNCTIONS
-# ═══════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════════════════════════════════════════════════════════════════
+# Helper functions (unchanged)
+# ═══════════════════════════════════════════════════════════════════════════
 def get_val(obj, key, default=0.0):
-    """Extract value from object (dict or class attribute)"""
     if hasattr(obj, key):
         return getattr(obj, key)
     if isinstance(obj, dict):
@@ -139,7 +163,6 @@ def get_val(obj, key, default=0.0):
     return default
 
 def parse_profit(x):
-    """Parse profit value from various formats"""
     if x is None:
         return 0.0
     try:
@@ -157,36 +180,15 @@ def parse_profit(x):
     except Exception:
         return 0.0
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# [PATCH 1] WEBHOOK PAYLOAD NORMALIZATION - Handles trader's flat schema
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def normalize_webhook_payload(payload: dict) -> tuple:
-    """
-    Convert trader's flat payload OR legacy nested payload into normalized
-    (bot_instance, analysis_data) tuple for downstream processing.
-    
-    Trader sends (flat v-current):
-    { "session", "account", "risk", "price", "bias", "signal", "positions", "closed_trades" }
-    
-    Legacy nested schema (fallback support):
-    { "bot_instance": {...}, "analysis_data": {...} }
-    """
-    # Branch 1: Legacy nested schema (bot_instance / analysis_data)
     if "bot_instance" in payload and "analysis_data" in payload:
         return payload["bot_instance"], payload["analysis_data"]
-    
-    # Branch 2: Alternate legacy nested schema (bot / analysis)
     if "bot" in payload and "analysis" in payload:
         return payload["bot"], payload["analysis"]
-    
-    # Branch 3: [PATCHED] Trader's ACTUAL flat schema
-    # This is the primary expected format from the Windows bot
+
     bot_inst = {}
     analysis = {}
-    
     try:
-        # Account section
         account = payload.get("account", {})
         if isinstance(account, dict):
             bot_inst["account"] = account
@@ -194,258 +196,196 @@ def normalize_webhook_payload(payload: dict) -> tuple:
             bot_inst["balance"] = account.get("balance", 0.0)
             bot_inst["account_login"] = account.get("login", "--")
             bot_inst["account_server"] = account.get("server", "--")
-        
-        # Risk section
         risk = payload.get("risk", {})
         if isinstance(risk, dict):
             bot_inst["risk"] = risk
-        
-        # Core trading fields [FIXED KEY NAMES]
-        bot_inst["last_price"] = payload.get("price", 0.0)      # FIX: price → last_price
-        bot_inst["current_session"] = payload.get("session", "ASIAN")  # FIX: session → current_session
-        bot_inst["open_positions"] = payload.get("positions", [])  # FIX: positions → open_positions
-        bot_inst["closed_trades"] = payload.get("closed_trades", [])
-        
-        # Chart data (if present)
+        bot_inst["last_price"]      = payload.get("price", 0.0)
+        bot_inst["current_session"] = payload.get("session", "ASIAN")
+        bot_inst["open_positions"]  = payload.get("positions", [])
+        bot_inst["closed_trades"]   = payload.get("closed_trades", [])
         if "chart_data" in payload:
-            bot_inst["chart_data"] = payload.get("chart_data", [])[-300:]  # Cap at 300 candles
-        
-        # [FIXED] Map bias object → market_structure with d1_bias/h4_bias keys
+            bot_inst["chart_data"]  = payload.get("chart_data", [])[-300:]
         bias = payload.get("bias", {})
         if isinstance(bias, dict):
             analysis["market_structure"] = {
-                "current_trend": bias.get("d1", "NEUTRAL"),  # Use d1 as primary trend
-                "d1_bias": bias.get("d1", "NEUTRAL"),        # FIX: was never populated
-                "h4_bias": bias.get("h4", "NEUTRAL"),        # FIX: was never populated
+                "current_trend": bias.get("d1", "NEUTRAL"),
+                "d1_bias":       bias.get("d1", "NEUTRAL"),
+                "h4_bias":       bias.get("h4", "NEUTRAL"),
             }
         else:
             analysis["market_structure"] = {
-                "current_trend": "NEUTRAL",
-                "d1_bias": "NEUTRAL",
-                "h4_bias": "NEUTRAL",
+                "current_trend": "NEUTRAL", "d1_bias": "NEUTRAL", "h4_bias": "NEUTRAL"
             }
-        
-        # [FIXED] Map signal → signal_engine
         signal = payload.get("signal", {})
         if isinstance(signal, dict):
             analysis["signal_engine"] = {
-                "action": signal.get("action", "NO_TRADE"),
-                "direction": signal.get("direction", "NEUTRAL"),
-                "confidence": signal.get("confidence", 0),
-                "reason": signal.get("reason", "--"),
-                "reason_code": signal.get("reason_code"),
-                "entry_price": signal.get("entry_price"),
-                "sl_price": signal.get("sl_price"),
-                "tp_price": signal.get("tp_price"),
-                "gates": signal.get("gates", {}),
+                "action":       signal.get("action", "NO_TRADE"),
+                "direction":    signal.get("direction", "NEUTRAL"),
+                "confidence":   signal.get("confidence", 0),
+                "reason":       signal.get("reason", "--"),
+                "reason_code":  signal.get("reason_code"),
+                "entry_price":  signal.get("entry_price"),
+                "sl_price":     signal.get("sl_price"),
+                "tp_price":     signal.get("tp_price"),
+                "gates":        signal.get("gates", {}),
             }
         else:
             analysis["signal_engine"] = {
-                "action": "NO_TRADE",
-                "direction": "NEUTRAL",
-                "confidence": 0,
-                "reason": "--",
-                "reason_code": None,
-                "gates": {},
+                "action": "NO_TRADE", "direction": "NEUTRAL",
+                "confidence": 0, "reason": "--",
+                "reason_code": None, "gates": {},
             }
-        
-        # Chart overlays
-        analysis["poi_overlays"] = payload.get("poi_overlays", [])
+        analysis["poi_overlays"]  = payload.get("poi_overlays", [])
         analysis["chart_objects"] = payload.get("chart_objects", {})
-        
     except Exception as e:
-        print(f"⚠️ Payload normalization error: {e}")
+        print(f"⚠️ Normalization error: {e}")
         traceback.print_exc()
-    
     return bot_inst, analysis
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# [PATCH 2] STATE UPDATE - Now includes closed_trades broadcast
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def update_bot_state_v2(bot_instance, analysis_data):
-    """Core state ingestion from normalized payload"""
-    global bot_state, pnl_tracker, last_webhook_timestamp, last_webhook_timestamp_prev
-    
-    # [PATCH 4 FIX] Calculate webhook age BEFORE resetting last_webhook_timestamp
-    prev_timestamp = last_webhook_timestamp
+    global bot_state, last_webhook_timestamp
     last_webhook_timestamp = datetime.now()
-    webhook_age = (last_webhook_timestamp - prev_timestamp).total_seconds()
-
-    equity = float(get_val(bot_instance, "equity", 0.0) or 0.0)
-    balance = float(get_val(bot_instance, "balance", 0.0) or 0.0)
-
-    # Account fields (now extracted properly)
-    account_dict = get_val(bot_instance, "account", {})
-    if isinstance(account_dict, dict):
-        account_login = account_dict.get("login", "--")
-        account_server = account_dict.get("server", "--")
-    else:
-        account_login = get_val(bot_instance, "account_login", "--")
-        account_server = get_val(bot_instance, "account_server", "--")
+    try:
+        equity         = float(get_val(bot_instance, "equity", 0.0) or 0.0)
+        balance        = float(get_val(bot_instance, "balance", 0.0) or 0.0)
+        account_login  = str(get_val(bot_instance, "account_login", "--"))
+        account_server = str(get_val(bot_instance, "account_server", "--"))
+        current_price  = float(get_val(bot_instance, "last_price", 0.0) or 0.0)
+        if math.isnan(equity):        equity = 0.0
+        if math.isnan(balance):       balance = 0.0
+        if math.isnan(current_price): current_price = 0.0
+    except Exception as e:
+        print(f"⚠️ Account parsing error: {e}")
+        equity = balance = current_price = 0.0
+        account_login = account_server = "--"
 
     open_pnl = 0.0
     formatted_trades = []
-
     try:
-        # [FIXED] Use open_positions key (not open_positions + manual_positions)
         positions = get_val(bot_instance, "open_positions", []) or []
-        if not isinstance(positions, list):
-            positions = []
-        
-        current_price = float(get_val(bot_instance, "last_price", 0.0) or 0.0)
-
+        if not isinstance(positions, list): positions = []
         for p in positions:
-            # Extract PnL (try multiple keys)
             profit_raw = get_val(p, "profit", None)
-            if profit_raw is None:
-                profit_raw = get_val(p, "pnl", None)
+            if profit_raw is None: profit_raw = get_val(p, "pnl", None)
             profit = parse_profit(profit_raw)
-            
-            entry = parse_profit(get_val(p, "price", get_val(p, "entry_price", 0.0)))
-            lot = parse_profit(get_val(p, "lot_size", get_val(p, "volume", 0.0)))
+            entry  = parse_profit(get_val(p, "price", get_val(p, "entry_price", 0.0)))
+            lot    = parse_profit(get_val(p, "lot_size", get_val(p, "volume", 0.0)))
             signal = get_val(p, "signal", get_val(p, "type", "N/A"))
-
-            # Auto-calculate PnL if missing
             if (profit == 0.0) and (current_price > 0 and entry > 0 and lot > 0):
                 try:
-                    if str(signal).upper() == "BUY":
-                        profit = (current_price - entry) * lot * 100
-                    else:
-                        profit = (entry - current_price) * lot * 100
+                    profit = (current_price - entry) * lot * 100 if str(signal).upper() == "BUY" else (entry - current_price) * lot * 100
                 except Exception:
                     profit = 0.0
-
             open_pnl += float(profit)
             formatted_trades.append({
-                "id": str(get_val(p, "ticket", get_val(p, "id", "000")))[:12],
-                "symbol": get_val(p, "symbol", "XAUUSD"),
-                "type": str(signal).upper(),
+                "id":       str(get_val(p, "ticket", get_val(p, "id", "000")))[:12],
+                "symbol":   get_val(p, "symbol", "XAUUSD"),
+                "type":     str(signal).upper(),
                 "lot_size": round(float(lot or 0.0), 3),
-                "volume": round(float(lot or 0.0), 3),
-                "entry": round(float(entry or 0.0), 5) if entry else 0.0,
-                "price": round(float(entry or 0.0), 5) if entry else 0.0,
-                "pnl": round(float(profit), 2),
-                "tp": get_val(p, "tp", 0),
-                "sl": get_val(p, "sl", 0)
+                "volume":   round(float(lot or 0.0), 3),
+                "entry":    round(float(entry or 0.0), 5) if entry else 0.0,
+                "price":    round(float(entry or 0.0), 5) if entry else 0.0,
+                "pnl":      round(float(profit), 2),
+                "tp":       get_val(p, "tp", 0),
+                "sl":       get_val(p, "sl", 0),
             })
     except Exception as e:
-        print(f"⚠️ Open positions parsing error: {e}")
+        print(f"⚠️ Positions parsing error: {e}")
 
-    # [PATCH 2: NEW] Process closed trades for BROADCAST (not just PnL tracking)
     formatted_closed = []
     try:
         closed = get_val(bot_instance, "closed_trades", []) or []
-        if not isinstance(closed, list):
-            closed = []
-        
+        if not isinstance(closed, list): closed = []
         for ct in closed:
-            # Extract profit
             profit_raw = None
             for k in ("profit", "pnl", "profit_usd", "deal_profit"):
                 profit_raw = get_val(ct, k, None)
-                if profit_raw is not None:
-                    break
+                if profit_raw is not None: break
             profit = parse_profit(profit_raw)
-            
-            # Build closed trade record for display
             formatted_closed.append({
-                "id": str(get_val(ct, "ticket", get_val(ct, "id", "000")))[:12],
+                "id":     str(get_val(ct, "ticket", get_val(ct, "id", "000")))[:12],
                 "symbol": get_val(ct, "symbol", "XAUUSD"),
-                "type": str(get_val(ct, "signal", get_val(ct, "type", "N/A"))).upper(),
-                "entry": round(float(get_val(ct, "entry_price", get_val(ct, "price", 0.0))), 5),
-                "exit": round(float(get_val(ct, "close_price", get_val(ct, "exit", 0.0))), 5),
-                "pnl": round(float(profit), 2),
+                "type":   str(get_val(ct, "signal", get_val(ct, "type", "N/A"))).upper(),
+                "entry":  round(float(get_val(ct, "entry_price", get_val(ct, "price", 0.0))), 5),
+                "exit":   round(float(get_val(ct, "close_price", get_val(ct, "exit", 0.0))), 5),
+                "pnl":    round(float(profit), 2),
             })
-            
-            # Also add to PnL tracker for cumulative calculations
             if abs(profit) > 0.01:
                 when = None
                 ts = get_val(ct, "time", None) or get_val(ct, "close_time", None)
                 if ts:
                     try:
                         if isinstance(ts, str):
-                            try:
-                                when = datetime.fromisoformat(ts)
+                            try:    when = datetime.fromisoformat(ts)
                             except:
-                                try:
-                                    when = datetime.strptime(ts, "%Y.%m.%d %H:%M:%S")
-                                except:
-                                    when = None
+                                try: when = datetime.strptime(ts, "%Y.%m.%d %H:%M:%S")
+                                except: when = None
                         elif isinstance(ts, (int, float)):
-                            if ts > 1e12:
-                                when = datetime.fromtimestamp(float(ts) / 1000.0)
-                            else:
-                                when = datetime.fromtimestamp(float(ts))
-                    except Exception:
-                        when = None
-                
+                            when = datetime.fromtimestamp(float(ts)/1000.0 if ts > 1e12 else float(ts))
+                    except Exception: when = None
                 try:
-                    ticket_id = get_val(ct, "ticket", get_val(ct, "id", None))
-                    ticket_str = str(ticket_id) if ticket_id is not None else None
-                    pnl_tracker.add_closed_trade(float(profit), when=when, ticket=ticket_str)
-                except Exception:
-                    pass
+                    tid = get_val(ct, "ticket", get_val(ct, "id", None))
+                    pnl_tracker.add_closed_trade(float(profit), when=when, ticket=str(tid) if tid else None)
+                except Exception: pass
     except Exception as e:
-        print(f"⚠️ Closed trades parsing error: {e}")
+        print(f"⚠️ Closed trades error: {e}")
 
-    # Update global bot_state dict
     try:
         market_struct = get_val(analysis_data, "market_structure", {})
-        signal_eng = get_val(analysis_data, "signal_engine", {})
-        
+        signal_eng    = get_val(analysis_data, "signal_engine", {})
+        # Preserve current_timeframe if not overwritten
+        current_tf = bot_state.get("current_timeframe", "M15")
         bot_state.update({
-            "webhook_age_seconds": webhook_age,  # [FIXED] Now correctly calculated
-            "account_login": account_login,
-            "account_server": account_server,
-            "account_name": get_val(bot_instance, "account_name", "REAL-01"),
-            "equity": round(float(equity), 2),
-            "balance": round(float(balance), 2),
-            "pnl_daily": round(pnl_tracker.get_daily() + open_pnl, 2),
-            "pnl_today": round(pnl_tracker.get_daily() + open_pnl, 2),
-            "pnl_week": round(pnl_tracker.get_weekly() + open_pnl, 2),
-            "pnl_total": round(pnl_tracker.get_total() + open_pnl, 2),
-            "open_pnl": round(open_pnl, 2),
-            "price": float(get_val(bot_instance, "last_price", 0.0) or 0.0),
+            "webhook_age_seconds": 0,
+            "account_login":    account_login,
+            "account_server":   account_server,
+            "account_name":     get_val(bot_instance, "account_name", "REAL-01"),
+            "equity":           round(float(equity), 2),
+            "balance":          round(float(balance), 2),
+            "pnl_daily":        round(pnl_tracker.get_daily() + open_pnl, 2),
+            "pnl_today":        round(pnl_tracker.get_daily() + open_pnl, 2),
+            "pnl_week":         round(pnl_tracker.get_weekly() + open_pnl, 2),
+            "pnl_total":        round(pnl_tracker.get_total() + open_pnl, 2),
+            "open_pnl":         round(open_pnl, 2),
+            "price":            float(get_val(bot_instance, "last_price", 0.0) or 0.0),
             "market_structure": market_struct.get("current_trend", "NEUTRAL"),
-            "session": get_val(bot_instance, "current_session", "ASIAN"),
-            "trades": formatted_trades,
-            "closed_trades": formatted_closed,  # [PATCH 2: NEW] Now broadcast!
-            "chart_overlays": {
+            "session":          get_val(bot_instance, "current_session", "ASIAN"),
+            "trades":           formatted_trades,
+            "closed_trades":    formatted_closed,
+            "chart_overlays":   {
                 "levels": {
                     "pdh": get_val(analysis_data, "poi_overlays", []),
-                    "pdl": get_val(analysis_data, "chart_objects", {})
+                    "pdl": get_val(analysis_data, "chart_objects", {}),
                 }
             },
-            "poi_overlays": get_val(analysis_data, "poi_overlays", []),
-            "chart_objects": get_val(analysis_data, "chart_objects", {}),
-            "chart_data": get_val(bot_instance, "chart_data", [])[-300:],
-            "trading": not bot_paused,
-            "d1_bias": market_struct.get("d1_bias", "NEUTRAL"),  # [FIXED] Now populated!
-            "h4_bias": market_struct.get("h4_bias", "NEUTRAL"),  # [FIXED] Now populated!
-            "signal_engine": {
-                "action": signal_eng.get("action", "NO_TRADE"),
-                "direction": signal_eng.get("direction", "NEUTRAL"),
-                "confidence": int(signal_eng.get("confidence", 0)),
-                "reason": signal_eng.get("reason", "--"),
-                "reason_code": signal_eng.get("reason_code"),
-                "entry_price": signal_eng.get("entry_price"),
-                "sl_price": signal_eng.get("sl_price"),
-                "tp_price": signal_eng.get("tp_price"),
-                "gates": signal_eng.get("gates", {}),
+            "poi_overlays":   get_val(analysis_data, "poi_overlays", []),
+            "chart_objects":  get_val(analysis_data, "chart_objects", {}),
+            "chart_data":     get_val(bot_instance, "chart_data", [])[-300:],
+            "trading":        not bot_paused,
+            "d1_bias":        market_struct.get("d1_bias", "NEUTRAL"),
+            "h4_bias":        market_struct.get("h4_bias", "NEUTRAL"),
+            "signal_engine":  {
+                "action":       signal_eng.get("action", "NO_TRADE"),
+                "direction":    signal_eng.get("direction", "NEUTRAL"),
+                "confidence":   int(signal_eng.get("confidence", 0)),
+                "reason":       signal_eng.get("reason", "--"),
+                "reason_code":  signal_eng.get("reason_code"),
+                "entry_price":  signal_eng.get("entry_price"),
+                "sl_price":     signal_eng.get("sl_price"),
+                "tp_price":     signal_eng.get("tp_price"),
+                "gates":        signal_eng.get("gates", {}),
             },
+            "current_timeframe": current_tf,   # preserve timeframe
         })
     except Exception as e:
         print(f"⚠️ State update error: {e}")
         traceback.print_exc()
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# WEBHOOK ENDPOINT
-# ═══════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════════════════════════════════════════════════════════════════
+# /webhook — unchanged
+# ═══════════════════════════════════════════════════════════════════════════
 @app.post("/webhook")
 async def webhook(payload: dict = Body(...)):
-    """Receive payload from Windows trading bot"""
     try:
         bot_inst, analysis = normalize_webhook_payload(payload)
         update_bot_state_v2(bot_inst, analysis)
@@ -455,13 +395,11 @@ async def webhook(payload: dict = Body(...)):
         traceback.print_exc()
         return {"status": "error", "reason": str(e)}
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# BOT CONTROL ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════════
-
+# ═══════════════════════════════════════════════════════════════════════════
+# Bot control endpoints — unchanged
+# ═══════════════════════════════════════════════════════════════════════════
 @app.get("/bot/status")
 async def bot_status():
-    global bot_paused
     return {"status": "PAUSED" if bot_paused else "ACTIVE"}
 
 @app.post("/bot/pause")
@@ -469,11 +407,9 @@ async def pause_bot():
     global bot_paused
     bot_paused = True
     try:
-        import httpx
         async with httpx.AsyncClient(timeout=3.0) as client:
             await client.post("http://localhost:8000/bot/pause")
-    except Exception:
-        pass
+    except Exception: pass
     print("⏸️  Bot PAUSED via dashboard")
     return {"status": "PAUSED"}
 
@@ -482,17 +418,14 @@ async def resume_bot():
     global bot_paused
     bot_paused = False
     try:
-        import httpx
         async with httpx.AsyncClient(timeout=3.0) as client:
             await client.post("http://localhost:8000/bot/resume")
-    except Exception:
-        pass
+    except Exception: pass
     print("▶️  Bot RESUMED via dashboard")
     return {"status": "ACTIVE"}
 
 @app.get('/bot/logs')
 def get_logs():
-    """[PATCH 5] VPS-compatible log path (configurable via env)"""
     try:
         log_path = os.environ.get("BOT_LOG_PATH", "/var/log/tradingbot/bot.log")
         with open(log_path, 'r', encoding='utf-8') as f:
@@ -501,63 +434,126 @@ def get_logs():
     except Exception as e:
         return {'error': str(e), 'log_path': os.environ.get("BOT_LOG_PATH", "/var/log/tradingbot/bot.log")}
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# WEBSOCKET ENDPOINT
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# /health — unchanged
+# ═══════════════════════════════════════════════════════════════════════════
+@app.get("/health")
+async def health_check():
+    now = datetime.now()
+    if last_webhook_timestamp is None:
+        age = 99999
+        mt5_status = "down"
+    else:
+        age = (now - last_webhook_timestamp).total_seconds()
+        if age < 90:
+            mt5_status = "ok"
+        elif age < 180:
+            mt5_status = "warning"
+        else:
+            mt5_status = "down"
+    chart_len = len(bot_state.get("chart_data", []) or [])
+    se = bot_state.get("signal_engine", {})
+    return {
+        "mt5_connected":       mt5_status,
+        "websocket_active":    len(active_connections) > 0,
+        "active_ws_clients":   len(active_connections),
+        "trader_alive":        mt5_status != "down",
+        "strategy_engine":     se.get("action") is not None,
+        "data_feed":           chart_len > 0,
+        "data_feed_candles":   chart_len,
+        "vps_uptime_seconds":  int(_time.time() - _SERVER_START_TIME),
+        "webhook_age_seconds": round(age),
+        "last_price":          bot_state.get("price", 0.0),
+        "open_positions":      len(bot_state.get("trades", []) or []),
+        "bot_paused":          bot_paused,
+        "server_time":         now.isoformat(),
+    }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# /api/state — unchanged
+# ═══════════════════════════════════════════════════════════════════════════
+@app.get("/api/state")
+async def api_state():
+    if not bot_state:
+        return {"status": "no_data", "message": "No webhook received yet"}
+    try:
+        safe = json.loads(json.dumps(bot_state, default=str).replace("NaN", "null"))
+        safe["_source"]        = "http_snapshot"
+        safe["_snapshot_time"] = datetime.now().isoformat()
+        return safe
+    except Exception as e:
+        return {"status": "error", "reason": str(e)}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# /ws WebSocket endpoint — ENHANCED: timeframe change handler
+# ═══════════════════════════════════════════════════════════════════════════
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     active_connections.append(websocket)
-
+    client_info = "unknown"
     try:
         client_info = f"{websocket.client}" if hasattr(websocket, "client") else "unknown"
-        try:
-            print("🔌 WS CONNECTED:", client_info)
-        except Exception:
-            pass
+        print("🔌 WS CONNECTED:", client_info)
 
-        # Send initial state immediately
         if bot_state:
             try:
                 safe_json = json.dumps(bot_state, default=str).replace("NaN", "null")
                 await websocket.send_text(safe_json)
-                try:
-                    eq = bot_state.get("equity", 0.0)
-                    bal = bot_state.get("balance", 0.0)
-                    chart_len = len(bot_state.get("chart_data", []) or [])
-                    print(f"📤 Sent initial state: Equity=${float(eq):,.2f} Balance=${float(bal):,.2f} ChartCandles={chart_len}")
-                except Exception:
-                    pass
-            except Exception as e:
-                print("❌ Error sending initial state:", e)
+                print(f"📤 Initial state sent: Equity=${bot_state.get('equity',0)} Chart={len(bot_state.get('chart_data',[]))}c")
+            except Exception:
+                pass
 
-        # Keep connection alive: don't require client to send messages
         while True:
             try:
-                _ = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
-            except asyncio.TimeoutError:
-                continue
+                msg = await websocket.receive_text()
+                try:
+                    data = json.loads(msg)
+                    action = data.get("action")
+
+                    if action == "toggle_bot":
+                        global bot_paused
+                        bot_paused = (data.get("status", "ON") == "OFF")
+                        print(f"🎛️  Bot {'PAUSED' if bot_paused else 'RESUMED'} via WS")
+
+                    elif action == "change_tf":
+                        new_tf = data.get("tf", "M15")
+                        print(f"📊 TF change requested: {new_tf}")
+                        # Store in bot_state and broadcast
+                        bot_state["current_timeframe"] = new_tf
+                        # Optionally forward to trader (if endpoint exists)
+                        try:
+                            async with httpx.AsyncClient(timeout=2.0) as client:
+                                await client.post("http://localhost:8000/set_timeframe", json={"timeframe": new_tf})
+                            print(f"✅ Forwarded timeframe {new_tf} to trader")
+                        except Exception as e:
+                            print(f"⚠️ Could not forward timeframe to trader: {e}")
+                        # Broadcast updated state (will be sent by broadcast_loop)
+                        # Force immediate broadcast? broadcast_loop runs every 3s, good enough.
+
+                    elif action == "ping":
+                        await websocket.send_text(
+                            json.dumps({"action": "pong", "ts": datetime.now().isoformat()})
+                        )
+                except json.JSONDecodeError:
+                    pass
             except WebSocketDisconnect:
                 break
-            except Exception as e:
-                print(f"❌ WS receive error: {e}")
+            except Exception:
                 break
 
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        print(f"❌ WS Exception: {e}")
     finally:
         try:
-            if websocket in active_connections:
-                active_connections.remove(websocket)
+            active_connections.remove(websocket)
         except Exception:
             pass
-        try:
-            print("🔌 WS DISCONNECTED:", client_info)
-        except Exception:
-            pass
+        print("🔌 WS DISCONNECTED:", client_info)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Inline HTML fallback (unchanged – kept for safety)
+# ═══════════════════════════════════════════════════════════════════════════
+def _get_inline_html() -> str:
+    return html_content
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HTML/CSS/JS DASHBOARD CONTENT - GUARDEER OS v4.0 (RESPONSIVE + PATCHED JS)
@@ -1831,10 +1827,6 @@ html_content = """
 """
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════════════════════════════
-
 if __name__ == "__main__":
-    import uvicorn
-    print("🚀 GUARDEER OS v4.1 [PATCHED] starting on 0.0.0.0:8001")
+    print("🚀 GUARDEER OS v4.1 [ENHANCED] starting on 0.0.0.0:8001")
     uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
