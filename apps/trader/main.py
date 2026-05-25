@@ -359,7 +359,8 @@ class XAUUSDTradingBot:
         """
         Prints one clean, readable block per analysis cycle.
         Reads from self._cycle_data which is populated in analyze_once().
-        Also emits a JSON snapshot to stdout for any log aggregator.
+        Also emits a JSON snapshot to stdout for any log aggregator
+        and sends it to the dashboard VPS via webhook.
         """
         d = self._cycle_data
         W = 66  # box width
@@ -489,7 +490,7 @@ class XAUUSDTradingBot:
 
         print("\n" + "\n".join(lines))
 
-        # ── Compact JSON snapshot for WebSocket / log aggregator ──────────────
+        # ── Compact JSON snapshot for WebSocket / log aggregator and dashboard ─
         snapshot = {
             "type":       "cycle_update",
             "timestamp":  d.get("timestamp"),
@@ -531,9 +532,88 @@ class XAUUSDTradingBot:
             },
         }
         try:
-            print("__CYCLE_JSON__:" + json.dumps(snapshot, default=str))
-        except Exception:
-            pass
+            json_str = json.dumps(snapshot, default=str)
+            print("__CYCLE_JSON__:" + json_str)
+            # ── Send to dashboard VPS ──
+            import requests
+            try:
+                r = requests.post("http://68.233.99.145:8001/webhook", json=snapshot, timeout=2)
+                if r.status_code == 200:
+                    print("📤 Dashboard webhook OK")
+                else:
+                    print(f"⚠️ Dashboard webhook returned {r.status_code}")
+            except Exception as e:
+                print(f"⚠️ Dashboard webhook failed: {e}")
+        except Exception as e:
+            print(f"⚠️ Failed to print JSON snapshot: {e}")
+    
+    def build_overlays_from_gates(self, gates: dict, current_price: float) -> tuple:
+        """
+        Converts gate data into POI overlays and chart objects for dashboard.
+        Returns (poi_overlays_list, chart_objects_dict)
+        """
+        poi_overlays = []
+        chart_objects = {}
+
+        # Gate 2: External liquidity sweep
+        sweep = gates.get("step_2_external_liquidity_sweep", {})
+        if sweep.get("passed"):
+            price = sweep.get("target_external_liquidity") or sweep.get("sweep_price")
+            if price:
+                poi_overlays.append({
+                    "type": "liquidity_sweep",
+                    "price": price,
+                    "label": "LIQ SWEEP"
+                })
+
+        # Gate 3: CHoCH / MSS
+        choch = gates.get("step_3_choch_mss_body_close", {})
+        if choch.get("passed"):
+            level = choch.get("level")
+            if level:
+                poi_overlays.append({
+                    "type": "choch",
+                    "price": level,
+                    "label": "CHoCH"
+                })
+
+        # Gate 4: Valid POI (HTF zone)
+        poi = gates.get("step_4_valid_poi", {})
+        if poi.get("passed"):
+            zone = poi.get("htf_zone")
+            if zone and len(zone) == 2:
+                chart_objects["htf_zone_high"] = zone[1]
+                chart_objects["htf_zone_low"] = zone[0]
+                poi_overlays.append({
+                    "type": "order_block",
+                    "high": zone[1],
+                    "low": zone[0],
+                    "label": "HTF POI"
+                })
+
+        # Gate 5: OB / FVG confluence
+        ob_fvg = gates.get("step_5_ob_fvg_confluence", {})
+        if ob_fvg.get("passed"):
+            # Example OB level (if your signal_engine provides it)
+            ob_level = ob_fvg.get("ob_level")
+            if ob_level:
+                chart_objects["ob_level"] = ob_level
+                poi_overlays.append({
+                    "type": "order_block",
+                    "price": ob_level,
+                    "label": "OB"
+                })
+            fvg_top = ob_fvg.get("fvg_top")
+            fvg_bottom = ob_fvg.get("fvg_bottom")
+            if fvg_top and fvg_bottom:
+                poi_overlays.append({
+                    "type": "fvg",
+                    "top": fvg_top,
+                    "bottom": fvg_bottom,
+                    "label": "FVG"
+                })
+
+        return poi_overlays, chart_objects
 
     # ── MT5 wrappers ──────────────────────────────────────────────────────────
     MT5_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
@@ -1379,7 +1459,9 @@ class XAUUSDTradingBot:
             chart_objects = build_chart_objects({}, {}, {}, bid)
         except Exception:
             chart_objects = {}
-
+        
+        # ── Build overlays from gates ─────────────────────────────────────────
+        poi_overlays, chart_objects = self.build_overlays_from_gates(result.gates, bid)
         analysis_snapshot = {
             "market_structure": {
                 "current_trend": current_bias,
@@ -1397,6 +1479,7 @@ class XAUUSDTradingBot:
             "pdl": float(market_data["low"].min()),
             "ltf_pois": {},
             "chart_objects": chart_objects,
+            "poi_overlays": poi_overlays,
             "signal_engine": {
                 "action": result.action,
                 "direction": result.direction,

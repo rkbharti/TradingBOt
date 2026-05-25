@@ -182,7 +182,21 @@ def parse_profit(x):
 
 def normalize_webhook_payload(payload: dict) -> tuple:
     if "bot_instance" in payload and "analysis_data" in payload:
-        return payload["bot_instance"], payload["analysis_data"]
+        bot_inst = payload["bot_instance"]
+        analysis = payload["analysis_data"]
+        # --- FIX: extract account fields from nested account dict ---
+        if "account" in bot_inst and isinstance(bot_inst["account"], dict):
+            account = bot_inst["account"]
+            bot_inst["account_login"] = account.get("login", "--")
+            bot_inst["account_server"] = account.get("server", "--")
+            # ensure equity/balance are also present at root (if missing)
+            if "equity" not in bot_inst:
+                bot_inst["equity"] = account.get("equity", 0.0)
+            if "balance" not in bot_inst:
+                bot_inst["balance"] = account.get("balance", 0.0)
+        # --- end of fix ---
+        return bot_inst, analysis
+
     if "bot" in payload and "analysis" in payload:
         return payload["bot"], payload["analysis"]
 
