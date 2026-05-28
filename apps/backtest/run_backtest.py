@@ -1,5 +1,6 @@
 import pandas as pd
 import csv
+import json
 from pathlib import Path
 from bisect import bisect_left
 from tradingbot.strategy.smc.signal_engine import SignalEngine
@@ -17,7 +18,18 @@ PROP_MAX_TOTAL_LOSS_PCT  = 0.06
 PROP_PROFIT_TARGET_PCT   = 0.06
 PROP_MIN_TRADING_DAYS    = 3
 PROP_CONSISTENCY_MAX_PCT = 1.00
-MIN_RR                   = 1.5
+
+# FIX #2: MIN_RR removed as a hardcoded constant.
+# Old value was 1.5 — creator calls this "low expectation."
+# RR minimum is now read from SignalEngineConfig.rr_min (currently 3.0).
+# This ensures backtest and live bot use the SAME RR threshold.
+# MIN_RR = 1.5  ← REMOVED
+
+# ── Warmup: D1 candles needed before first signal ─────────────
+# Creator uses 500 bars history (max_bars_back=500) on Daily
+# window=50 needs 100 bars minimum for first confirmed pivot
+# 120 used as safe buffer
+D1_WARMUP_CANDLES = 120
 
 
 # ─────────────────────────────────────────────────────────────
@@ -42,14 +54,13 @@ def load_data(path: Path) -> pd.DataFrame:
 
 def create_timeframes(df: pd.DataFrame):
     df_m5 = df.copy()
-
     df_m15 = (
         df_m5.resample("15min")
         .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
         .dropna()
     )
     df_h4 = (
-        df_m5.resample("4h")          # ✅ No arbitrary offset
+        df_m5.resample("4h")
         .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
         .dropna()
     )
@@ -58,45 +69,66 @@ def create_timeframes(df: pd.DataFrame):
         .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
         .dropna()
     )
-    # ✅ W1 added — required for _step_htf_bias W1 tier
     df_w1 = (
         df_m5.resample("1W")
         .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
         .dropna()
     )
-
     return df_d1, df_h4, df_m15, df_m5, df_w1
 
 
 # ─────────────────────────────────────────────────────────────
+def _print_config_snapshot(engine: SignalEngine):
+    cfg = engine.config
+    print("\n" + "=" * 60)
+    print("⚙️  ENGINE CONFIG SNAPSHOT")
+    print("=" * 60)
+    config_fields = [
+        ("internal_swing_window",   "M5 CHoCH pivot window (creator=5)"),
+        ("external_swing_window",   "HTF swing pivot window (creator=50)"),
+        ("atr_period",              "ATR period"),
+        ("min_atr_threshold",       "Min ATR for trade (volatility gate)"),
+        ("sweep_atr_tolerance",     "Sweep wick tolerance (ATR multiplier)"),
+        ("min_m5_candles",          "Min M5 candles required"),
+        ("min_m15_candles",         "Min M15 candles required"),
+        ("min_h4_candles",          "Min H4 candles required"),
+        ("min_d1_candles",          "Min D1 candles required"),
+        ("liquidity_lookback",      "Liquidity lookback window"),
+        ("d1_weight",               "D1 bias weight"),
+        ("h4_weight",               "H4 bias weight"),
+    ]
+    for field, description in config_fields:
+        val  = getattr(cfg, field, "N/A")
+        flag = ""
+        if field == "internal_swing_window" and isinstance(val, int) and val != 5:
+            flag = f"  ⚠️  Creator uses 5 — current={val}"
+        if field == "external_swing_window" and isinstance(val, int) and val != 50:
+            flag = f"  ⚠️  Creator uses 50 — current={val}"
+        print(f"  {field:<30} = {val:<10}  # {description}{flag}")
+    print(f"\n  {'D1_WARMUP_CANDLES':<30} = {D1_WARMUP_CANDLES:<10}  # D1 bars before first signal")
+    print("=" * 60)
+
+
+# ─────────────────────────────────────────────────────────────
 def _print_prop_report(
-    capital: float,
-    initial_capital: float,
-    max_dd: float,
-    daily_pnl: dict,
-    daily_start_equity: dict,   # ✅ start-of-day equity per date
-    daily_min_equity: dict,
-    trade_dates: set,
+    capital, initial_capital, max_dd,
+    daily_pnl, daily_start_equity, daily_min_equity, trade_dates,
 ):
     print("\n" + "=" * 60)
     print("🏦  PROP FIRM SIMULATION REPORT")
     print("=" * 60)
 
-    # 1. Profit Target
     profit_pct = (capital - initial_capital) / initial_capital * 100
     profit_hit = capital >= initial_capital * (1 + PROP_PROFIT_TARGET_PCT)
     print(f"\n📈 PROFIT TARGET ({PROP_PROFIT_TARGET_PCT*100:.0f}%)")
     print(f"   Result : {profit_pct:+.2f}%  →  {'✅ PASSED' if profit_hit else '❌ NOT REACHED'}")
 
-    # 2. Max Total Drawdown
     total_loss_safe = max_dd < PROP_MAX_TOTAL_LOSS_PCT
     print(f"\n📉 MAX TOTAL DRAWDOWN (limit {PROP_MAX_TOTAL_LOSS_PCT*100:.0f}%)")
     print(f"   Result : {max_dd*100:.2f}%  →  {'✅ SAFE' if total_loss_safe else '❌ BREACHED'}")
 
-    # 3. Max Daily Loss — ✅ compare vs start-of-day equity
     daily_loss_limit_pct = PROP_MAX_DAILY_LOSS_PCT * 100
     daily_loss_limit_abs = initial_capital * PROP_MAX_DAILY_LOSS_PCT
-
     worst_day_pnl  = min(daily_pnl.values()) if daily_pnl else 0.0
     worst_day_date = min(daily_pnl, key=daily_pnl.get) if daily_pnl else "N/A"
     worst_day_pct  = abs(worst_day_pnl) / initial_capital * 100
@@ -108,25 +140,20 @@ def _print_prop_report(
         if drop_pct >= daily_loss_limit_pct:
             equity_breach_days.append((d, drop_pct))
 
-    daily_loss_safe = (
-        worst_day_pnl > -daily_loss_limit_abs and
-        len(equity_breach_days) == 0
-    )
+    daily_loss_safe = worst_day_pnl > -daily_loss_limit_abs and len(equity_breach_days) == 0
     print(f"\n🗓️  MAX DAILY LOSS (limit {daily_loss_limit_pct:.0f}% = ₹{daily_loss_limit_abs:,.0f})")
     print(f"   Worst day : {worst_day_date}  →  ₹{worst_day_pnl:+,.2f}  ({-worst_day_pct:.2f}%)")
     for bd, bdrop in equity_breach_days:
         print(f"   ⚠️  Equity breach : {bd}  ({bdrop:.2f}% intraday)")
     print(f"   Status : {'✅ SAFE' if daily_loss_safe else '❌ BREACHED'}")
 
-    # 4. Minimum Trading Days
-    n_days    = len(trade_dates)
-    days_met  = n_days >= PROP_MIN_TRADING_DAYS
+    n_days   = len(trade_dates)
+    days_met = n_days >= PROP_MIN_TRADING_DAYS
     print(f"\n📅 MINIMUM TRADING DAYS (required {PROP_MIN_TRADING_DAYS})")
     print(f"   Result : {n_days} days  →  {'✅ MET' if days_met else '❌ NOT MET'}")
     if trade_dates:
         print(f"   Dates  : {sorted(trade_dates)}")
 
-    # 5. Consistency
     total_profit = sum(v for v in daily_pnl.values() if v > 0)
     if total_profit > 0 and daily_pnl:
         best_day_pnl   = max(daily_pnl.values())
@@ -140,7 +167,6 @@ def _print_prop_report(
         consistency_ok = True
         print("\n⚖️  CONSISTENCY : N/A")
 
-    # 6. Verdict
     all_passed = all([profit_hit, total_loss_safe, daily_loss_safe, days_met, consistency_ok])
     print("\n" + "─" * 60)
     print("🏆  OVERALL PROP CHALLENGE VERDICT:")
@@ -160,48 +186,153 @@ def _print_prop_report(
 
 
 # ─────────────────────────────────────────────────────────────
-def run_backtest(df: pd.DataFrame):
-    engine  = SignalEngine()
-    capital = INITIAL_CAPITAL
+def _print_diagnostic_report(engine, trade_log, data_year):
+    print("\n" + "=" * 60)
+    print(f"🔬  DIAGNOSTIC REPORT — {data_year}")
+    print("=" * 60)
+
+    if not trade_log:
+        print("  No trades to analyze.")
+        return
+
+    bull_trades = [t for t in trade_log if t["direction"] == "BULLISH"]
+    bear_trades = [t for t in trade_log if t["direction"] == "BEARISH"]
+    bull_wins   = [t for t in bull_trades if t["outcome"] == "WIN"]
+    bear_wins   = [t for t in bear_trades if t["outcome"] == "WIN"]
+
+    print(f"\n📊 DIRECTION BREAKDOWN:")
+    if bull_trades:
+        print(f"   BULLISH : {len(bull_trades)} trades | {len(bull_wins)/len(bull_trades)*100:.1f}% WR")
+    else:
+        print(f"   BULLISH : 0 trades")
+    if bear_trades:
+        print(f"   BEARISH : {len(bear_trades)} trades | {len(bear_wins)/len(bear_trades)*100:.1f}% WR")
+    else:
+        print(f"   BEARISH : 0 trades")
+
+    rr_values = [t["rr"] for t in trade_log if t.get("rr")]
+    if rr_values:
+        print(f"\n📐 RR ANALYSIS:")
+        print(f"   Avg RR : {sum(rr_values)/len(rr_values):.2f}")
+        print(f"   Min RR : {min(rr_values):.2f}")
+        print(f"   Max RR : {max(rr_values):.2f}")
+
+    monthly = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
+    for t in trade_log:
+        m = t["date"][:7]
+        monthly[m]["trades"] += 1
+        if t["outcome"] == "WIN":
+            monthly[m]["wins"] += 1
+        monthly[m]["pnl"] += t["pnl"]
+
+    print(f"\n📅 MONTHLY BREAKDOWN:")
+    print(f"   {'Month':<10} {'Trades':>7} {'WR':>8} {'PnL':>12}")
+    print(f"   {'-'*40}")
+    for month in sorted(monthly.keys()):
+        m    = monthly[month]
+        wr   = m["wins"] / m["trades"] * 100 if m["trades"] > 0 else 0
+        flag = "✅" if m["pnl"] > 0 else "❌"
+        print(f"   {month:<10} {m['trades']:>7} {wr:>7.1f}% {m['pnl']:>+12,.2f}  {flag}")
+
+    rejection_counts = getattr(engine, "rejection_counts", {})
+    total_rejections = sum(rejection_counts.values())
+    total_signals    = total_rejections + len(trade_log)
+    print(f"\n🚦 SIGNAL EFFICIENCY:")
+    print(f"   Total signals : {total_signals:,}")
+    print(f"   Trades taken  : {len(trade_log)}")
+    if total_signals > 0:
+        print(f"   Conversion    : {len(trade_log)/total_signals*100:.4f}%")
+
+    max_cl = cc = 0
+    for t in trade_log:
+        cc = cc + 1 if t["outcome"] == "LOSS" else 0
+        max_cl = max(max_cl, cc)
+    max_cw = cw = 0
+    for t in trade_log:
+        cw = cw + 1 if t["outcome"] == "WIN" else 0
+        max_cw = max(max_cw, cw)
+
+    print(f"\n📉 STREAK ANALYSIS:")
+    print(f"   Max consecutive losses : {max_cl}")
+    print(f"   Max consecutive wins   : {max_cw}")
+    print("=" * 60)
+
+
+# ─────────────────────────────────────────────────────────────
+def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None):
+    engine       = SignalEngine()
+    capital      = INITIAL_CAPITAL
+    peak_capital = INITIAL_CAPITAL
+    max_dd       = 0.0
+
+    _print_config_snapshot(engine)
 
     active_trade     = None
     last_entry_price = None
     last_entry_dir   = None
 
-    peak_capital = INITIAL_CAPITAL
-    max_dd       = 0.0
-
     daily_pnl          = defaultdict(float)
-    daily_start_equity = {}                          # ✅ track per-day start equity
+    daily_start_equity = {}
     daily_min_equity   = defaultdict(lambda: float("inf"))
     trade_dates        = set()
+    trade_log          = []
 
     logger = BacktestLogger(reset=False)
     run_id = str(uuid.uuid4())[:8]
     logger.start_run(run_id)
 
-    df_d1, df_h4, df_m15, df_m5, df_w1 = create_timeframes(df)  # ✅ W1 added
+    df_d1, df_h4, df_m15, df_m5, df_w1 = create_timeframes(df)
 
     m15_index = list(df_m15.index)
     h4_index  = list(df_h4.index)
     d1_index  = list(df_d1.index)
     w1_index  = list(df_w1.index)
 
+    print(f"\n📊 DATA QUALITY REPORT:")
+    print(f"   M5  candles : {len(df_m5):,}")
+    print(f"   M15 candles : {len(df_m15):,}")
+    print(f"   H4  candles : {len(df_h4):,}")
+    print(f"   D1  candles : {len(df_d1):,}")
+    print(f"   W1  candles : {len(df_w1):,}")
+    print(f"   Date range  : {df_m5.index[0].date()} → {df_m5.index[-1].date()}")
+
+    # ✅ Find warmup point — where D1 has D1_WARMUP_CANDLES available
+    warmup_start_idx = 200
+    for idx in range(200, len(df_m5)):
+        t      = df_m5.index[idx]
+        d1_pos = bisect_left(d1_index, t)
+        h4_pos = bisect_left(h4_index, t)
+        if d1_pos >= D1_WARMUP_CANDLES and h4_pos >= 50:
+            warmup_start_idx = idx
+            break
+
+    # ✅ If start_date given — skip to that date but warmup still respected
+    eval_start_idx = warmup_start_idx
+    if start_date:
+        start_dt = pd.Timestamp(start_date)
+        for idx in range(warmup_start_idx, len(df_m5)):
+            if df_m5.index[idx] >= start_dt:
+                eval_start_idx = idx
+                break
+        print(f"⏩ Signals evaluated from {start_date} "
+              f"(warmup at bar {warmup_start_idx} = {df_m5.index[warmup_start_idx].date()})")
+    else:
+        print(f"⏩ Warmup complete at bar {warmup_start_idx} "
+              f"({df_m5.index[warmup_start_idx].date()}) — evaluating from here")
+
     print(f"\n🚀 START BACKTEST | RUN_ID: {run_id} | CAPITAL: ₹{capital:,.0f}")
     print("=" * 60)
 
-    cfg       = engine.config
-    start_idx = 200
+    cfg               = engine.config
+    first_iter_logged = False
 
-    for i in range(start_idx, len(df_m5)):
+    for i in range(eval_start_idx, len(df_m5)):
         current_time = df_m5.index[i]
         candle       = df_m5.iloc[i]
         today_str    = str(current_time.date())
 
-        # ✅ Record start-of-day equity once per day
         if today_str not in daily_start_equity:
             daily_start_equity[today_str] = capital
-
         daily_min_equity[today_str] = min(daily_min_equity[today_str], capital)
 
         m15_idx = bisect_left(m15_index, current_time)
@@ -210,27 +341,28 @@ def run_backtest(df: pd.DataFrame):
         w1_idx  = bisect_left(w1_index,  current_time)
 
         if (
-            i          < cfg.min_m5_candles  or
-            m15_idx    < cfg.min_m15_candles or
-            h4_idx     < cfg.min_h4_candles  or
-            d1_idx     < cfg.min_d1_candles
+            i       < cfg.min_m5_candles  or
+            m15_idx < cfg.min_m15_candles or
+            h4_idx  < 50                  or
+            d1_idx  < D1_WARMUP_CANDLES
         ):
             continue
 
-        # ✅ FIX: i+1 not i+50 — no look-ahead bias
-        m5  = df_m5.iloc[max(0, i - 500) : i + 1]
+        # ✅ Slices aligned with creator's 500-bar max_bars_back
+        m5  = df_m5.iloc[max(0, i       - 500) : i + 1]
         m15 = df_m15.iloc[max(0, m15_idx - 100) : m15_idx]
-        h4  = df_h4.iloc[max(0,  h4_idx  - 50)  : h4_idx]
-        d1  = df_d1.iloc[max(0,  d1_idx  - 30)  : d1_idx]
-        w1  = df_w1.iloc[max(0,  w1_idx  - 20)  : w1_idx]  # ✅ W1 slice
+        h4  = df_h4.iloc[max(0, h4_idx  - 300)  : h4_idx]
+        d1  = df_d1.iloc[max(0, d1_idx  - 300)  : d1_idx]
+        w1  = df_w1.iloc[max(0, w1_idx  - 100)  : w1_idx]
+
+        if not first_iter_logged:
+            print(f"[SLICE CHECK] m5={len(m5)} m15={len(m15)} "
+                  f"h4={len(h4)} d1={len(d1)} w1={len(w1)} @ {current_time.date()}")
+            first_iter_logged = True
 
         result = engine.evaluate(
-            m5_df=m5,
-            m15_df=m15,
-            h4_df=h4,
-            d1_df=d1,
-            w1_df=w1,             # ✅ passed to engine
-            now_utc=current_time,
+            m5_df=m5, m15_df=m15, h4_df=h4,
+            d1_df=d1, w1_df=w1, now_utc=current_time,
         )
 
         # ── ENTRY ────────────────────────────────────────────
@@ -242,40 +374,36 @@ def run_backtest(df: pd.DataFrame):
 
             if not all([entry, sl, tp, direction]):
                 continue
-
             risk_pts = abs(entry - sl)
             if risk_pts == 0:
                 continue
-
             rr = abs(tp - entry) / risk_pts
-            if rr < MIN_RR:
+
+            # FIX #2: Use engine config RR minimum (3.0) — not hardcoded 1.5.
+            # Backtest now matches live bot exactly.
+            if rr < cfg.rr_min:
                 continue
 
-            # ✅ FIX: ATR-based duplicate filter — not hardcoded 0.5
             if last_entry_price is not None and last_entry_dir == direction:
-                atr = engine._calc_atr(m5, len(m5) - 1, cfg.atr_period)
+                atr      = engine._calc_atr(m5, len(m5) - 1, cfg.atr_period)
                 min_dist = (atr * 0.5) if atr else 0.5
                 if abs(entry - last_entry_price) < min_dist:
                     continue
 
-            risk          = capital * RISK_PER_TRADE
+            risk             = capital * RISK_PER_TRADE
             last_entry_price = entry
             last_entry_dir   = direction
-
-            active_trade = {
-                "entry":     entry,
-                "sl":        sl,
-                "tp":        tp,
-                "direction": direction,
-                "risk":      risk,
-                "rr":        rr,
+            # FIX #10: Log entry_module from signal result
+            entry_module     = getattr(result, "entry_module", "GENERIC")
+            active_trade     = {
+                "entry": entry, "sl": sl, "tp": tp,
+                "direction": direction, "risk": risk, "rr": rr,
+                "date": today_str, "open_time": str(current_time),
+                "entry_module": entry_module,
             }
-
-            logger.log_trade_open(
-                str(current_time), direction, entry, sl, tp, risk,
-            )
+            logger.log_trade_open(str(current_time), direction, entry, sl, tp, risk)
             print(f"\n[ENTRY] {current_time}")
-            print(f"  {direction} @ {entry} | SL: {sl} | TP: {tp} | RR: {round(rr, 2)}")
+            print(f"  {direction} @ {entry} | SL: {sl} | TP: {tp} | RR: {round(rr,2)} | Module: {entry_module}")
 
         # ── EXIT ─────────────────────────────────────────────
         if active_trade is not None:
@@ -296,36 +424,45 @@ def run_backtest(df: pd.DataFrame):
             )
 
             if sl_hit:
-                capital                    -= risk
-                daily_pnl[today_str]       -= risk
+                capital -= risk
+                daily_pnl[today_str] -= risk
                 trade_dates.add(today_str)
                 daily_min_equity[today_str] = min(daily_min_equity[today_str], capital)
-
                 dd = (peak_capital - capital) / peak_capital
                 if dd > max_dd:
                     max_dd = dd
-
                 logger.log_trade_close(str(current_time), "SL_HIT", -risk)
                 print(f"[EXIT] {current_time} | LOSS | ₹{capital:,.2f} | DD: {max_dd*100:.2f}%")
+                trade_log.append({
+                    "date": active_trade["date"], "open_time": active_trade["open_time"],
+                    "close_time": str(current_time), "direction": direction,
+                    "entry": entry, "sl": sl, "tp": tp, "rr": round(rr, 2),
+                    "outcome": "LOSS", "pnl": round(-risk, 2),
+                    "entry_module": active_trade.get("entry_module", "GENERIC"),
+                })
                 active_trade = None
                 continue
 
             if tp_hit:
-                pnl                  = risk * rr
-                capital             += pnl
+                pnl = risk * rr
+                capital += pnl
                 daily_pnl[today_str] += pnl
                 trade_dates.add(today_str)
-
                 if capital > peak_capital:
                     peak_capital = capital
-
                 logger.log_trade_close(str(current_time), "TP_HIT", pnl)
                 print(f"[EXIT] {current_time} | WIN  | ₹{capital:,.2f} | Peak: ₹{peak_capital:,.2f}")
+                trade_log.append({
+                    "date": active_trade["date"], "open_time": active_trade["open_time"],
+                    "close_time": str(current_time), "direction": direction,
+                    "entry": entry, "sl": sl, "tp": tp, "rr": round(rr, 2),
+                    "outcome": "WIN", "pnl": round(pnl, 2),
+                    "entry_module": active_trade.get("entry_module", "GENERIC"),
+                })
                 active_trade = None
 
     summary = logger.finalize_run(capital, INITIAL_CAPITAL, max_dd)
 
-    # ── Summary ───────────────────────────────────────────────
     print("\n" + "=" * 60)
     if hasattr(engine, "_htf_poi_debug_totals"):
         print(f"[HTF POI DEBUG TOTALS] {engine._htf_poi_debug_totals}")
@@ -335,32 +472,48 @@ def run_backtest(df: pd.DataFrame):
     print("=" * 60)
 
     engine.print_gate_summary()
-
     _print_prop_report(
-        capital=capital,
-        initial_capital=INITIAL_CAPITAL,
-        max_dd=max_dd,
-        daily_pnl=dict(daily_pnl),
-        daily_start_equity=daily_start_equity,  # ✅
-        daily_min_equity=dict(daily_min_equity),
-        trade_dates=trade_dates,
+        capital=capital, initial_capital=INITIAL_CAPITAL, max_dd=max_dd,
+        daily_pnl=dict(daily_pnl), daily_start_equity=daily_start_equity,
+        daily_min_equity=dict(daily_min_equity), trade_dates=trade_dates,
     )
+    _print_diagnostic_report(engine, trade_log, data_label)
 
-    # ── Bias debug CSV ────────────────────────────────────────
-    out_dir  = Path("output")
+    out_dir = Path("output")
     out_dir.mkdir(parents=True, exist_ok=True)
-    bias_path = out_dir / "htf_bias_debug_2023.csv"
-    rows      = getattr(engine, "_bias_debug_rows", [])
 
+    rows = getattr(engine, "_bias_debug_rows", [])
     if rows:
-        # ✅ Updated fieldnames include w1_bias and is_pullback
+        bias_path  = out_dir / f"htf_bias_debug_{data_label}.csv"
         fieldnames = ["time", "w1_bias", "d1_bias", "h4_bias",
                       "direction", "reason", "is_pullback"]
         with bias_path.open("w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
-        print(f"HTF bias debug written to {bias_path}")
+        print(f"HTF bias debug  → {bias_path}")
+
+    if trade_log:
+        trade_path   = out_dir / f"trade_log_{data_label}.csv"
+        trade_fields = ["date", "open_time", "close_time", "direction",
+                        "entry", "sl", "tp", "rr", "outcome", "pnl", "entry_module"]
+        with trade_path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=trade_fields)
+            writer.writeheader()
+            writer.writerows(trade_log)
+        print(f"Trade log       → {trade_path}")
+
+    rejection_counts = getattr(engine, "rejection_counts", {})
+    gate_path = out_dir / f"gate_rejections_{data_label}.json"
+    with gate_path.open("w") as f:
+        json.dump(rejection_counts, f, indent=2)
+    print(f"Gate rejections → {gate_path}")
+
+    if hasattr(engine, "_htf_poi_debug_totals"):
+        poi_path = out_dir / f"htf_poi_debug_{data_label}.json"
+        with poi_path.open("w") as f:
+            json.dump(engine._htf_poi_debug_totals, f, indent=2)
+        print(f"HTF POI debug   → {poi_path}")
 
     return summary
 
@@ -370,17 +523,22 @@ if __name__ == "__main__":
     import argparse, time
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", required=True, help="Path to CSV data file")
+    parser.add_argument("--data",       required=True,  help="Path to CSV data file")
+    parser.add_argument("--label",      required=False, default="",   help="Label e.g. 2023")
+    parser.add_argument("--start_date", required=False, default=None,
+                        help="Evaluate from this date e.g. 2023-06-01 (warmup still loads)")
     args = parser.parse_args()
 
     data_path = Path(args.data)
     if not data_path.exists():
         raise FileNotFoundError(f"Data file not found: {data_path}")
 
+    label = args.label or data_path.stem.replace("data_", "").replace("data", "")
+
     print(f"\n📂 Loading data from: {data_path}")
     df = load_data(data_path)
     print(f"✅ Loaded {len(df)} candles")
 
     t0 = time.time()
-    run_backtest(df)
+    run_backtest(df, data_label=label, start_date=args.start_date)
     print(f"\n⏱ Total runtime: {time.time() - t0:.2f}s")

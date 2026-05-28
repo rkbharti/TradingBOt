@@ -342,8 +342,12 @@ class OrderExecutor:
             # =========================================================================
 
             try:
-                # Use PositionSizer's configured minimum RR
-                min_rr_required = getattr(self.position_sizer, "min_rr", 2.5)
+                # FIX #3: Read RR minimum from position_sizer.min_rr directly.
+                # Old code used getattr fallback of 2.5 — inconsistent with
+                # SignalEngineConfig.rr_min (now 3.0) and backtest (was 1.5).
+                # position_sizer.min_rr is set from SignalEngineConfig.rr_min
+                # in main.py, so this is now a single source of truth.
+                min_rr_required = self.position_sizer.min_rr
 
                 rr_validation: RiskRewardValidation = self.position_sizer.validate_rr(
                     entry_price=signal.entry_price,

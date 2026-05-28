@@ -227,44 +227,25 @@ class MultiTimeframeFractal:
         return result
     
     
-    def detect_idm(self, df: pd.DataFrame) -> dict:
-        result = {
-            'idm_detected': False,
-            'idm_type': 'NONE',
-            'probability': 0
-        }
-        
-        if len(df) < 5:
-            return result
-        
-        recent = df.iloc[-5:].copy()
-        recent['body'] = abs(recent['close'] - recent['open'])
-        recent['range'] = recent['high'] - recent['low']
-        
-        large_wick_count = 0
-        small_body_count = 0
-        
-        for idx, row in recent.iterrows():
-            body_ratio = row['body'] / row['range'] if row['range'] > 0 else 0
-            
-            if body_ratio < 0.3:
-                small_body_count += 1
-            
-            upper_wick = row['high'] - max(row['open'], row['close'])
-            if row['range'] > 0 and upper_wick > row['range'] * 0.6:
-                large_wick_count += 1
-        
-        if large_wick_count >= 3 and small_body_count >= 3:
-            result['idm_detected'] = True
-            result['idm_type'] = 'BEARISH_IDM'
-            result['probability'] = min(100, (large_wick_count / 5) * 100)
-        
-        return result
-    
-    
     def analyze_timeframe(self, timeframe: str, bars=300) -> dict:
-        df = self.fetch_data(timeframe, bars=bars)
-        if df is None:
+        """
+        Analyze a single timeframe for BOS, CHoCH bias.
+
+        NOTE: detect_idm() was removed from this class (Fix #12).
+        The old implementation used wick ratios and doji counts to detect IDM —
+        this is completely wrong. IDM is NOT a candle pattern; it is the first
+        internal swing after a BOS, as defined by the creator in Lecture 3.
+        Proper IDM detection now lives in SignalEngine._detect_idm() which
+        correctly identifies the first swing low/high after a BOS and checks
+        if it has been swept by a wick (body close not required).
+        """
+        raw = self.fetch_data(timeframe, bars=bars)
+        # fetch_data returns a dict — extract the DataFrame
+        if isinstance(raw, dict):
+            df = raw.get("df")
+        else:
+            df = raw
+        if df is None or len(df) == 0:
             return None
         print(f"{timeframe} candles loaded:", len(df))
         
@@ -280,8 +261,10 @@ class MultiTimeframeFractal:
         swing_highs, swing_lows = self.detect_swing_points(df, sensitivity=sens)
         bos = self.detect_bos(df, swing_highs, swing_lows)
         choc = self.detect_choc(df, swing_highs, swing_lows)
-        idm = self.detect_idm(df)
-        
+        # FIX #12: detect_idm() call removed — method was deleted because it
+        # used wick ratios / doji counts which is NOT how IDM works.
+        # IDM detection is now in SignalEngine._detect_idm().
+
         bias_score = 0
         if bos['bullish_bos']:
             bias_score += 2
@@ -291,26 +274,25 @@ class MultiTimeframeFractal:
             bias_score += 1
         if choc['bearish_choc']:
             bias_score -= 1
-        
+
         if bias_score > 0:
             bias = 'BULLISH'
         elif bias_score < 0:
             bias = 'BEARISH'
         elif choc['bullish_choc']:
-            bias = 'BULLISH'   # CHoCH alone = bias signal
+            bias = 'BULLISH'
         elif choc['bearish_choc']:
             bias = 'BEARISH'
         else:
             bias = 'NEUTRAL'
-        
+
         return {
-            'timeframe': timeframe,
-            'bias': bias,
-            'bos': bos,
-            'choc': choc,
-            'idm': idm,
-            'swing_highs': len(swing_highs),
-            'swing_lows': len(swing_lows)
+            'timeframe':    timeframe,
+            'bias':         bias,
+            'bos':          bos,
+            'choc':         choc,
+            'swing_highs':  len(swing_highs),
+            'swing_lows':   len(swing_lows),
         }
     #day 7
     # =========================================================

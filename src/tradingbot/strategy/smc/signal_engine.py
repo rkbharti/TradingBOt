@@ -19,14 +19,16 @@ VALID_POI_TYPES = {
     "CHOCH_SWEEP",
 }
 
-# Killzones in UTC (Guardeer Lecture 10, converted from IST)
-# London Open KZ: 12:30 PM - 2:30 PM IST -> 07:00-09:00 UTC
-# New York Open KZ: 6:30 PM - 9:00 PM IST -> 13:00-15:30 UTC
+# Killzones in UTC — aligned with creator's NY-time windows (Lecture 10)
+# Creator: London 02:00–05:00 NY = 07:00–10:00 UTC
+# Creator: New York 07:00–12:00 NY = 12:00–17:00 UTC
+# Asian session is hard-blocked (fake liquidity, wide spreads on XAUUSD)
+# FIX #11: Widened London (was 07:00-09:00) and NY (was 13:00-15:30) to match
+#          the creator's actual kill zone boundaries from Lecture 10.
 KILLZONES_UTC: List[Tuple[time, time, str]] = [
     (time(0, 0),  time(3, 0),   "ASIAN"),
-    (time(7, 0),  time(9, 0),   "LONDON"),
-    (time(13, 0), time(15, 30), "NEW_YORK"),
-    (time(16, 0), time(18, 0),  "LONDON_CLOSE"),
+    (time(7, 0),  time(10, 0),  "LONDON"),
+    (time(12, 0), time(17, 0),  "NEW_YORK"),
 ]
 
 # ─── Dataclasses ──────────────────────────────────────────────────────────────
@@ -41,6 +43,10 @@ class SignalResult:
     gates: Dict[str, Dict[str, Any]]
     reason: str
     confidence_score: int
+    # FIX #10: Entry module classification — identifies which of the creator's
+    # 5 Entry Modules triggered. Used for confidence scoring and audit logging.
+    # Values: IDM_SWEEP, IDM_ORDER_BLOCK, EXTREME_OB, BOS_SWEEP, CHOCH_SWEEP, GENERIC
+    entry_module: str = "GENERIC"
 
 
 @dataclass(frozen=True)
@@ -83,30 +89,44 @@ class FVG:
 
 @dataclass
 class SignalEngineConfig:
+    # ── Timeframe bias weights ─────────────────────────────────────────────────
+    # FIX #6: Added w1_weight = 5. Creator: "Higher timeframe values are greater
+    # than lower timeframe values." W1 is the boss — must outweigh D1 and H4.
+    # Old code used getattr fallback of 1.0 which made W1 the WEAKEST TF. Wrong.
+    w1_weight: int = 5
     d1_weight: int = 4
     h4_weight: int = 3
 
-    external_swing_window: int = 3
+    external_swing_window: int = 50
     # ✅ FIX #1 — Pine Script internal_r_lookback defaults to 5 (iLen=5).
     # Was incorrectly set to 2, producing hyper-sensitive micro-pivots on every
     # minor wiggle and flooding CHoCH detection with false structure breaks.
     internal_swing_window: int = 5
 
     recent_sweep_bars: int = 80
-    liquidity_lookback: int = 120
+    liquidity_lookback: int = 80
 
     atr_period: int = 14
-    atr_sl_multiplier: float = 0.5
+    # FIX #3b (SL buffer): Reduced from 0.5 to 0.3 for refined OBs.
+    # Creator says "give a little buffer" — 0.5x ATR was too wide on XAUUSD.
+    # With wick-to-wick OB zones (FIX #4), the OB itself already includes the
+    # wick, so the additional buffer only needs to cover minor noise.
+    atr_sl_multiplier: float = 0.3
 
-    sweep_atr_tolerance: float = 0.15
+    sweep_atr_tolerance: float = 0.25
     min_atr_threshold: float = 0.05
 
     min_m5_candles: int = 50
     min_m15_candles: int = 50
-    min_h4_candles: int = 20
-    min_d1_candles: int = 20
+    min_h4_candles: int = 200
+    min_d1_candles: int = 120
 
-    rr_min: float = 2.0
+    # FIX #1: rr_min raised from 2.0 → 3.0.
+    # Creator: minimum 1:3. Targets 1:4, 1:5, 1:10+.
+    # Creator explicitly calls 1:1.5 "low expectation" and 1:2 borderline.
+    # This is the SINGLE SOURCE OF TRUTH for RR — backtest and executor
+    # both read from this value. No more three different RR minimums.
+    rr_min: float = 3.0
 
     time_column: str = "time"
     open_col: str = "open"
@@ -297,6 +317,51 @@ class SignalEngine:
         if not step8["passed"]:
             return _reject(gates, step8["reason"], direction=direction)
 
+        # ─── FIX #8/#9: IFSC detection — upgrade entry price if IFSC found ──
+        # Creator: for sweep entries the IFSC close IS the entry price.
+        # We scan M5 candles inside the selected POI zone for an IFSC candle.
+        # If found, use its close as entry (more precise than OB/FVG overlap).
+        # If not found, fall back to the existing overlap-based entry_price.
+        ifsc_result = self._detect_ifsc(
+            df=m5_df,
+            direction=direction,
+            zone_low=selected_poi.low,
+            zone_high=selected_poi.high,
+            scan_start=structure_break.candle_index,
+            scan_end=min(len(m5_df) - 1, structure_break.candle_index + 50),
+        )
+        if ifsc_result is not None:
+            entry_price = ifsc_result["entry_price"]
+            gates["step_5_ob_fvg_confluence"]["ifsc_detected"] = True
+            gates["step_5_ob_fvg_confluence"]["ifsc_entry"]    = entry_price
+        else:
+            gates["step_5_ob_fvg_confluence"]["ifsc_detected"] = False
+
+        # ─── FIX #7: IDM detection — enrich gate data ────────────────
+        # Detect IDM relative to the sweep candle (sweep acts as the BOS proxy
+        # on M5 — the sweep itself is the structural move we're trading off).
+        idm_result = self._detect_idm(
+            df=m5_df,
+            direction=direction,
+            bos_candle_idx=structure_break.candle_index,
+            lookback=60,
+        )
+        gates["step_3_choch_mss_body_close"]["idm_detected"] = idm_result is not None
+        gates["step_3_choch_mss_body_close"]["idm_swept"]    = (
+            idm_result.get("is_swept", False) if idm_result else False
+        )
+        gates["step_3_choch_mss_body_close"]["idm_level"]    = (
+            idm_result.get("idm_level") if idm_result else None
+        )
+
+        # ─── FIX #10: Entry module classification + confidence score ─
+        entry_module, confidence = self._classify_entry_module(
+            poi=selected_poi,
+            structure_break=structure_break,
+            ifsc_result=ifsc_result,
+            idm_result=idm_result,
+        )
+
         # ─── All Gates Passed ────────────────────────────────────────
         return SignalResult(
             action="ENTER",
@@ -306,7 +371,8 @@ class SignalEngine:
             tp_price=self._r(tp_price),
             gates=gates,
             reason="ALL_GATES_PASSED",
-            confidence_score=100,
+            confidence_score=confidence,
+            entry_module=entry_module,
         )
 
     def print_gate_summary(self):
@@ -385,7 +451,7 @@ class SignalEngine:
                 "agreement_score": (
                     self.config.d1_weight +
                     self.config.h4_weight +
-                    getattr(self.config, "w1_weight", 1.0)
+                    self.config.w1_weight
                 ),
             }
 
@@ -409,7 +475,7 @@ class SignalEngine:
                 "d1_bias":         d1_bias,
                 "h4_bias":         h4_bias,
                 "is_pullback":     is_pullback,
-                "agreement_score": getattr(self.config, "w1_weight", 1.0),
+                "agreement_score": self.config.w1_weight,
             }
 
         # ─────────────────────────────────────────────────────────────────
@@ -827,7 +893,7 @@ class SignalEngine:
                 if atr is None:
                     continue
 
-                look_fwd = min(len(df) - 1, idx + 5)
+                look_fwd = min(len(df) - 1, idx + 3)
                 fvgs = self._find_fvgs(
                     df, direction,
                     start=idx + 1,
@@ -1533,6 +1599,330 @@ class SignalEngine:
             "sl_buffer": self._r(sl_buffer),
         }, sl, tp
 
+    # ── IDM Detection (FIX #7) ────────────────────────────────────────────────
+
+    def _detect_idm(
+        self,
+        df: pd.DataFrame,
+        direction: str,
+        bos_candle_idx: int,
+        lookback: int = 80,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        FIX #7 — Proper IDM (Inducement) detection per creator's Lecture 3.
+
+        Creator's exact definition:
+        "The first swing on the left side [after BOS] is our IDM."
+        IDM = the FIRST internal swing formed AFTER a BOS, before the next
+        structural high/low is confirmed.
+
+        Rules implemented:
+        1. Find the first confirmed swing low (bullish) or swing high (bearish)
+           that formed AFTER the BOS candle index.
+        2. Check if that swing has been swept:
+           - Wick sweep is SUFFICIENT (body close NOT required).
+           - Creator: "wick ban jaye to bhi chalega" (wick is enough).
+        3. Validate it is NOT an inside bar (inside bars cannot be IDM).
+           An inside bar is a candle whose high < prior candle high AND
+           low > prior candle low — fully contained within the prior candle.
+        4. The sweep candle must close back above (bullish) or below (bearish)
+           the IDM level — this is the IFSC pattern.
+
+        Returns dict with:
+            idm_level: float — the IDM swing price
+            idm_candle_idx: int — index of the IDM swing candle
+            sweep_candle_idx: int — index of the candle that swept IDM
+            is_swept: bool — whether IDM has been taken
+            is_ifsc: bool — whether the sweep candle closed back (IFSC pattern)
+        Returns None if no valid IDM found.
+        """
+        if len(df) < bos_candle_idx + 3:
+            return None
+
+        w = self.config.internal_swing_window
+        raw_highs, raw_lows = self._find_m5_choch_pivots(df, w)
+
+        scan_end = min(len(df), bos_candle_idx + lookback)
+
+        def _is_inside_bar(df: pd.DataFrame, idx: int) -> bool:
+            """Inside bar: fully contained within the prior candle. Invalid IDM."""
+            if idx < 1:
+                return False
+            curr_high = float(df["high"].iat[idx])
+            curr_low  = float(df["low"].iat[idx])
+            prev_high = float(df["high"].iat[idx - 1])
+            prev_low  = float(df["low"].iat[idx - 1])
+            return curr_high < prev_high and curr_low > prev_low
+
+        if direction == "BULLISH":
+            # First swing LOW after BOS = IDM for bullish setups
+            idm_candidates = [
+                idx for idx in raw_lows
+                if bos_candle_idx < idx < scan_end
+                and not _is_inside_bar(df, idx)
+            ]
+            if not idm_candidates:
+                return None
+
+            idm_idx   = idm_candidates[0]  # FIRST swing low after BOS
+            idm_level = float(df["low"].iat[idm_idx])
+
+            # Check if IDM has been swept (wick below idm_level is enough)
+            for sweep_idx in range(idm_idx + 1, scan_end):
+                candle_low   = float(df["low"].iat[sweep_idx])
+                candle_close = float(df["close"].iat[sweep_idx])
+
+                wick_swept = candle_low < idm_level
+                if wick_swept:
+                    # IFSC: sweep candle closes BACK ABOVE the IDM level
+                    is_ifsc = candle_close > idm_level
+                    return {
+                        "idm_level":       self._r(idm_level),
+                        "idm_candle_idx":  idm_idx,
+                        "sweep_candle_idx": sweep_idx,
+                        "is_swept":        True,
+                        "is_ifsc":         is_ifsc,
+                        "direction":       "BULLISH",
+                    }
+
+            # IDM identified but not yet swept
+            return {
+                "idm_level":       self._r(idm_level),
+                "idm_candle_idx":  idm_idx,
+                "sweep_candle_idx": None,
+                "is_swept":        False,
+                "is_ifsc":         False,
+                "direction":       "BULLISH",
+            }
+
+        else:  # BEARISH
+            # First swing HIGH after BOS = IDM for bearish setups
+            idm_candidates = [
+                idx for idx in raw_highs
+                if bos_candle_idx < idx < scan_end
+                and not _is_inside_bar(df, idx)
+            ]
+            if not idm_candidates:
+                return None
+
+            idm_idx   = idm_candidates[0]  # FIRST swing high after BOS
+            idm_level = float(df["high"].iat[idm_idx])
+
+            for sweep_idx in range(idm_idx + 1, scan_end):
+                candle_high  = float(df["high"].iat[sweep_idx])
+                candle_close = float(df["close"].iat[sweep_idx])
+
+                wick_swept = candle_high > idm_level
+                if wick_swept:
+                    is_ifsc = candle_close < idm_level
+                    return {
+                        "idm_level":       self._r(idm_level),
+                        "idm_candle_idx":  idm_idx,
+                        "sweep_candle_idx": sweep_idx,
+                        "is_swept":        True,
+                        "is_ifsc":         is_ifsc,
+                        "direction":       "BEARISH",
+                    }
+
+            return {
+                "idm_level":       self._r(idm_level),
+                "idm_candle_idx":  idm_idx,
+                "sweep_candle_idx": None,
+                "is_swept":        False,
+                "is_ifsc":         False,
+                "direction":       "BEARISH",
+            }
+
+    # ── IFSC Detection (FIX #8) ───────────────────────────────────────────────
+
+    def _detect_ifsc(
+        self,
+        df: pd.DataFrame,
+        direction: str,
+        zone_low: float,
+        zone_high: float,
+        scan_start: int,
+        scan_end: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        FIX #8 — IFSC (Institutional Funding Smart Candle) detection.
+
+        Creator's exact definition (Lecture IFSC):
+        "The candle that sweeps or grabs any liquidity, swing, BOS, or CHoCH."
+        "Body goes below/above the level and during the close, the body comes
+         back and closes inside the range." — long wick, close back inside.
+
+        IFSC rules implemented:
+        1. Candle wicks INTO the OB zone (wick touches zone_low for bullish,
+           zone_high for bearish).
+        2. Candle sweeps a prior swing (wick goes THROUGH a prior high/low
+           within the zone — the liquidity grab).
+        3. Candle body CLOSES BACK inside the range:
+           - Bullish: close > zone_low (closes back above the swept level)
+           - Bearish: close < zone_high (closes back below the swept level)
+        4. Long wick relative to body — body < 50% of total candle range.
+           This distinguishes IFSC from a regular strong candle.
+
+        Entry price = close of the IFSC candle (creator: "enter on IFSC close").
+
+        Returns dict with:
+            ifsc_candle_idx: int
+            entry_price: float — IFSC close price
+            swept_level: float — the prior swing that was grabbed
+        Returns None if no IFSC found in the scan window.
+        """
+        if scan_end >= len(df):
+            scan_end = len(df) - 1
+
+        # Pre-compute prior swings within the zone for liquidity grab check
+        w = self.config.internal_swing_window
+        raw_highs, raw_lows = self._find_m5_choch_pivots(df, w)
+
+        for i in range(scan_start, scan_end + 1):
+            candle_high  = float(df["high"].iat[i])
+            candle_low   = float(df["low"].iat[i])
+            candle_open  = float(df["open"].iat[i])
+            candle_close = float(df["close"].iat[i])
+
+            candle_range = candle_high - candle_low
+            if candle_range <= 0:
+                continue
+
+            body         = abs(candle_close - candle_open)
+            body_ratio   = body / candle_range
+
+            # IFSC has a long wick — body must be less than 50% of range
+            if body_ratio >= 0.5:
+                continue
+
+            if direction == "BULLISH":
+                # Wick must touch or enter the OB zone from below
+                wick_in_zone = candle_low <= zone_high and candle_low >= (zone_low - zone_high * 0.001)
+
+                if not wick_in_zone:
+                    continue
+
+                # Find a prior swing low within or near the zone that was swept
+                swept_level = None
+                for pl_idx in reversed(raw_lows):
+                    if pl_idx >= i:
+                        continue
+                    pl_price = float(df["low"].iat[pl_idx])
+                    # Swing low must be within the OB zone
+                    if zone_low <= pl_price <= zone_high:
+                        if candle_low < pl_price:  # wick swept below the swing
+                            swept_level = pl_price
+                            break
+
+                if swept_level is None:
+                    # Fallback: wick swept the zone_low itself
+                    if candle_low < zone_low:
+                        swept_level = zone_low
+
+                if swept_level is None:
+                    continue
+
+                # Body closes back ABOVE the swept level (back inside range)
+                closes_back = candle_close > swept_level
+
+                if closes_back:
+                    return {
+                        "ifsc_candle_idx": i,
+                        "entry_price":     self._r(candle_close),
+                        "swept_level":     self._r(swept_level),
+                        "body_ratio":      round(body_ratio, 3),
+                        "direction":       "BULLISH",
+                    }
+
+            else:  # BEARISH
+                wick_in_zone = candle_high >= zone_low and candle_high <= (zone_high + zone_high * 0.001)
+
+                if not wick_in_zone:
+                    continue
+
+                swept_level = None
+                for ph_idx in reversed(raw_highs):
+                    if ph_idx >= i:
+                        continue
+                    ph_price = float(df["high"].iat[ph_idx])
+                    if zone_low <= ph_price <= zone_high:
+                        if candle_high > ph_price:
+                            swept_level = ph_price
+                            break
+
+                if swept_level is None:
+                    if candle_high > zone_high:
+                        swept_level = zone_high
+
+                if swept_level is None:
+                    continue
+
+                closes_back = candle_close < swept_level
+
+                if closes_back:
+                    return {
+                        "ifsc_candle_idx": i,
+                        "entry_price":     self._r(candle_close),
+                        "swept_level":     self._r(swept_level),
+                        "body_ratio":      round(body_ratio, 3),
+                        "direction":       "BEARISH",
+                    }
+
+        return None
+
+    # ── Entry Module Classification (FIX #10) ────────────────────────────────
+
+    def _classify_entry_module(
+        self,
+        poi: "POI",
+        structure_break: "StructureBreak",
+        ifsc_result: Optional[Dict],
+        idm_result: Optional[Dict],
+    ) -> Tuple[str, int]:
+        """
+        FIX #10 — Classify which of the creator's 5 Entry Modules triggered.
+        Returns (module_name, confidence_score).
+
+        Creator's 5 modules and probabilities (Lecture IFSC):
+        1. IDM_SWEEP       — IFSC sweeps IDM, closes back         → 95-100%
+        2. IDM_ORDER_BLOCK — First valid OB above/below IDM        → 85%
+        3. EXTREME_OB      — Last OB before CHoCH                  → 90%
+        4. BOS_SWEEP       — BOS level swept by wick not body      → 85%
+        5. CHOCH_SWEEP     — CHoCH level swept by wick             → 90%
+
+        Priority: IDM_SWEEP > EXTREME_OB / CHOCH_SWEEP > IDM_ORDER_BLOCK > GENERIC
+        """
+        poi_type    = (poi.poi_type or "").upper()
+        choch_label = (structure_break.choch_label or "").upper()
+
+        # Module 1: IDM Sweep — IFSC present AND IDM was swept
+        if (
+            ifsc_result is not None
+            and idm_result is not None
+            and idm_result.get("is_swept")
+            and idm_result.get("is_ifsc")
+        ):
+            return "IDM_SWEEP", 95
+
+        # Module 5: CHoCH Sweep — CHoCH level was swept (CHoCH+ label)
+        if "CHOCH+" in choch_label or "CHOCH_SWEEP" in poi_type:
+            return "CHOCH_SWEEP", 90
+
+        # Module 3: Extreme OB — last OB before CHoCH
+        if "EXTREME" in poi_type:
+            return "EXTREME_OB", 90
+
+        # Module 4: BOS Sweep — BOS level swept
+        if "BOS_SWEEP" in poi_type:
+            return "BOS_SWEEP", 85
+
+        # Module 2: IDM Order Block — first OB after IDM
+        if "FIRST_OB" in poi_type or (idm_result is not None and idm_result.get("is_swept")):
+            return "IDM_ORDER_BLOCK", 85
+
+        # Fallback
+        return "GENERIC", 75
+
     def _classify_structure_break(self, sweep_direction: str) -> str:
         """
         ✅ FIX #4b — Implements Pine Script itrend-based CHoCH vs BOS classification.
@@ -1686,7 +2076,7 @@ class SignalEngine:
         if len(df) < window + 5:
             return "NEUTRAL"
 
-        lookback = max(window * 6, 30)
+        lookback = min(len(df), max(window * 4, 60))
         recent   = df.iloc[-lookback:].reset_index(drop=True)
 
         ph, pl = self._find_pivots_debug(recent, max(2, window))
@@ -1803,7 +2193,7 @@ class SignalEngine:
             return [], []
 
         if effective_window != window:
-            print(f"⚠️ [SWING] Reduced pivot window {window} → {effective_window} due to small dataset (n={n})")
+            pass
 
         highs = df["high"].to_numpy(dtype=float)
         lows = df["low"].to_numpy(dtype=float)
@@ -1855,20 +2245,25 @@ class SignalEngine:
         return fvgs
 
     def _build_poi(self, df: pd.DataFrame, poi_type: str, idx: int) -> POI:
-        o = float(df["open"].iat[idx]) if "open" in df.columns else float(df["low"].iat[idx])
-        c = float(df["close"].iat[idx]) if "close" in df.columns else float(df["high"].iat[idx])
+        """
+        Build a POI zone from a candle.
+
+        FIX #4 — Creator uses FULL CANDLE (wick to wick) as the default OB zone.
+        Old code used body only (open-to-close), which made zones too narrow and
+        caused missed retests when price wicked into the real OB but not the body.
+
+        Zone rules:
+        - Default (OB): wick low → wick high (full candle range)
+        - FVG / LIQUIDITY types: also wick-to-wick (unchanged)
+        - SL placement automatically improves: selected_poi.low is now the wick
+          low, matching the creator's "SL just below the OB low" rule.
+        """
         h = float(df["high"].iat[idx])
         l = float(df["low"].iat[idx])
 
-        body_low = min(o, c)
-        body_high = max(o, c)
-
-        if "FVG" in poi_type or "LIQUIDITY" in poi_type:
-            low = min(l, h)
-            high = max(l, h)
-        else:
-            low = body_low
-            high = body_high
+        # Always use full candle range (wick to wick) — creator confirmed
+        low  = l
+        high = h
 
         return POI(
             poi_type=poi_type,
