@@ -2,7 +2,8 @@
 
 ##TradingBOt is a safety-first, demo-only automated XAUUSD trading system
 focused on discipline, structure, and professional risk management.
-<img width="1919" height="932" alt="image" src="https://github.com/user-attachments/assets/7bb468c2-c469-41fa-bab3-568f406d466c" />
+<img width="1902" height="981" alt="image" src="https://github.com/user-attachments/assets/4c181eb7-b193-4272-967b-d880779820b5" />
+
 
 ## XAUUSD Smart Money Concepts (SMC) Trading Bot for MT5
 
@@ -10,7 +11,7 @@ A professional automated trading bot for XAUUSD (Gold) using **Guardeer 10-Video
 
 ---
 
-## ✨ Latest Updates (v3.1.0 - Dec 20, 2025)
+## ✨ Latest Updates (v4.1.0 - April 20, 2025)
 
 ### 🆕 Market Hours & Weekend Detection
 
