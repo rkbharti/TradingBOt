@@ -65,8 +65,19 @@ class ObservationLogger:
     # -------------------------
     def _load_or_init(self) -> Dict[str, Any]:
         if os.path.exists(self.file_path):
-            with open(self.file_path, "r") as f:
-                return json.load(f)
+            try:
+                with open(self.file_path, "r") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"[ObservationLogger] Warning: Failed to decode JSON from {self.file_path}: {e}")
+                corrupted_path = self.file_path + ".corrupted"
+                try:
+                    if os.path.exists(corrupted_path):
+                        os.remove(corrupted_path)
+                    os.rename(self.file_path, corrupted_path)
+                    print(f"[ObservationLogger] Renamed corrupted file to {corrupted_path}")
+                except Exception as rename_err:
+                    print(f"[ObservationLogger] Failed to rename corrupted file: {rename_err}")
 
         return {
             "date": self.today,
@@ -78,5 +89,15 @@ class ObservationLogger:
         }
 
     def _save(self):
-        with open(self.file_path, "w") as f:
-            json.dump(self.data, f, indent=2)
+        temp_path = self.file_path + ".tmp"
+        try:
+            with open(temp_path, "w") as f:
+                json.dump(self.data, f, indent=2, default=str)
+            os.replace(temp_path, self.file_path)
+        except Exception as e:
+            print(f"[ObservationLogger] Failed to save log atomically: {e}")
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass

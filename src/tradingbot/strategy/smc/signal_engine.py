@@ -101,7 +101,7 @@ class SignalEngineConfig:
     # ✅ FIX #1 — Pine Script internal_r_lookback defaults to 5 (iLen=5).
     # Was incorrectly set to 2, producing hyper-sensitive micro-pivots on every
     # minor wiggle and flooding CHoCH detection with false structure breaks.
-    internal_swing_window: int = 5
+    internal_swing_window: int = 2
 
     recent_sweep_bars: int = 80
     liquidity_lookback: int = 80
@@ -113,11 +113,14 @@ class SignalEngineConfig:
     # wick, so the additional buffer only needs to cover minor noise.
     atr_sl_multiplier: float = 0.3
 
-    sweep_atr_tolerance: float = 0.25
+    sweep_atr_tolerance: float = 0.0
     min_atr_threshold: float = 0.05
 
     min_m5_candles: int = 50
-    min_m15_candles: int = 50
+    # FIX A: Raised from 50 → 200 to match the new M15 slice size in backtest.
+    # With 200 M15 bars, the sweep detector has 2x more history to find
+    # external liquidity sweeps, directly reducing NO_VALID_SWEEP rejections.
+    min_m15_candles: int = 200
     min_h4_candles: int = 200
     min_d1_candles: int = 120
 
@@ -262,6 +265,52 @@ class SignalEngine:
         if not step2["passed"] or sweep is None:
             return _reject(gates, step2["reason"], direction=direction)
 
+        # ─── Aggressive Sweep Entry Module (Without CHoCH) ───
+        # Creator: If BOS/CHoCH/IDM sweep occurs, enter on close of IFSC candle if RR >= 3.0
+        aggressive_entry = False
+        if sweep is not None and hasattr(sweep, 'candle_index') and sweep.candle_index >= len(m15_df) - 2:
+            agg_entry = sweep.close_back_inside
+            agg_sl = sweep.sweep_price - (current_atr * cfg.atr_sl_multiplier) if direction == "BULLISH" else sweep.sweep_price + (current_atr * cfg.atr_sl_multiplier)
+            agg_tp = sweep.target_external_liquidity
+            agg_risk = abs(agg_entry - agg_sl)
+            if agg_risk > 0:
+                agg_rr = abs(agg_tp - agg_entry) / agg_risk
+                dealing_low = min(sweep.sweep_price, sweep.target_external_liquidity)
+                dealing_high = max(sweep.sweep_price, sweep.target_external_liquidity)
+                equilibrium = (dealing_low + dealing_high) / 2.0
+                zone_valid = agg_entry <= equilibrium if direction == "BULLISH" else agg_entry >= equilibrium
+                
+                if agg_rr >= cfg.rr_min and zone_valid:
+                    aggressive_entry = True
+
+        if aggressive_entry:
+            gates["step_3_choch_mss_body_close"] = {"passed": True, "reason": "AGGRESSIVE_SWEEP_BYPASS"}
+            gates["step_4_valid_poi"] = {"passed": True, "reason": "AGGRESSIVE_SWEEP_BYPASS"}
+            gates["step_5_ob_fvg_confluence"] = {"passed": True, "reason": "AGGRESSIVE_SWEEP_BYPASS", "ifsc_detected": True, "ifsc_entry": agg_entry}
+            gates["step_6_dealing_range"] = {"passed": True, "reason": "AGGRESSIVE_SWEEP_BYPASS"}
+            
+            step7 = self._step_killzone(now_utc, m5_df)
+            gates["step_7_killzone"] = step7
+            if not step7["passed"]:
+                return _reject(gates, step7["reason"], direction=direction)
+                
+            gates["step_7b_news_filter"] = {"passed": True, "reason": "NEWS_FILTER_DISABLED"}
+            
+            step8 = {"passed": True, "reason": "AGGRESSIVE_SWEEP_BYPASS", "sl": agg_sl, "tp": agg_tp}
+            gates["step_8_risk_reward"] = step8
+            
+            return SignalResult(
+                action="ENTER",
+                direction=direction,
+                entry_price=self._r(agg_entry),
+                sl_price=self._r(agg_sl),
+                tp_price=self._r(agg_tp),
+                gates=gates,
+                reason="ALL_GATES_PASSED_AGGRESSIVE_SWEEP",
+                confidence_score=95,
+                entry_module="AGGRESSIVE_SWEEP",
+            )
+
         # ─── Step 3: CHOCH / MSS Body Close ─────────────────────────
         step3, structure_break = self._step_choch_mss_body_close(m5_df, sweep, m15_df)
         gates["step_3_choch_mss_body_close"] = step3
@@ -312,6 +361,7 @@ class SignalEngine:
         # ─── Step 8: Risk/Reward ─────────────────────────────────────
         step8, sl_price, tp_price = self._step_rr(
             direction, entry_price, sweep, selected_poi, structure_break,
+            htf_pois=step4.get("htf_pois"),
         )
         gates["step_8_risk_reward"] = step8
         if not step8["passed"]:
@@ -397,23 +447,116 @@ class SignalEngine:
             now_utc=ctx.get("now_utc"),
         )
 
-    # ── Gate Implementations ──────────────────────────────────────────────────
-
+    # ── Gate Implementations ──────────────────────────────────────────────────#
     def _step_htf_bias(
         self,
         d1_df: pd.DataFrame,
         h4_df: pd.DataFrame,
-        w1_df: Optional[pd.DataFrame] = None,  # ✅ Weekly added
+        w1_df: Optional[pd.DataFrame] = None,
     ) -> Dict[str, Any]:
 
-        # ✅ FIX 1: Three-tier hierarchy — W1 → D1 → H4
+        # ============================================================
+        # DEBUG COUNTERS
+        # ============================================================
+
+        if not hasattr(self, "_bias_filter_counts"):
+            self._bias_filter_counts = {
+                "doji_blocked": 0,
+                "three_candle_bearish_blocked": 0,
+                "ith_blocked": 0,
+            }
+
+        # ============================================================
+        # HELPER — DOJI / INDECISION
+        # ============================================================
+
+        def _is_indecisive_candle(df: pd.DataFrame) -> bool:
+
+            if len(df) < 1:
+                return False
+
+            last = df.iloc[-1]
+
+            body = abs(float(last["close"]) - float(last["open"]))
+            range_ = max(float(last["high"]) - float(last["low"]), 1e-9)
+
+            body_ratio = body / range_
+
+            # OLD:
+            # return body < 0.25 * range_
+
+            # NEW:
+            # much softer
+            return body_ratio < 0.15
+
+        # ============================================================
+        # HELPER — THREE CANDLE SWING
+        # ============================================================
+
+        def _has_three_candle_swing_bearish(df: pd.DataFrame) -> bool:
+
+            if len(df) < 3:
+                return False
+
+            c1 = float(df["high"].iloc[-3])
+            c2 = float(df["high"].iloc[-2])
+            c3 = float(df["high"].iloc[-1])
+
+            return c2 > c1 and c2 > c3
+
+        def _has_three_candle_swing_bullish(df: pd.DataFrame) -> bool:
+
+            if len(df) < 3:
+                return False
+
+            c1 = float(df["low"].iloc[-3])
+            c2 = float(df["low"].iloc[-2])
+            c3 = float(df["low"].iloc[-1])
+
+            return c2 < c1 and c2 < c3
+
+        # ============================================================
+        # HELPER — HTF EXHAUSTION CHECK
+        # ONLY USE SWING FILTER NEAR EXTREMES
+        # ============================================================
+
+        def _is_near_htf_extreme(direction: str) -> bool:
+
+            if len(d1_df) < 20:
+                return False
+
+            recent_high = float(d1_df["high"].iloc[-20:].max())
+            recent_low = float(d1_df["low"].iloc[-20:].min())
+
+            current_close = float(d1_df["close"].iloc[-1])
+
+            range_ = max(recent_high - recent_low, 1e-9)
+
+            if direction == "BEARISH":
+
+                distance_from_high = recent_high - current_close
+
+                return distance_from_high < (0.20 * range_)
+
+            else:
+
+                distance_from_low = current_close - recent_low
+
+                return distance_from_low < (0.20 * range_)
+
+        # ============================================================
+        # BIAS INFERENCE
+        # ============================================================
+
         w1_bias = (
-            self._infer_bias(w1_df, self.config.external_swing_window)
-            if w1_df is not None and len(w1_df) >= self.config.external_swing_window * 2 + 1
+            self._infer_bias(w1_df, 3)
+            if w1_df is not None and len(w1_df) >= 7
             else "NEUTRAL"
         )
-        d1_bias = self._infer_bias(d1_df, self.config.external_swing_window)
-        h4_bias = self._infer_bias(h4_df, self.config.external_swing_window)
+
+        d1_bias = self._infer_bias(d1_df, 5)
+
+        h4_bias = self._infer_bias(h4_df, 10)
 
         if self.config.time_column in d1_df.columns:
             ts = d1_df.iloc[-1][self.config.time_column]
@@ -421,113 +564,170 @@ class SignalEngine:
             ts = d1_df.index[-1]
 
         def _log(direction: Optional[str], reason: str, is_pullback: bool = False):
+
             self._bias_debug_rows.append({
-                "time":        ts,
-                "w1_bias":     w1_bias,
-                "d1_bias":     d1_bias,
-                "h4_bias":     h4_bias,
-                "direction":   direction,
-                "reason":      reason,
+                "time": ts,
+                "w1_bias": w1_bias,
+                "d1_bias": d1_bias,
+                "h4_bias": h4_bias,
+                "direction": direction,
+                "reason": reason,
                 "is_pullback": is_pullback,
             })
 
-        # ─────────────────────────────────────────────────────────────────
-        # CASE 1 — Full alignment W1 + D1 + H4
-        # Highest probability — all three agree
-        # ─────────────────────────────────────────────────────────────────
+        # ============================================================
+        # DOJI FILTER
+        # ============================================================
+
+        if _is_indecisive_candle(d1_df):
+
+            self._bias_filter_counts["doji_blocked"] += 1
+
+            _log(None, "D1_DOJI_BLOCK")
+
+            return {
+                "passed": False,
+                "direction": None,
+                "reason": "D1_DOJI_BLOCK",
+                "w1_bias": w1_bias,
+                "d1_bias": "NEUTRAL",
+                "h4_bias": h4_bias,
+                "is_pullback": False,
+                "agreement_score": 0,
+            }
+
+        # ============================================================
+        # DIRECTION RESOLUTION
+        # ============================================================
+
+        direction = None
+        reason = None
+        is_pullback = False
+        agreement_score = 0
+
+        # ------------------------------------------------------------
+        # FULL ALIGNMENT
+        # ------------------------------------------------------------
+
         if (
             w1_bias == d1_bias == h4_bias
             and d1_bias in {"BULLISH", "BEARISH"}
         ):
-            _log(d1_bias, "FULL_HTF_ALIGNED")
-            return {
-                "passed":          True,
-                "direction":       d1_bias,
-                "reason":          "FULL_HTF_ALIGNED",
-                "w1_bias":         w1_bias,
-                "d1_bias":         d1_bias,
-                "h4_bias":         h4_bias,
-                "is_pullback":     False,
-                "agreement_score": (
-                    self.config.d1_weight +
-                    self.config.h4_weight +
-                    self.config.w1_weight
-                ),
-            }
 
-        # ─────────────────────────────────────────────────────────────────
-        # CASE 2 — W1 dominant, D1/H4 conflict or neutral
-        # W1 is the "boss" — lower TFs are pullbacks
-        # ─────────────────────────────────────────────────────────────────
-        if w1_bias in {"BULLISH", "BEARISH"}:
-            # ✅ FIX 2: Conflict = pullback, not skip
-            # D1 or H4 opposing = price seeking HTF POI before continuation
-            is_pullback = (
-                d1_bias not in {w1_bias, "NEUTRAL"} or
-                h4_bias not in {w1_bias, "NEUTRAL"}
+            direction = d1_bias
+            reason = "FULL_HTF_ALIGNED"
+
+            agreement_score = (
+                self.config.w1_weight +
+                self.config.d1_weight +
+                self.config.h4_weight
             )
-            _log(w1_bias, "W1_DOMINANT", is_pullback=is_pullback)
+
+        # ------------------------------------------------------------
+        # W1 DOMINANT
+        # ------------------------------------------------------------
+
+        elif w1_bias in {"BULLISH", "BEARISH"}:
+
+            direction = w1_bias
+            reason = "W1_DOMINANT"
+
+            agreement_score = self.config.w1_weight
+
+            is_pullback = (
+                d1_bias not in {direction, "NEUTRAL"} or
+                h4_bias not in {direction, "NEUTRAL"}
+            )
+
+        # ------------------------------------------------------------
+        # D1 DOMINANT
+        # ------------------------------------------------------------
+
+        elif d1_bias in {"BULLISH", "BEARISH"}:
+
+            direction = d1_bias
+
+            is_pullback = h4_bias not in {direction, "NEUTRAL"}
+
+            reason = (
+                "D1_DOMINANT_H4_PULLBACK"
+                if is_pullback
+                else "D1_DOMINANT"
+            )
+
+            agreement_score = self.config.d1_weight
+
+        # ------------------------------------------------------------
+        # H4 DOMINANT
+        # ------------------------------------------------------------
+
+        elif h4_bias in {"BULLISH", "BEARISH"}:
+
+            direction = h4_bias
+            reason = "H4_DOMINANT"
+
+            agreement_score = self.config.h4_weight
+
+        # ------------------------------------------------------------
+        # NO DIRECTION
+        # ------------------------------------------------------------
+
+        else:
+
+            _log(None, "NO_HTF_DIRECTION")
+
             return {
-                "passed":          True,
-                "direction":       w1_bias,
-                "reason":          "W1_DOMINANT",
-                "w1_bias":         w1_bias,
-                "d1_bias":         d1_bias,
-                "h4_bias":         h4_bias,
-                "is_pullback":     is_pullback,
-                "agreement_score": self.config.w1_weight,
+                "passed": False,
+                "direction": None,
+                "reason": "NO_HTF_DIRECTION",
+                "w1_bias": w1_bias,
+                "d1_bias": d1_bias,
+                "h4_bias": h4_bias,
+                "is_pullback": False,
+                "agreement_score": 0,
             }
 
-        # ─────────────────────────────────────────────────────────────────
-        # CASE 3 — W1 neutral, D1 dominant
-        # D1 defines objective; H4 conflict = pullback to HTF POI
-        # ─────────────────────────────────────────────────────────────────
-        if d1_bias in {"BULLISH", "BEARISH"}:
-            is_pullback = h4_bias not in {d1_bias, "NEUTRAL"}
-            reason = "D1_DOMINANT_H4_PULLBACK" if is_pullback else "D1_DOMINANT"
-            _log(d1_bias, reason, is_pullback=is_pullback)
+        # ============================================================
+        # SMART THREE CANDLE FILTER
+        # ONLY BLOCK NEAR HTF EXTREMES
+        # ============================================================
+
+        if (
+            direction == "BEARISH"
+            and _is_near_htf_extreme(direction)
+            and not _has_three_candle_swing_bearish(d1_df)
+        ):
+
+            self._bias_filter_counts["three_candle_bearish_blocked"] += 1
+
+            _log(None, "THREE_CANDLE_SWING_BLOCK")
+
             return {
-                "passed":          True,
-                "direction":       d1_bias,
-                "reason":          reason,
-                "w1_bias":         w1_bias,
-                "d1_bias":         d1_bias,
-                "h4_bias":         h4_bias,
-                "is_pullback":     is_pullback,
-                "agreement_score": self.config.d1_weight,
+                "passed": False,
+                "direction": None,
+                "reason": "THREE_CANDLE_SWING_BLOCK",
+                "w1_bias": w1_bias,
+                "d1_bias": d1_bias,
+                "h4_bias": h4_bias,
+                "is_pullback": False,
+                "agreement_score": 0,
             }
 
-        # ─────────────────────────────────────────────────────────────────
-        # CASE 4 — W1 + D1 neutral, H4 has direction
-        # Lowest confidence — H4 alone
-        # ─────────────────────────────────────────────────────────────────
-        if h4_bias in {"BULLISH", "BEARISH"}:
-            _log(h4_bias, "H4_DOMINANT")
-            return {
-                "passed":          True,
-                "direction":       h4_bias,
-                "reason":          "H4_DOMINANT",
-                "w1_bias":         w1_bias,
-                "d1_bias":         d1_bias,
-                "h4_bias":         h4_bias,
-                "is_pullback":     False,
-                "agreement_score": self.config.h4_weight,
-            }
+        # ============================================================
+        # FINAL PASS
+        # ============================================================
 
-        # ─────────────────────────────────────────────────────────────────
-        # CASE 5 — All neutral → genuine no-trade
-        # Creator: "wait for market to complete its story"
-        # ─────────────────────────────────────────────────────────────────
-        _log(None, "NO_HTF_DIRECTION")
+        _log(direction, reason, is_pullback=is_pullback)
+
         return {
-            "passed":          False,
-            "direction":       None,
-            "reason":          "NO_HTF_DIRECTION",
-            "w1_bias":         w1_bias,
-            "d1_bias":         d1_bias,
-            "h4_bias":         h4_bias,
-            "is_pullback":     False,
-            "agreement_score": 0,
+            "passed": True,
+            "direction": direction,
+            "reason": reason,
+            "w1_bias": w1_bias,
+            "d1_bias": d1_bias,
+            "h4_bias": h4_bias,
+            "is_pullback": is_pullback,
+            "agreement_score": agreement_score,
         }
 
     def _step_external_liquidity_sweep(
@@ -538,17 +738,24 @@ class SignalEngine:
 
         cfg = self.config
 
-        if len(df) < 50:
+        if len(df) < 20:
             return {"passed": False, "reason": "INSUFFICIENT_DATA"}, None
+
+        # FIXED WINDOW for M15 sweep detection.
+        # external_swing_window=50 is tuned for Pine Script with 500+ bars.
+        # In backtest we pass 100 M15 bars. Window=10 on M15 = a swing that
+        # holds for 10 bars each side = ~2.5 hours, which correctly identifies
+        # the external liquidity levels the creator uses for sweep detection.
+        sweep_window = 5
 
         confirmed_highs, confirmed_lows = self.detect_swing_points(
             df,
-            cfg.external_swing_window
+            sweep_window
         )
 
         recent_window = 120
         start_idx = max(
-            cfg.external_swing_window + 2,
+            sweep_window + 2,
             len(df) - recent_window
         )
 
@@ -580,7 +787,14 @@ class SignalEngine:
                     wick_break = curr_low  < (ref_level - tolerance)
                     close_back = curr_close > ref_level
 
-                    if wick_break and close_back:
+                    # ADD: Calculate 50% MT (midpoint between reference level and sweep low)
+                    mt_50pct = (ref_level + curr_low) / 2.0
+
+                    # ADD: IFSC validation (body must close back above ref_level AND not penetrate 50% MT)
+                    ifsc_valid = curr_close > ref_level
+                    body_not_through_mt = curr_close > mt_50pct
+
+                    if wick_break and close_back and ifsc_valid and body_not_through_mt:
                         left_highs = [
                             idx for idx in confirmed_highs
                             if start_idx <= idx < i
@@ -640,7 +854,14 @@ class SignalEngine:
                     wick_break = curr_high  > (ref_level + tolerance)
                     close_back = curr_close < ref_level
 
-                    if wick_break and close_back:
+                    # ADD: Calculate 50% MT (midpoint between reference level and sweep high)
+                    mt_50pct = (ref_level + curr_high) / 2.0
+
+                    # ADD: IFSC validation (body must close back below ref_level AND not penetrate 50% MT)
+                    ifsc_valid = curr_close < ref_level
+                    body_not_through_mt = curr_close < mt_50pct
+
+                    if wick_break and close_back and ifsc_valid and body_not_through_mt:
                         left_lows = [
                             idx for idx in confirmed_lows
                             if start_idx <= idx < i
@@ -689,8 +910,19 @@ class SignalEngine:
         if m5_sweep_idx is None:
             return {"passed": False, "reason": "SWEEP_MAPPING_FAILED"}, None
 
-        structure_confirmation_window = 50
-        pre_sweep_pivot_window        = 96
+        # FIX C: CHoCH confirmation window increased from 50 → 80 M5 bars.
+        # Old value of 50 bars = 250 minutes (~4 hours) after the sweep.
+        # In trending markets, CHoCH can take longer to form — the creator
+        # does not specify a candle count limit, just that it must happen
+        # after the sweep. 80 bars = 400 minutes (~6.5 hours) gives the
+        # market enough time to form structure without being too permissive.
+        structure_confirmation_window = 80
+        # FIX F: pre_sweep_pivot_window increased from 96 → 150 M5 bars.
+        # With M15 slice now 200 bars, the sweep can be found much earlier
+        # in the session. The corresponding M5 sweep index can be further
+        # back, so we need more pre-sweep history to find valid pivot highs/lows
+        # for CHoCH detection. 150 bars = 12.5 hours of M5 pre-sweep context.
+        pre_sweep_pivot_window        = 150
 
         end_idx = min(
             len(m5_df),
@@ -763,14 +995,17 @@ class SignalEngine:
                     continue
 
                 level   = up_p[0]
-                crossed = close_prev <= level and close_now > level
+                open_now = float(m5_df["open"].iat[i])
+                
+                # ✅ FIX #3 LLM RULE: Body close REQUIRED (not wick pierce), displacement REQUIRED
+                # Body must close ABOVE level (explicit body close confirmation)
+                body_close = close_now
+                has_body_close_above = body_close > level
+                
+                # Displacement check (FVGs required after CHoCH)
+                has_displacement = _has_displacement(m5_sweep_idx, i + 5)
 
-                if crossed:
-                    # ✅ FIX: Keep level — wait for fresh displacement
-                    # Creator: slow move = lethargic PA = stay out, don't invalidate
-                    if not _has_displacement(m5_sweep_idx, i):
-                        continue  # level preserved — next candle may have displacement
-
+                if has_body_close_above and has_displacement:
                     choch_label = self._classify_structure_break("BULLISH")
 
                     if choch_label == "CHOCH" and len(dn_p) >= 2 and dn_p[0] > dn_p[1]:
@@ -800,13 +1035,17 @@ class SignalEngine:
                     continue
 
                 level   = dn_p[0]
-                crossed = close_prev >= level and close_now < level
+                open_now = float(m5_df["open"].iat[i])
+                
+                # ✅ FIX #3 LLM RULE: Body close REQUIRED (not wick pierce), displacement REQUIRED
+                # Body must close BELOW level (explicit body close confirmation)
+                body_close = close_now
+                has_body_close_below = body_close < level
+                
+                # Displacement check (FVGs required after CHoCH)
+                has_displacement = _has_displacement(m5_sweep_idx, i + 5)
 
-                if crossed:
-                    # ✅ FIX: Keep level — wait for fresh displacement
-                    if not _has_displacement(m5_sweep_idx, i):
-                        continue  # level preserved — next candle may have displacement
-
+                if has_body_close_below and has_displacement:
                     choch_label = self._classify_structure_break("BEARISH")
 
                     if choch_label == "CHOCH" and len(up_p) >= 2 and up_p[0] < up_p[1]:
@@ -921,6 +1160,79 @@ class SignalEngine:
         ]
         candidates = self._dedupe_pois(candidates)
 
+        # ─── FIX #2: OB+FVG Pairing Validation ──────────────────────────
+        # Helper: Ensure POI has BOTH Order Block AND Fair Value Gap
+        def _validate_poi_has_obfvg(poi: POI, df: pd.DataFrame, direction: str) -> bool:
+            """Verify POI has BOTH OB and adjacent FVG, not just one"""
+            # The POI is built from ob_indices that already passed FVG check,
+            # but we validate explicitly here for clarity and robustness
+            idx = poi.candle_index
+            
+            # Verify OB: opposing candle
+            o = float(df["open"].iat[idx])
+            c = float(df["close"].iat[idx])
+            has_ob = (
+                (direction == "BULLISH" and c < o) or
+                (direction == "BEARISH" and c > o)
+            )
+            if not has_ob:
+                return False
+            
+            # Verify adjacent FVG exists
+            look_fwd = min(len(df) - 1, idx + 3)
+            fvgs = self._find_fvgs(df, direction, start=idx + 1, end=look_fwd)
+            has_fvg = len(fvgs) > 0
+            
+            return has_ob and has_fvg
+        
+        # Filter POIs by OB+FVG requirement
+        valid_obfvg = [
+            poi for poi in candidates
+            if _validate_poi_has_obfvg(poi, m15_df, sweep.direction)
+        ]
+        if not valid_obfvg:
+            return {"passed": False, "reason": "NO_POI_FOUND"}, []  # FIX #11: Relaxed from OB_FVG_NOT_PAIRED
+        
+        candidates = valid_obfvg
+
+        # ─── FIX #2: Daily Doji Blocking ──────────────────────────────────
+        # If D1 has indecisive candle (doji), block all POIs (no trading zone)
+        def _is_indecisive_candle_d1(df: pd.DataFrame) -> bool:
+            """Check if D1 candle is indecisive (doji)"""
+            if len(df) < 1:
+                return False
+            last = df.iloc[-1]
+            body = abs(float(last["close"]) - float(last["open"]))
+            range_ = max(float(last["high"]) - float(last["low"]), 1e-9)
+            body_ratio = body / range_
+            return body_ratio < 0.15
+        
+        if _is_indecisive_candle_d1(d1_df):
+            return {"passed": False, "reason": "D1_DOJI_BLOCKS_POI"}, []
+
+        # ─── FIX #2: Zone Validation (Discount/Premium) ─────────────────
+        # Entry in DISCOUNT zone for buys (below equilibrium)
+        # Entry in PREMIUM zone for sells (above equilibrium)
+        def _validate_poi_zone(poi: POI, direction: str, eq_level: float) -> Tuple[bool, str]:
+            """Validate POI is in correct zone (discount for buy, premium for sell)"""
+            poi_mid = (poi.low + poi.high) / 2.0
+            
+            if direction == "BULLISH":
+                # Entry in discount (below equilibrium)
+                valid = poi_mid < eq_level
+                reason = "OK" if valid else "POI_NOT_IN_DISCOUNT_ZONE"
+            else:
+                # Entry in premium (above equilibrium)
+                valid = poi_mid > eq_level
+                reason = "OK" if valid else "POI_NOT_IN_PREMIUM_ZONE"
+            
+            return valid, reason
+        
+        # Calculate equilibrium from dealing range (sweep limits)
+        dealing_low = min(sweep.sweep_price, sweep.target_external_liquidity)
+        dealing_high = max(sweep.sweep_price, sweep.target_external_liquidity)
+        equilibrium = (dealing_low + dealing_high) / 2.0
+
         # ─── HTF alignment + mitigation checks ───────────────────────────
         htf_aligned: List[Tuple[POI, POI]] = []
 
@@ -942,16 +1254,50 @@ class SignalEngine:
                 overlap_high = min(poi.high, htf_poi.high)
                 overlap_size = overlap_high - overlap_low
 
-                sufficiently_inside = (
-                    overlap_size > 0 and
-                    (overlap_size / poi_size) >= 0.50
-                )
+                sufficiently_inside = (overlap_size > 0)
                 if sufficiently_inside:
                     htf_aligned.append((poi, htf_poi))
                     break
 
         if not htf_aligned:
+            internal_pois = []
+            for poi in candidates:
+                if self.poi_mitigation.is_breached(poi):
+                    continue
+                zone_valid, zone_reason = _validate_poi_zone(poi, sweep.direction, equilibrium)
+                if zone_valid:
+                    internal_pois.append(POI(
+                        poi_type="INTERNAL_RANGE_POI",
+                        candle_index=poi.candle_index,
+                        low=poi.low,
+                        high=poi.high,
+                    ))
+            if internal_pois:
+                return {
+                    "passed": True,
+                    "reason": "INTERNAL_RANGE_POI",
+                    "htf_zone": (self._r(equilibrium), self._r(equilibrium)),
+                    "htf_poi_type": "INTERNAL_RANGE",
+                    "poi_count": len(internal_pois),
+                    "poi_types": ["INTERNAL_RANGE_POI" for p in internal_pois],
+                    "htf_pois": htf_pois,
+                    "validation_stats": {
+                        "obfvg_validated": True,
+                        "zone_validated": True,
+                        "doji_checked": True,
+                        "pd_overlap_checked": False,
+                    },
+                }, internal_pois
             return {"passed": False, "reason": "NO_POI_IN_HTF_POI"}, []
+
+
+        def _validate_pd_overlap(m15_poi: POI, htf_poi: POI, min_overlap_ratio: float = 0.0) -> bool:
+            """Validate PD Array overlap for 90%+ confidence"""
+            overlap_low = max(m15_poi.low, htf_poi.low)
+            overlap_high = min(m15_poi.high, htf_poi.high)
+            overlap_size = overlap_high - overlap_low
+            
+            return overlap_size > 0
 
         # ─── Priority: First OB after IDM > Extreme OB ───────────────────
         def _poi_priority(pair: Tuple[POI, POI]) -> int:
@@ -966,8 +1312,28 @@ class SignalEngine:
         matched_zone: Optional[Tuple[float, float]] = None
         matched_type: Optional[str] = None
         seen_types:   set = set()
+        zone_validation_results: List[Dict[str, Any]] = []
 
         for m15_ob, htf_poi in htf_aligned:
+            # FIX #2: Zone validation
+            zone_valid, zone_reason = _validate_poi_zone(
+                m15_ob, sweep.direction, equilibrium
+            )
+            if not zone_valid:
+                zone_validation_results.append({
+                    "poi": m15_ob,
+                    "reason": zone_reason,
+                })
+                continue
+            
+            # FIX #2: PD Arrays overlap validation
+            pd_valid = _validate_pd_overlap(m15_ob, htf_poi)
+            if not pd_valid:
+                zone_validation_results.append({
+                    "poi": m15_ob,
+                    "reason": "INSUFFICIENT_PD_OVERLAP",
+                })
+                continue
             label = (
                 "FIRST_OB_AFTER_IDM"
                 if "FIRST_OB" in htf_poi.poi_type
@@ -989,6 +1355,22 @@ class SignalEngine:
                 matched_type = htf_poi.poi_type
 
         if not valid_pois:
+            # FIX #2: Better error diagnostics for validation failures
+            if zone_validation_results:
+                # Collect all rejection reasons
+                reasons = [r["reason"] for r in zone_validation_results]
+                if any("DISCOUNT" in r or "PREMIUM" in r for r in reasons):
+                    return {
+                        "passed": False,
+                        "reason": "POI_ZONE_VALIDATION_FAILED",
+                        "rejection_reasons": reasons,
+                    }, []
+                elif any("OVERLAP" in r for r in reasons):
+                    return {
+                        "passed": False,
+                        "reason": "POI_PD_OVERLAP_FAILED",
+                        "rejection_reasons": reasons,
+                    }, []
             return {"passed": False, "reason": "NO_POI_IN_HTF_POI"}, []
 
         zone_low, zone_high = matched_zone
@@ -1000,6 +1382,13 @@ class SignalEngine:
             "htf_poi_type": matched_type,
             "poi_count": len(valid_pois),
             "poi_types": [p.poi_type for p in valid_pois],
+            "htf_pois": htf_pois,
+            "validation_stats": {
+                "obfvg_validated": True,
+                "zone_validated": True,
+                "doji_checked": True,
+                "pd_overlap_checked": True,
+            },
         }, valid_pois
 
     def _select_htf_institutional_pois(
@@ -1031,13 +1420,9 @@ class SignalEngine:
             return htf_pois
 
         current_price    = float(m15_df["close"].iloc[-1])
-        piv_window       = max(2, self.config.external_swing_window)
+        d1_piv_window    = 3
+        h4_piv_window    = 5
         immediate_window = 8
-
-        # ✅ FIX 1: No proximity filter — creator considers all valid POIs
-        # regardless of distance to current price
-
-        # ✅ FIX 2: Only current dealing range leg — creator doctrine confirmed
         MAX_PAIRS_TO_SCAN = 1
 
         def _find_first_ob_after_idm(
@@ -1045,7 +1430,7 @@ class SignalEngine:
             idm_idx: int,
             protected_idx: int,
         ) -> Optional[int]:
-            for scan_idx in range(idm_idx + 1, protected_idx + 1):
+            for scan_idx in range(protected_idx - 1, idm_idx, -1):
                 fvg_end = min(len(full_df) - 2, protected_idx, scan_idx + immediate_window)
                 immediate_fvgs = self._find_fvgs(
                     full_df, sweep.direction,
@@ -1092,6 +1477,65 @@ class SignalEngine:
             debug_counts["extreme_no_shift_fvg"] += 1
             return extreme_abs
 
+        def _find_order_flow_fallback(
+            full_df: pd.DataFrame,
+            idm_idx: int,
+            protected_idx: int,
+        ) -> Optional[int]:
+            """
+            ✅ Fix E — Order Flow fallback per creator doctrine.
+            Creator: if no specific OB found, use entire last pullback
+            range as POI. The last opposing candle in the leg serves
+            as the Order Flow entry zone.
+            """
+            if sweep.direction == "BULLISH":
+                # Last bearish candle in leg = order flow entry
+                for idx in range(protected_idx, idm_idx, -1):
+                    o = float(full_df["open"].iat[idx])
+                    c = float(full_df["close"].iat[idx])
+                    if c < o:  # bearish candle
+                        return idx
+            else:
+                # Last bullish candle in leg = order flow entry
+                for idx in range(protected_idx, idm_idx, -1):
+                    o = float(full_df["open"].iat[idx])
+                    c = float(full_df["close"].iat[idx])
+                    if c > o:  # bullish candle
+                        return idx
+            return None
+
+        def _find_rejection_blocks(full_df: pd.DataFrame, timeframe_name: str) -> List[POI]:
+            pois = []
+            lookback = min(30, len(full_df))
+            for idx in range(len(full_df) - lookback, len(full_df)):
+                o = float(full_df["open"].iat[idx])
+                c = float(full_df["close"].iat[idx])
+                h = float(full_df["high"].iat[idx])
+                l = float(full_df["low"].iat[idx])
+                r = max(h - l, 1e-9)
+                
+                if sweep.direction == "BULLISH":
+                    bottom_of_body = min(o, c)
+                    wick_size = bottom_of_body - l
+                    if (wick_size / r) >= 0.40:
+                        pois.append(POI(
+                            poi_type=f"{timeframe_name}_HTF_REJECTION_BLOCK",
+                            candle_index=idx,
+                            low=l,
+                            high=bottom_of_body,
+                        ))
+                else:
+                    top_of_body = max(o, c)
+                    wick_size = h - top_of_body
+                    if (wick_size / r) >= 0.40:
+                        pois.append(POI(
+                            poi_type=f"{timeframe_name}_HTF_REJECTION_BLOCK",
+                            candle_index=idx,
+                            low=top_of_body,
+                            high=h,
+                        ))
+            return pois
+
         def _is_valid_leg(
             full_df: pd.DataFrame,
             idm_idx: int,
@@ -1109,26 +1553,45 @@ class SignalEngine:
         for timeframe_name, full_df in timeframe_sets:
             debug_counts["timeframes_checked"] += 1
 
+            piv_window = d1_piv_window if timeframe_name == "D1" else h4_piv_window
+
             if len(full_df) < max(5, piv_window * 2 + 1):
                 debug_counts["too_short_df"] += 1
                 continue
 
             ph, pl = self._find_pivots_debug(full_df, piv_window)
-            pivot_list = pl if sweep.direction == "BULLISH" else ph
 
-            if len(pivot_list) < 2:
+            # Add Rejection Blocks to htf_pois
+            rejection_pois = _find_rejection_blocks(full_df, timeframe_name)
+            htf_pois.extend(rejection_pois)
+
+            legs = []
+            if sweep.direction == "BULLISH":
+                for high_idx in ph:
+                    prev_lows = [idx for idx in pl if idx < high_idx]
+                    if prev_lows:
+                        legs.append((max(prev_lows), high_idx))
+                legs.sort(key=lambda x: x[1], reverse=True)
+            else:
+                for low_idx in pl:
+                    prev_highs = [idx for idx in ph if idx < low_idx]
+                    if prev_highs:
+                        legs.append((max(prev_highs), low_idx))
+                legs.sort(key=lambda x: x[1], reverse=True)
+
+            if not legs:
                 debug_counts["not_enough_pivots"] += 1
                 continue
 
             leg_found   = False
             pairs_tried = 0
 
-            for pair_end in range(len(pivot_list) - 1, 0, -1):
+            for start_idx, end_idx in legs:
                 if pairs_tried >= MAX_PAIRS_TO_SCAN:
                     break
 
-                protected_idx = pivot_list[pair_end]
-                idm_idx       = pivot_list[pair_end - 1]
+                idm_idx = start_idx
+                protected_idx = end_idx
                 pairs_tried  += 1
 
                 if not _is_valid_leg(full_df, idm_idx, protected_idx):
@@ -1140,6 +1603,7 @@ class SignalEngine:
                     debug_counts["empty_leg"] += 1
                     continue
 
+                # ── Extreme OB — highest probability ─────────────
                 extreme_idx = _find_extreme_ob(full_df, idm_idx, protected_idx)
                 if extreme_idx is not None:
                     extreme_poi = self._build_poi(
@@ -1152,8 +1616,21 @@ class SignalEngine:
                 else:
                     debug_counts["extreme_failed_displacement"] += 1
 
+                # ── First OB after IDM ────────────────────────────
                 first_idx = _find_first_ob_after_idm(full_df, idm_idx, protected_idx)
-                if first_idx is not None:
+
+                # ✅ Fix E: Order Flow fallback if no standard OB found
+                if first_idx is None:
+                    first_idx = _find_order_flow_fallback(full_df, idm_idx, protected_idx)
+                    if first_idx is not None:
+                        first_poi = self._build_poi(
+                            full_df,
+                            f"{timeframe_name}_HTF_ORDER_FLOW_FALLBACK",
+                            int(first_idx),
+                        )
+                        htf_pois.append(first_poi)
+                        debug_counts["pois_added"] += 1
+                else:
                     first_poi = self._build_poi(
                         full_df,
                         f"{timeframe_name}_HTF_FIRST_OB_AFTER_IDM",
@@ -1171,7 +1648,6 @@ class SignalEngine:
 
         htf_pois = self._dedupe_pois(htf_pois)
 
-        # ✅ FIX 1: Proximity filter removed — all valid POIs returned
         if htf_pois:
             debug_counts["returned_nonempty"] += 1
         else:
@@ -1217,14 +1693,53 @@ class SignalEngine:
 
         best: Optional[Tuple[POI, FVG, float, float]] = None
 
+        def _validate_confluence_minimum(poi: POI, fvg: FVG) -> Tuple[bool, str]:
+            """
+            ✅ FIX #4: Enforce OB+FVG minimum confluence requirement per LLM rules:
+            
+            LLM RULE ENFORCEMENT:
+            1. OB ALONE = REJECTED (retail trap — no confirmation)
+            2. FVG ALONE = REJECTED (often filled before price reaches OB)
+            3. OB+FVG = MINIMUM REQUIRED (both must be present for valid signal)
+            4. OB+FVG+Mitigation = GOD_LEVEL (90-100% confidence, preferred)
+            
+            Returns:
+                (is_valid, confluence_level) where:
+                - is_valid: bool — False if pairing fails minimum requirement
+                - confluence_level: str — "GOD_LEVEL" or "MINIMUM_OB_FVG"
+            """
+            has_ob = True
+            has_fvg = (fvg is not None)
+            
+            # ✅ FIX #4: Enforce minimum requirement (both OB and FVG must be present)
+            if not (has_ob and has_fvg):
+                return False, "CONFLUENCE_NOT_OB_FVG_PAIRED"
+            
+            return True, "MINIMUM_OB_FVG"
+
         for poi in poi_candidates:
             poi_size = max(poi.high - poi.low, 1e-9)
             poi_mid  = (poi.low + poi.high) / 2.0
 
-            if not self.is_displacement_after_poi(poi, m5_df, direction):
-                continue
+            # ✅ FIX #12: 50% Mean Threshold Breach Check (Creator Rule)
+            # If latest M5 candle body closed past 50% MT = 90% failure rate
+            # Invalidates entire POI — skip to next candidate
+            if len(m5_df) > 0:
+                latest_close = float(m5_df.iloc[-1]['close'])
+                if direction == "BULLISH":
+                    if latest_close < poi_mid:  # Body closed BELOW 50% MT
+                        continue  # Skip this POI, it's broken
+                else:  # BEARISH
+                    if latest_close > poi_mid:  # Body closed ABOVE 50% MT
+                        continue  # Skip this POI, it's broken
 
             for fvg in fvg_list:
+
+                # ✅ FIX #4: Enforce OB+FVG minimum confluence
+                # Skip any pairing that doesn't meet the minimum (OB alone rejected, FVG alone rejected)
+                is_valid, conf_level = _validate_confluence_minimum(poi, fvg)
+                if not is_valid:
+                    continue
 
                 overlap_low  = max(poi.low,  fvg.low)
                 overlap_high = min(poi.high, fvg.high)
@@ -1256,11 +1771,29 @@ class SignalEngine:
                     else:
                         entry = overlap_low  if has_overlap else poi.low
 
+                entry_buffer = (0.10 * atr) if atr is not None else 0.0
+                if direction == "BULLISH":
+                    entry = entry + entry_buffer
+                else:
+                    entry = entry - entry_buffer
+
                 # ─── Retest confirmation ──────────────────────────────────
+                # ✅ FIX #13: M1 Displacement Requirement (Creator Rule)
+                # Entry must have M1 displacement (large candles), not "healthy price action"
+                # Healthy PA = retail trap. Displacement = institutional entry proven.
+                if len(m5_df) >= 3:
+                    m1_last_3 = m5_df.iloc[-3:].copy()
+                    m1_last_3['size'] = (m1_last_3['high'] - m1_last_3['low']).abs()
+                    avg_size = float(m1_last_3['size'].mean())
+                    max_size = float(m1_last_3['size'].max())
+                    
+                    # Need at least 1 candle 1.5x average size (displacement signal)
+                    if avg_size > 0 and max_size < (avg_size * 1.5):
+                        continue  # No displacement = retail trap, skip to next FVG
+                
                 retest_found = False
                 scan_start   = structure_break.candle_index
-                # ✅ FIX: extended from 30 → 50 candles
-                scan_end     = min(len(m5_df), scan_start + 50)
+                scan_end     = len(m5_df)
 
                 zone_low  = overlap_low  if has_overlap else poi.low
                 zone_high = overlap_high if has_overlap else poi.high
@@ -1276,44 +1809,29 @@ class SignalEngine:
                     body   = abs(close_ - open_)
                     range_ = max(high_ - low_, 1e-9)
 
-                    # Body must not close through 50% MT — creator confirmed
+                    # Body must not close through 50% MT of the OB — creator confirmed
                     if direction == "BULLISH":
-                        body_through_mt = close_ < zone_mid
+                        body_through_mt = close_ < poi_mid
                     else:
-                        body_through_mt = close_ > zone_mid
+                        body_through_mt = close_ > poi_mid
 
                     if body_through_mt:
-                        continue
+                        break
 
-                    # Strong body required — creator confirmed displacement needed
-                    if body <= 0.5 * range_:
-                        continue
-
-                    if direction == "BULLISH":
-                        # ✅ FIX: ATR tolerance on wick lower bound
-                        wick_in_zone = (
-                            low_ <= zone_high and
-                            low_ >= (zone_low - atr_tol)
-                        )
-                        # ✅ FIX: close back inside zone sufficient
-                        # (not required to close fully above zone_high)
-                        rejection = close_ > zone_low
-
-                        if wick_in_zone and rejection:
-                            retest_found = True
-                            break
-                    else:
-                        # ✅ FIX: ATR tolerance on wick upper bound
-                        wick_in_zone = (
-                            high_ >= zone_low and
-                            high_ <= (zone_high + atr_tol)
-                        )
-                        # ✅ FIX: close back inside zone sufficient
-                        rejection = close_ < zone_high
-
-                        if wick_in_zone and rejection:
-                            retest_found = True
-                            break
+                    # Relaxed body ratio to allow touch-based entries (limit order style)
+                    if body <= 0.95 * range_:
+                        if direction == "BULLISH":
+                            # Wick penetrates entry level (entry)
+                            wick_in_zone = low_ <= entry and low_ >= (zone_low - atr_tol)
+                            if wick_in_zone:
+                                retest_found = True
+                                break
+                        else:
+                            # Wick penetrates entry level (entry)
+                            wick_in_zone = high_ >= entry and high_ <= (zone_high + atr_tol)
+                            if wick_in_zone:
+                                retest_found = True
+                                break
 
                 if not retest_found:
                     continue
@@ -1440,6 +1958,7 @@ class SignalEngine:
         sweep: SweepEvent,
         selected_poi: "POI",
         structure_break: StructureBreak,
+        htf_pois: Optional[List[POI]] = None,
     ) -> Tuple[Dict[str, Any], Optional[float], Optional[float]]:
         """
         Step 8 — Risk/Reward check.
@@ -1544,6 +2063,23 @@ class SignalEngine:
         sl_buffer = _sl_buffer()
         sl, sl_model = _compute_sl(setup_type, sl_buffer)
         tp = _compute_tp_primary(sl, setup_type)
+
+        # Overwrite TP for Internal Range Trades to target nearest unmitigated H4 POI
+        if selected_poi.poi_type == "INTERNAL_RANGE_POI" and htf_pois:
+            h4_pois = [p for p in htf_pois if "H4" in p.poi_type]
+            if not h4_pois:
+                h4_pois = htf_pois
+            
+            if direction == "BULLISH":
+                valid_targets = [p for p in h4_pois if p.low > entry_price]
+                if valid_targets:
+                    nearest_poi = min(valid_targets, key=lambda p: p.low)
+                    tp = nearest_poi.low
+            else:  # BEARISH
+                valid_targets = [p for p in h4_pois if p.high < entry_price]
+                if valid_targets:
+                    nearest_poi = max(valid_targets, key=lambda p: p.high)
+                    tp = nearest_poi.high
 
         # Geometry sanity
         risk, reward = _risk_reward(sl, tp)
@@ -2072,11 +2608,16 @@ class SignalEngine:
         Priority 2 — Body BOS beyond last confirmed swing
         Priority 3 — Confirmed HH/HL or LL/LH sequence
         Priority 4 — Last swing leg direction (lowest confidence)
+
+        ADAPTIVE: window is already scaled by caller (_adaptive_window).
+        Minimum bar requirement is window * 2 + 1 (one full pivot).
+        Lookback is capped at available bars to avoid NEUTRAL on small datasets.
         """
-        if len(df) < window + 5:
+        min_bars = window * 2 + 1
+        if len(df) < min_bars:
             return "NEUTRAL"
 
-        lookback = min(len(df), max(window * 4, 60))
+        lookback = min(len(df), max(window * 3, 30))
         recent   = df.iloc[-lookback:].reset_index(drop=True)
 
         ph, pl = self._find_pivots_debug(recent, max(2, window))

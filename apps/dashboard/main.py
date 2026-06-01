@@ -50,12 +50,44 @@ class DailyPnLTracker:
         self.history = {}
         self.total_realized = 0.0
         self.processed_ticket_ids = set()
+        self.load_state()
+
+    def load_state(self):
+        try:
+            state_file = os.path.join(_HERE, "dashboard_state.json")
+            if os.path.exists(state_file):
+                with open(state_file, "r") as f:
+                    data = json.load(f)
+                    self.realized_pnl = float(data.get("realized_pnl", 0.0))
+                    self.total_realized = float(data.get("total_realized", 0.0))
+                    self.history = data.get("history", {})
+                    self.processed_ticket_ids = set(data.get("processed_ticket_ids", []))
+                    if "last_reset_date" in data:
+                        self.last_reset_date = date.fromisoformat(data["last_reset_date"])
+                print("✅ Dashboard Daily PnL state loaded from disk")
+        except Exception as e:
+            print(f"⚠️ Failed to load Daily PnL state: {e}")
+
+    def save_state(self):
+        try:
+            state_file = os.path.join(_HERE, "dashboard_state.json")
+            with open(state_file, "w") as f:
+                json.dump({
+                    "realized_pnl": self.realized_pnl,
+                    "total_realized": self.total_realized,
+                    "last_reset_date": self.last_reset_date.isoformat(),
+                    "history": self.history,
+                    "processed_ticket_ids": list(self.processed_ticket_ids),
+                }, f, indent=4)
+        except Exception as e:
+            print(f"⚠️ Failed to save Daily PnL state: {e}")
 
     def _ensure_today(self):
         today = datetime.now().date()
         if today > self.last_reset_date:
             self.last_reset_date = today
             self.realized_pnl = 0.0
+            self.save_state()
 
     def add_closed_trade(self, pnl: float, when: datetime = None, ticket: str = None):
         if ticket:
@@ -74,6 +106,7 @@ class DailyPnLTracker:
         if d == datetime.now().date():
             self.realized_pnl += float(pnl)
         self.total_realized += float(pnl)
+        self.save_state()
 
     def get_daily(self):
         self._ensure_today()
@@ -379,6 +412,8 @@ def update_bot_state_v2(bot_instance, analysis_data):
             "trading":        not bot_paused,
             "d1_bias":        market_struct.get("d1_bias", "NEUTRAL"),
             "h4_bias":        market_struct.get("h4_bias", "NEUTRAL"),
+            "news_items":     get_val(bot_instance, "news_items", []),
+            "news_time":      get_val(bot_instance, "news_time", "--"),
             "signal_engine":  {
                 "action":       signal_eng.get("action", "NO_TRADE"),
                 "direction":    signal_eng.get("direction", "NEUTRAL"),
@@ -488,12 +523,14 @@ async def health_check():
             mt5_status = "down"
     chart_len = len(bot_state.get("chart_data", []) or [])
     se = bot_state.get("signal_engine", {})
+    trader_active = is_trader_running() or (age < 90)
+    strategy_active = (se.get("action") is not None) and (mt5_status != "down")
     return {
         "mt5_connected":       mt5_status,
         "websocket_active":    len(active_connections) > 0,
         "active_ws_clients":   len(active_connections),
-        "trader_alive":        is_trader_running(),
-        "strategy_engine":     se.get("action") is not None,
+        "trader_alive":        trader_active,
+        "strategy_engine":     strategy_active,
         "data_feed":           chart_len > 0,
         "data_feed_candles":   chart_len,
         "vps_uptime_seconds":  int(_time.time() - _SERVER_START_TIME),

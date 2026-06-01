@@ -104,6 +104,12 @@
           >
         </div>
         <div class="meta-item">
+          <span class="meta-label">LATENCY</span>
+          <span class="meta-val mono" :class="latency_ms ? (latency_ms < 100 ? 'txt-green' : 'txt-amber') : 'txt-muted'">
+            <span x-text="latency_ms ? latency_ms + 'ms' : '--'">--</span>
+          </span>
+        </div>
+        <div class="meta-item">
           <span class="meta-label">ACCOUNT</span>
           <span
             class="meta-val mono txt-amber"
@@ -284,12 +290,12 @@
               <div class="status-dot-group">
                 <div
                   class="status-dot"
-                  :class="(_health.mt5_connected !== 'down') ? '' : 'inactive'"
+                  :class="_health.trader_alive ? '' : 'inactive'"
                 ></div>
                 <span
                   class="mono"
-                  :class="_health.mt5_connected !== 'down' ? 'txt-green' : 'txt-red'"
-                  x-text="_health.mt5_connected !== 'down' ? 'LIVE' : 'DOWN'"
+                  :class="_health.trader_alive ? 'txt-green' : 'txt-red'"
+                  x-text="_health.trader_alive ? 'LIVE' : 'DOWN'"
                 ></span>
               </div>
             </div>
@@ -312,12 +318,12 @@
               <div class="status-dot-group">
                 <div
                   class="status-dot"
-                  :class="ws_connected ? '' : 'inactive'"
+                  :class="_health.data_feed ? '' : 'inactive'"
                 ></div>
                 <span
                   class="mono"
-                  :class="ws_connected ? 'txt-green' : 'txt-red'"
-                  x-text="ws_connected ? 'WORKING' : 'HALTED'"
+                  :class="_health.data_feed ? 'txt-green' : 'txt-red'"
+                  x-text="_health.data_feed ? 'SYNCED' : 'HALTED'"
                 ></span>
               </div>
             </div>

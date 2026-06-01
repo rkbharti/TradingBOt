@@ -490,6 +490,31 @@ class XAUUSDTradingBot:
 
         print("\n" + "\n".join(lines))
 
+        # Get news events from news_filter if configured
+        news_events_formatted = []
+        news_time_str = "--"
+        try:
+            if hasattr(self.signal_engine, "news_filter") and self.signal_engine.news_filter:
+                events = self.signal_engine.news_filter._get_events(datetime.now(timezone.utc))
+                for e in events:
+                    e_time = self.signal_engine.news_filter._parse_event_time(e.get("time", ""))
+                    time_lbl = e_time.strftime("%H:%M UTC") if e_time else "--:--"
+                    news_events_formatted.append({
+                        "time": time_lbl,
+                        "impact": str(e.get("impact", "HIGH")).upper(),
+                        "title": str(e.get("event", "Unknown Event"))
+                    })
+                upcoming = []
+                for e in events:
+                    e_time = self.signal_engine.news_filter._parse_event_time(e.get("time", ""))
+                    if e_time and e_time > datetime.now(timezone.utc):
+                        upcoming.append(e_time)
+                if upcoming:
+                    next_time = min(upcoming)
+                    news_time_str = next_time.strftime("%H:%M UTC")
+        except Exception as ne_err:
+            print(f"⚠️ Failed to extract news events: {ne_err}")
+
         # ── Compact JSON snapshot for WebSocket / log aggregator and dashboard ─
         snapshot = {
             "type":       "cycle_update",
@@ -530,6 +555,8 @@ class XAUUSDTradingBot:
                 "bot":    [p for p in self.open_positions if p.get("source") != "MANUAL"],
                 "manual": self.manual_positions,
             },
+            "news_items": news_events_formatted,
+            "news_time": news_time_str,
         }
         try:
             json_str = json.dumps(snapshot, default=str)
@@ -537,7 +564,12 @@ class XAUUSDTradingBot:
             # ── Send to dashboard VPS ──
             import requests
             try:
-                r = requests.post("http://68.233.99.145:8001/webhook", json=snapshot, timeout=2)
+                r = requests.post(
+                    "http://68.233.99.145:8001/webhook",
+                    data=json_str,
+                    headers={"Content-Type": "application/json"},
+                    timeout=2
+                )
                 if r.status_code == 200:
                     print("📤 Dashboard webhook OK")
                 else:

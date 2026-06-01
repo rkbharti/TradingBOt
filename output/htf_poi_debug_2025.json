@@ -1,0 +1,15 @@
+{
+  "calls": 19324,
+  "timeframes_checked": 38648,
+  "too_short_df": 0,
+  "not_enough_pivots": 929,
+  "bad_anchor_order": 929,
+  "empty_leg": 0,
+  "first_no_shift_fvg": 40006,
+  "first_failed_displacement": 7772,
+  "extreme_no_shift_fvg": 5609,
+  "extreme_failed_displacement": 0,
+  "pois_added": 75438,
+  "returned_empty": 0,
+  "returned_nonempty": 19324
+}

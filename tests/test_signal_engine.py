@@ -44,7 +44,7 @@ def test_htf_bias_pass():
 def test_htf_bias_fail():
     engine = SignalEngine()
 
-    engine._step_htf_bias = lambda d1, h4: {
+    engine._step_htf_bias = lambda *a, **k: {
         "passed": False,
         "direction": None,
         "reason": "HTF_BIAS_MISMATCH"
@@ -138,7 +138,7 @@ def test_full_pipeline_enter():
     engine._step_atr_regime = lambda df: {"passed": True, "reason": "OK"}
     engine.config.min_atr_threshold = 0.0
 
-    engine._step_htf_bias = lambda d1, h4: {"passed": True, "direction": "BULLISH", "reason": "OK"}
+    engine._step_htf_bias = lambda *a, **k: {"passed": True, "direction": "BULLISH", "reason": "OK"}
 
     sweep = SweepEvent("BULLISH", "SELL_SIDE", 1, 100, 2, 98, 101, 110, 2.0)
     engine._step_external_liquidity_sweep = lambda df, d: ({"passed": True, "reason": "OK"}, sweep)
@@ -147,7 +147,7 @@ def test_full_pipeline_enter():
     engine._step_choch_mss_body_close = lambda m5, sw, m15: ({"passed": True, "reason": "OK"}, bos)
 
     poi = POI("EXTREME_OB", 2, 100, 104)
-    engine._step_valid_poi = lambda df, m5, h4, sw, sb: ({"passed": True, "reason": "OK"}, [poi])
+    engine._step_valid_poi = lambda *a, **k: ({"passed": True, "reason": "OK"}, [poi])
 
     fvg = FVG("BULLISH", 2, 102, 106)
     engine._step_ob_fvg_confluence = lambda df, m15, d, sw, sb, pois: (
@@ -156,7 +156,7 @@ def test_full_pipeline_enter():
 
     engine._step_dealing_range = lambda d, e, sw: {"passed": True, "reason": "OK"}
     engine._step_killzone = lambda now, df: {"passed": True, "reason": "OK"}
-    engine._step_rr = lambda d, e, sw, poi: ({"passed": True, "reason": "OK"}, 99, 110)
+    engine._step_rr = lambda *a, **k: ({"passed": True, "reason": "OK"}, 99, 110)
 
     df = generate_candles()
 
@@ -174,7 +174,7 @@ def test_no_trade_htf_bias_fail():
     engine._step_atr_regime = lambda df: {"passed": True}
     engine.config.min_atr_threshold = 0.0
 
-    engine._step_htf_bias = lambda d1, h4: {
+    engine._step_htf_bias = lambda *a, **k: {
         "passed": False,
         "reason": "HTF_BIAS_MISMATCH",
         "direction": None
@@ -195,7 +195,7 @@ def test_no_trade_sweep_fail():
     engine._step_atr_regime = lambda df: {"passed": True}
     engine.config.min_atr_threshold = 0.0
 
-    engine._step_htf_bias = lambda d1, h4: {"passed": True, "direction": "BULLISH", "reason": "OK"}
+    engine._step_htf_bias = lambda *a, **k: {"passed": True, "direction": "BULLISH", "reason": "OK"}
 
     engine._step_external_liquidity_sweep = lambda df, d: (
         {"passed": False, "reason": "EXTERNAL_LIQUIDITY_NOT_SWEPT"},
@@ -217,7 +217,7 @@ def test_no_trade_choch_fail():
     engine._step_atr_regime = lambda df: {"passed": True}
     engine.config.min_atr_threshold = 0.0
 
-    engine._step_htf_bias = lambda d1, h4: {"passed": True, "direction": "BULLISH", "reason": "OK"}
+    engine._step_htf_bias = lambda *a, **k: {"passed": True, "direction": "BULLISH", "reason": "OK"}
 
     mock_sweep = object()
 
@@ -246,7 +246,7 @@ def test_no_trade_rr_fail():
     engine._step_atr_regime = lambda df: {"passed": True}
     engine.config.min_atr_threshold = 0.0
 
-    engine._step_htf_bias = lambda d1, h4: {"passed": True, "direction": "BULLISH", "reason": "OK"}
+    engine._step_htf_bias = lambda *a, **k: {"passed": True, "direction": "BULLISH", "reason": "OK"}
 
     mock_sweep = object()
     engine._step_external_liquidity_sweep = lambda df, d: ({"passed": True, "reason": "OK"}, mock_sweep)
@@ -255,7 +255,7 @@ def test_no_trade_rr_fail():
     engine._step_choch_mss_body_close = lambda m5, sw, m15: ({"passed": True, "reason": "OK"}, mock_bos)
 
     mock_poi = object()
-    engine._step_valid_poi = lambda df, m5, h4, sw, sb: ({"passed": True, "reason": "OK"}, [mock_poi])
+    engine._step_valid_poi = lambda *a, **k: ({"passed": True, "reason": "OK"}, [mock_poi])
 
     engine._step_ob_fvg_confluence = lambda df, m15, d, sw, sb, p: (
         {"passed": True, "reason": "OK"}, mock_poi, object(), 103
@@ -264,7 +264,7 @@ def test_no_trade_rr_fail():
     engine._step_dealing_range = lambda d, e, sw: {"passed": True, "reason": "OK"}
     engine._step_killzone = lambda n, df: {"passed": True, "reason": "OK"}
 
-    engine._step_rr = lambda d, e, sw, poi: (
+    engine._step_rr = lambda *a, **k: (
         {"passed": False, "reason": "RR_BELOW_MINIMUM"},
         None,
         None
@@ -331,7 +331,7 @@ def test_news_filter_blocks_during_high_impact_event():
 
     blocked, reason = nf.is_news_blackout()
     assert blocked is True
-    assert "HIGH_IMPACT_NEWS_BLACKOUT" in reason
+    assert "HARD_NEWS_BLACKOUT" in reason
     assert "FOMC" in reason
 
 

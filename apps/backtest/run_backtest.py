@@ -1,3 +1,12 @@
+import sys
+import pathlib
+
+# Ensure 'src' is on the path so 'tradingbot' package is importable
+# regardless of how the script is invoked (python -m, direct, IDE, etc.)
+_src_path = str(pathlib.Path(__file__).resolve().parents[2] / "src")
+if _src_path not in sys.path:
+    sys.path.insert(0, _src_path)
+
 import pandas as pd
 import csv
 import json
@@ -42,11 +51,18 @@ def load_data(path: Path) -> pd.DataFrame:
         .str.replace(">", "", regex=False)
         .str.lower()
     )
-    df["datetime"] = pd.to_datetime(
-        df["date"] + " " + df["time"],
-        format="%Y.%m.%d %H:%M:%S",
-        errors="coerce",
-    )
+    print("\nDEBUG CSV COLUMNS:")
+    print(df.columns.tolist())
+    if "date" in df.columns:
+        df["datetime"] = pd.to_datetime(
+            df["date"].astype(str).str.replace(".", "-", regex=False) + " " + df["time"].astype(str),
+            errors="coerce"
+        )
+    else:
+        df["datetime"] = pd.to_datetime(
+            df["time"],
+            errors="coerce"
+        )
     df = df.dropna(subset=["datetime"])
     df.set_index("datetime", inplace=True)
     return df[["open", "high", "low", "close"]].sort_index()
@@ -350,7 +366,7 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
 
         # ✅ Slices aligned with creator's 500-bar max_bars_back
         m5  = df_m5.iloc[max(0, i       - 500) : i + 1]
-        m15 = df_m15.iloc[max(0, m15_idx - 100) : m15_idx]
+        m15 = df_m15.iloc[max(0, m15_idx - 200) : m15_idx]
         h4  = df_h4.iloc[max(0, h4_idx  - 300)  : h4_idx]
         d1  = df_d1.iloc[max(0, d1_idx  - 300)  : d1_idx]
         w1  = df_w1.iloc[max(0, w1_idx  - 100)  : w1_idx]
@@ -466,6 +482,8 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
     print("\n" + "=" * 60)
     if hasattr(engine, "_htf_poi_debug_totals"):
         print(f"[HTF POI DEBUG TOTALS] {engine._htf_poi_debug_totals}")
+    if hasattr(engine, "_bias_filter_counts"):
+        print(f"[BIAS FILTER COUNTS] {engine._bias_filter_counts}")
     print(f"💰 FINAL CAPITAL: ₹{capital:,.2f}")
     print(f"📉 MAX DRAWDOWN: {max_dd*100:.2f}%")
     print(f"📊 SUMMARY: {summary['total_trades']} trades | {summary['win_rate']:.1f}% win rate")
@@ -542,3 +560,4 @@ if __name__ == "__main__":
     t0 = time.time()
     run_backtest(df, data_label=label, start_date=args.start_date)
     print(f"\n⏱ Total runtime: {time.time() - t0:.2f}s")
+    

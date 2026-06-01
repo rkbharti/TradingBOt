@@ -176,6 +176,8 @@ function DS() {
         // --- WebSocket & connection ---
         ws: null,
         ws_connected: false,
+        latency_ms: null,
+        _lastPingTime: null,
         _wsRetryCount: 0,
         _heartbeatInterval: null,
         _healthInterval: null,
@@ -350,9 +352,10 @@ function DS() {
                 if (this._heartbeatInterval) clearInterval(this._heartbeatInterval);
                 this._heartbeatInterval = setInterval(() => {
                     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this._lastPingTime = Date.now();
                         this.ws.send(JSON.stringify({ action: 'ping' }));
                     }
-                }, 30000);
+                }, 10000);
                 // request initial state (optional, server will send anyway)
                 this.ws.send(JSON.stringify({ action: 'get_state' }));
             };
@@ -360,7 +363,12 @@ function DS() {
             this.ws.onmessage = (evt) => {
                 try {
                     const data = JSON.parse(evt.data);
-                    if (data.action === 'pong') return;
+                    if (data.action === 'pong') {
+                        if (this._lastPingTime) {
+                            this.latency_ms = Date.now() - this._lastPingTime;
+                        }
+                        return;
+                    }
 
                     // ---- Account & risk ----
                     if (data.equity !== undefined) this.equity = data.equity;

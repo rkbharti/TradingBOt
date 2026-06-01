@@ -267,6 +267,13 @@ class OrderExecutor:
             final_sl: Optional[float] = None
 
             try:
+                # Validate poi_zone keys if present
+                poi_zone = getattr(signal, "poi_zone", None)
+                if poi_zone is not None:
+                    required_keys = {"top", "bottom", "mt"}
+                    if not required_keys.issubset(poi_zone.keys()):
+                        raise ValueError(f"poi_zone missing keys: {required_keys - poi_zone.keys()}")
+
                 # 2a) Prefer SL from signal engine if present and positive
                 if signal.sl_price is not None and signal.sl_price > 0:
                     final_sl = float(signal.sl_price)
@@ -306,6 +313,13 @@ class OrderExecutor:
             final_tp: Optional[float] = None
 
             try:
+                # Validate liquidity levels keys if present
+                liquidity_levels = getattr(signal, "liquidity_levels", None)
+                if liquidity_levels is not None:
+                    required_keys = {"pdh", "pdl", "weekly_high", "weekly_low"}
+                    if not required_keys.issubset(liquidity_levels.keys()):
+                        raise ValueError(f"liquidity_levels missing keys: {required_keys - liquidity_levels.keys()}")
+
                 # 3a) Prefer TP from signal engine if present and positive
                 if signal.tp_price is not None and signal.tp_price > 0:
                     final_tp = float(signal.tp_price)
