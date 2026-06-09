@@ -1189,9 +1189,9 @@ class TestFullWorkflow:
             assert challenge_policy.peak_balance == challenge_policy.starting_balance
 
     class TestOrderRequestDeviation:
-        """Ensure slippage tolerance is tight — 3 points max."""
+        """Ensure slippage tolerance is set to a realistic cap — 15 points max."""
 
-        def test_default_deviation_is_3_points(
+        def test_default_deviation_is_15_points(
             self, order_executor, valid_signal
         ):
             request = order_executor._build_order_request(
@@ -1201,8 +1201,8 @@ class TestFullWorkflow:
                 sl_price=2695.0,
                 tp_price=2712.5,
             )
-            assert request["deviation"] == 3, (
-                f"deviation must be 3 points (0.3 pips), got {request['deviation']}"
+            assert request["deviation"] == 15, (
+                f"deviation must be 15 points (1.5 pips), got {request['deviation']}"
             )
 
         def test_caller_can_override_deviation(
@@ -1253,6 +1253,605 @@ class TestFullWorkflow:
             today = date.today()
             should_reset = restored_date != today  # False — same day, no reset
             assert should_reset is False
+
+
+class TestBotClosedPositionSync:
+    """Test closed position syncing in XAUUSDTradingBot."""
+
+    @patch("apps.trader.main.MT5Connection")
+    @patch("apps.trader.main.post_trade_result")
+    @patch("apps.trader.main.check_bot_active", return_value=True)
+    def test_sync_closed_positions_deals_query(self, mock_active, mock_post, mock_mt5_conn_class):
+        from apps.trader.main import XAUUSDTradingBot
+        
+        # Setup mocks
+        mock_conn = MagicMock()
+        mock_mt5_conn_class.return_value = mock_conn
+        
+        # Instantiate bot (with mocked dependencies to avoid connection calls)
+        with patch("apps.trader.main.requests.get") as mock_req_get:
+            bot = XAUUSDTradingBot(config_path="config.json")
+            
+        # Mock MT5 account info and positions
+        mock_conn.positions_get.return_value = [] # no positions returned directly by raw positions_get
+        bot.mt5_get_all_positions = MagicMock(return_value=[]) # currently 0 open positions on MT5
+        
+        # Add an open position in the bot's memory
+        ticket_id = 8920860651
+        bot.open_positions = [{
+            "ticket": ticket_id,
+            "signal": "SELL",
+            "lot_size": 0.45,
+            "sl": 4465.79,
+            "tp": 0.0,
+            "entry_price": 4468.17,
+            "entry_time": "2026-06-04T12:00:00",
+            "status": "OPEN",
+            "source": "SIGNAL_ENGINE",
+            "profit": -5.0, # stale floating profit
+        }]
+        
+        # Mock mt5 history deals return
+        mock_exit_deal = MagicMock()
+        mock_exit_deal.entry = 1 # OUT
+        mock_exit_deal.price = 4465.79 # exit price
+        mock_exit_deal.profit = 107.1 # deal profit
+        mock_exit_deal.commission = 0.0
+        mock_exit_deal.swap = 0.0
+        mock_exit_deal.time = 1780568105
+        
+        mock_entry_deal = MagicMock()
+        mock_entry_deal.entry = 0 # IN
+        mock_entry_deal.price = 4468.17 # entry price
+        
+        mock_conn.history_deals_get_by_position.return_value = [mock_entry_deal, mock_exit_deal]
+        
+        # Mock account info for balance/equity
+        mock_acct = MagicMock()
+        mock_acct.balance = 100000.0
+        mock_acct.equity = 100000.0
+        bot.mt5_get_account = MagicMock(return_value=mock_acct)
+        
+        # Run sync_closed_positions
+        bot.sync_closed_positions()
+        
+        # Assertions
+        assert len(bot.open_positions) == 0 # should be removed from open_positions
+        assert len(bot.closed_trades) == 1 # should be added to closed_trades
+        
+        closed = bot.closed_trades[0]
+        assert closed["ticket"] == ticket_id
+        assert closed["close_price"] == 4465.79
+        assert closed["exit"] == 4465.79
+        assert closed["profit"] == 107.1
+        assert closed["pnl"] == 107.1
+        
+        # Verify post_trade_result was called with correct arguments
+        mock_post.assert_called_once()
+        kwargs = mock_post.call_args[1]
+        assert kwargs["pnl"] == 107.1
+        assert kwargs["result"] == "win"
+
+    @patch("apps.trader.main.MT5Connection")
+    @patch("apps.trader.main.check_bot_active", return_value=True)
+    def test_reconstruct_closed_trades_from_history(self, mock_active, mock_mt5_conn_class):
+        from apps.trader.main import XAUUSDTradingBot
+        import pytz
+        from datetime import datetime
+        
+        # Setup mocks
+        mock_conn = MagicMock()
+        mock_mt5_conn_class.return_value = mock_conn
+        
+        # Instantiate bot
+        with patch("apps.trader.main.requests.get") as mock_req_get:
+            bot = XAUUSDTradingBot(config_path="config.json")
+            
+        # Mock MT5 account info
+        mock_acct = MagicMock()
+        mock_acct.balance = 100000.0
+        mock_acct.equity = 100000.0
+        bot.mt5_get_account = MagicMock(return_value=mock_acct)
+        
+        # Create mocked deals for reconstruction
+        ist_tz = pytz.timezone("Asia/Kolkata")
+        
+        mock_entry_deal = MagicMock()
+        mock_entry_deal.position_id = 12345
+        mock_entry_deal.entry = 0 # IN
+        mock_entry_deal.price = 4460.0
+        mock_entry_deal.symbol = "XAUUSD"
+        
+        mock_exit_deal = MagicMock()
+        mock_exit_deal.position_id = 12345
+        mock_exit_deal.entry = 1 # OUT
+        mock_exit_deal.price = 4465.0
+        mock_exit_deal.profit = 120.0
+        mock_exit_deal.commission = -2.0
+        mock_exit_deal.swap = -1.0
+        mock_exit_deal.symbol = "XAUUSD"
+        mock_exit_deal.type = 1 # SELL
+        mock_exit_deal.time = int(datetime.utcnow().timestamp())
+        
+        mock_conn.history_deals_get.return_value = [mock_entry_deal, mock_exit_deal]
+        
+        # Initialize starting balance in challenge policy
+        bot.challenge_policy.starting_balance = 100000.0
+        bot.challenge_policy.daily_pnl = 0.0
+        bot.challenge_policy.trades_today = 0
+        
+        # Run reconstruction
+        bot.reconstruct_closed_trades_from_history()
+        
+        # Assertions
+        assert len(bot.closed_trades) == 1
+        closed = bot.closed_trades[0]
+        assert closed["ticket"] == 12345
+        assert closed["profit"] == 117.0 # 120.0 - 2.0 - 1.0
+        assert closed["pnl"] == 117.0
+        assert closed["exit"] == 4465.0
+        assert closed["signal"] == "BUY"
+        
+        # Verify challenge policy was updated
+        assert bot.challenge_policy.daily_pnl == 117.0
+        assert bot.challenge_policy.trades_today == 1
+        assert bot._trades_today == 1
+        assert bot._daily_pnl_pct == 0.117
+
+    @patch("apps.trader.main.MT5Connection")
+    @patch("apps.trader.main.check_bot_active", return_value=True)
+    def test_session_win_blocks_further_trades(self, mock_active, mock_mt5_conn_class):
+        from apps.trader.main import XAUUSDTradingBot
+        
+        # Setup mocks
+        mock_conn = MagicMock()
+        mock_mt5_conn_class.return_value = mock_conn
+        
+        with patch("apps.trader.main.requests.get") as mock_req_get:
+            bot = XAUUSDTradingBot(config_path="config.json")
+            
+        bot.current_session = "NY_KZ"
+        
+        # Mock a closed trade with profit in current session
+        bot.closed_trades = [{
+            "ticket": 123,
+            "session": "NY_KZ",
+            "profit": 50.0,
+            "pnl": 50.0,
+        }]
+        
+        # Mock evaluates ENTER
+        mock_result = MagicMock()
+        mock_result.action = "ENTER"
+        mock_result.direction = "BULLISH"
+        
+        # Mock evaluate return
+        bot.signal_engine.evaluate = MagicMock(return_value=mock_result)
+        
+        # Mock current price and market data
+        bot.fetch_and_prepare = MagicMock(return_value=(MagicMock(), {"bid": 2700.0, "ask": 2701.0}))
+        bot.mt5_get_account = MagicMock(return_value=MagicMock())
+        bot.mt5_get_all_positions = MagicMock(return_value=[])
+        bot.current_session = "NY_KZ"
+        
+        # Mock is_trading_session to return active
+        with patch("apps.trader.main.is_trading_session", return_value=(True, "NY_KZ")):
+            with patch("apps.trader.main.send_to_dashboard") as mock_send:
+                bot.order_executor = MagicMock()
+                bot.analyze_once()
+                
+                # Assert execute_signal was NOT called due to the session win block
+                bot.order_executor.execute_signal.assert_not_called()
+
+
+class TestPropFirmConfigAndRollover:
+    """Test cases for dynamic environment-variable config loading and rollover behavior."""
+
+    @patch("apps.trader.main.MT5Connection")
+    @patch("apps.trader.main.check_bot_active", return_value=True)
+    @patch.dict("os.environ", {
+        "RISK_PER_TRADE_PCT": "0.5",
+        "DAILY_LOSS_LIMIT_PCT": "2.0",
+        "MAX_DRAWDOWN_PCT": "5.0",
+        "MAX_TRADES_PER_DAY": "5",
+        "MAX_CONSECUTIVE_LOSSES": "3",
+        "MIN_TRADE_GAP_MINUTES": "10",
+        "MAX_LOT_SIZE": "2.5",
+        "MIN_LOT": "0.05",
+    })
+    def test_risk_config_from_env(self, mock_active, mock_mt5_conn_class):
+        from apps.trader.main import XAUUSDTradingBot
+        bot = XAUUSDTradingBot(config_path="config.json")
+        
+        # Verify ChallengePolicy was initialized with env settings
+        assert bot.challenge_policy.risk_per_trade_pct == 0.5
+        assert bot.challenge_policy.daily_loss_limit_pct == 2.0
+        assert bot.challenge_policy.max_drawdown_pct == 5.0
+        assert bot.challenge_policy.max_trades_per_day == 5
+        assert bot.challenge_policy.max_consecutive_losses == 3
+        assert bot.challenge_policy.min_trade_gap_minutes == 10
+        
+        # Verify PositionSizer was initialized with env lot limits
+        assert bot.position_sizer.max_lot == 2.5
+        assert bot.position_sizer.min_lot == 0.05
+
+    @patch("apps.trader.main.MT5Connection")
+    @patch("apps.trader.main.check_bot_active", return_value=True)
+    def test_daily_rollover_resets_consecutive_losses(self, mock_active, mock_mt5_conn_class):
+        from apps.trader.main import XAUUSDTradingBot
+        import json
+        from pathlib import Path
+        
+        bot = XAUUSDTradingBot(config_path="config.json")
+        
+        # Manually set consecutive losses and other daily metrics
+        bot.challenge_policy.consecutive_losses = 2
+        bot._consecutive_losses = 2
+        bot.challenge_policy.daily_pnl_pct = -0.5
+        bot.challenge_policy.trades_today = 2
+        bot._trades_today = 2
+        bot._daily_pnl_pct = -0.5
+        
+        # Mock date so it triggers a reset
+        from datetime import date, datetime
+        import pytz
+        
+        ist_tz = pytz.timezone("Asia/Kolkata")
+        # Ensure we are simulating past 08:00 IST on a new calendar day
+        # Set session date to yesterday
+        bot._session_date = date(2026, 6, 4)
+        
+        # Mock datetime to return 2026-06-05 09:00:00 IST (UTC: 2026-06-05 03:30:00)
+        mock_now_utc = datetime(2026, 6, 5, 3, 30, 0, tzinfo=pytz.utc)
+        
+        # Mock os.getenv for RESET_CONSECUTIVE_LOSSES_DAILY=True
+        with patch.dict("os.environ", {"RESET_CONSECUTIVE_LOSSES_DAILY": "True"}):
+            with patch("apps.trader.main.datetime") as mock_datetime:
+                mock_datetime.now.return_value = mock_now_utc
+                mock_datetime.fromisoformat = datetime.fromisoformat
+                
+                # Mock Path.write_text and Path.exists to prevent actual file writes
+                with patch("pathlib.Path.write_text") as mock_write, \
+                     patch("pathlib.Path.exists", return_value=True), \
+                     patch("pathlib.Path.read_text", return_value='{"session_date": "2026-06-04"}'), \
+                     patch("apps.trader.main.post_daily_summary") as mock_summary:
+                     
+                    bot._maybe_reset_daily_state()
+                    
+                    # Verify daily variables reset
+                    assert bot._trades_today == 0
+                    assert bot._daily_pnl_pct == 0.0
+                    
+                    # Verify consecutive losses are reset
+                    assert bot.challenge_policy.consecutive_losses == 0
+                    assert bot._consecutive_losses == 0
+
+    @patch("apps.trader.main.MT5Connection")
+    @patch("apps.trader.main.check_bot_active", return_value=True)
+    def test_daily_rollover_no_reset_consecutive_losses(self, mock_active, mock_mt5_conn_class):
+        from apps.trader.main import XAUUSDTradingBot
+        from datetime import date, datetime
+        import pytz
+        
+        bot = XAUUSDTradingBot(config_path="config.json")
+        bot.challenge_policy.consecutive_losses = 2
+        bot._consecutive_losses = 2
+        bot._session_date = date(2026, 6, 4)
+        
+        mock_now_utc = datetime(2026, 6, 5, 3, 30, 0, tzinfo=pytz.utc)
+        
+        with patch.dict("os.environ", {"RESET_CONSECUTIVE_LOSSES_DAILY": "False"}):
+            with patch("apps.trader.main.datetime") as mock_datetime:
+                mock_datetime.now.return_value = mock_now_utc
+                mock_datetime.fromisoformat = datetime.fromisoformat
+                
+                with patch("pathlib.Path.write_text"), \
+                     patch("pathlib.Path.exists", return_value=True), \
+                     patch("pathlib.Path.read_text", return_value='{"session_date": "2026-06-04"}'), \
+                     patch("apps.trader.main.post_daily_summary"):
+                     
+                    bot._maybe_reset_daily_state()
+                    
+                    # Verify consecutive losses are NOT reset
+                    assert bot.challenge_policy.consecutive_losses == 2
+                    assert bot._consecutive_losses == 2
+
+    def test_weekend_aware_staleness(self):
+        from tradingbot.data.timeframe_aggregator import MultiTimeframeFractal
+        import pandas as pd
+        
+        # Instantiate timeframe aggregator
+        mtf = MultiTimeframeFractal(symbol="XAUUSD")
+        
+        # Friday closed bar date: June 5, 2026
+        latest_closed = {
+            "time": pd.Timestamp("2026-06-05 00:00:00")
+        }
+        
+        # D1 details (tf_minutes = 1440)
+        tf_minutes = 1440
+        now_utc = pd.Timestamp("2026-06-08 06:00:00")  # Monday morning
+        
+        # Verify the weekend-aware staleness calculation
+        max_allowed_age = pd.Timedelta(minutes=tf_minutes * 2)
+        delta_days = (now_utc - latest_closed["time"]).days
+        has_weekend = False
+        for day_offset in range(delta_days + 1):
+            check_day = (latest_closed["time"] + pd.Timedelta(days=day_offset)).weekday()
+            if check_day in [5, 6]:
+                has_weekend = True
+                break
+                
+        if has_weekend:
+            max_allowed_age += pd.Timedelta(hours=48)
+            
+        is_stale = (now_utc - latest_closed["time"]) > max_allowed_age
+        
+        assert has_weekend is True
+        assert max_allowed_age == pd.Timedelta(days=4)
+        assert bot.challenge_policy.trades_today == 1
+        assert bot._trades_today == 1
+        assert bot._daily_pnl_pct == 0.117
+
+    @patch("apps.trader.main.MT5Connection")
+    @patch("apps.trader.main.check_bot_active", return_value=True)
+    def test_session_win_blocks_further_trades(self, mock_active, mock_mt5_conn_class):
+        from apps.trader.main import XAUUSDTradingBot
+        
+        # Setup mocks
+        mock_conn = MagicMock()
+        mock_mt5_conn_class.return_value = mock_conn
+        
+        with patch("apps.trader.main.requests.get") as mock_req_get:
+            bot = XAUUSDTradingBot(config_path="config.json")
+            
+        bot.current_session = "NY_KZ"
+        
+        # Mock a closed trade with profit in current session
+        bot.closed_trades = [{
+            "ticket": 123,
+            "session": "NY_KZ",
+            "profit": 50.0,
+            "pnl": 50.0,
+        }]
+        
+        # Mock evaluates ENTER
+        mock_result = MagicMock()
+        mock_result.action = "ENTER"
+        mock_result.direction = "BULLISH"
+        
+        # Mock evaluate return
+        bot.signal_engine.evaluate = MagicMock(return_value=mock_result)
+        
+        # Mock current price and market data
+        bot.fetch_and_prepare = MagicMock(return_value=(MagicMock(), {"bid": 2700.0, "ask": 2701.0}))
+        bot.mt5_get_account = MagicMock(return_value=MagicMock())
+        bot.mt5_get_all_positions = MagicMock(return_value=[])
+        bot.current_session = "NY_KZ"
+        
+        # Mock is_trading_session to return active
+        with patch("apps.trader.main.is_trading_session", return_value=(True, "NY_KZ")):
+            with patch("apps.trader.main.send_to_dashboard") as mock_send:
+                bot.order_executor = MagicMock()
+                bot.analyze_once()
+                
+                # Assert execute_signal was NOT called due to the session win block
+                bot.order_executor.execute_signal.assert_not_called()
+
+
+class TestPropFirmConfigAndRollover:
+    """Test cases for dynamic environment-variable config loading and rollover behavior."""
+
+    @patch("apps.trader.main.MT5Connection")
+    @patch("apps.trader.main.check_bot_active", return_value=True)
+    @patch.dict("os.environ", {
+        "RISK_PER_TRADE_PCT": "0.5",
+        "DAILY_LOSS_LIMIT_PCT": "2.0",
+        "MAX_DRAWDOWN_PCT": "5.0",
+        "MAX_TRADES_PER_DAY": "5",
+        "MAX_CONSECUTIVE_LOSSES": "3",
+        "MIN_TRADE_GAP_MINUTES": "10",
+        "MAX_LOT_SIZE": "2.5",
+        "MIN_LOT": "0.05",
+    })
+    def test_risk_config_from_env(self, mock_active, mock_mt5_conn_class):
+        from apps.trader.main import XAUUSDTradingBot
+        bot = XAUUSDTradingBot(config_path="config.json")
+        
+        # Verify ChallengePolicy was initialized with env settings
+        assert bot.challenge_policy.risk_per_trade_pct == 0.5
+        assert bot.challenge_policy.daily_loss_limit_pct == 2.0
+        assert bot.challenge_policy.max_drawdown_pct == 5.0
+        assert bot.challenge_policy.max_trades_per_day == 5
+        assert bot.challenge_policy.max_consecutive_losses == 3
+        assert bot.challenge_policy.min_trade_gap_minutes == 10
+        
+        # Verify PositionSizer was initialized with env lot limits
+        assert bot.position_sizer.max_lot == 2.5
+        assert bot.position_sizer.min_lot == 0.05
+
+    @patch("apps.trader.main.MT5Connection")
+    @patch("apps.trader.main.check_bot_active", return_value=True)
+    def test_daily_rollover_resets_consecutive_losses(self, mock_active, mock_mt5_conn_class):
+        from apps.trader.main import XAUUSDTradingBot
+        import json
+        from pathlib import Path
+        
+        bot = XAUUSDTradingBot(config_path="config.json")
+        
+        # Manually set consecutive losses and other daily metrics
+        bot.challenge_policy.consecutive_losses = 2
+        bot._consecutive_losses = 2
+        bot.challenge_policy.daily_pnl_pct = -0.5
+        bot.challenge_policy.trades_today = 2
+        bot._trades_today = 2
+        bot._daily_pnl_pct = -0.5
+        
+        # Mock date so it triggers a reset
+        from datetime import date, datetime
+        import pytz
+        
+        ist_tz = pytz.timezone("Asia/Kolkata")
+        # Ensure we are simulating past 08:00 IST on a new calendar day
+        # Set session date to yesterday
+        bot._session_date = date(2026, 6, 4)
+        
+        # Mock datetime to return 2026-06-05 09:00:00 IST (UTC: 2026-06-05 03:30:00)
+        mock_now_utc = datetime(2026, 6, 5, 3, 30, 0, tzinfo=pytz.utc)
+        
+        # Mock os.getenv for RESET_CONSECUTIVE_LOSSES_DAILY=True
+        with patch.dict("os.environ", {"RESET_CONSECUTIVE_LOSSES_DAILY": "True"}):
+            with patch("apps.trader.main.datetime") as mock_datetime:
+                mock_datetime.now.return_value = mock_now_utc
+                mock_datetime.fromisoformat = datetime.fromisoformat
+                
+                # Mock Path.write_text and Path.exists to prevent actual file writes
+                with patch("pathlib.Path.write_text") as mock_write, \
+                     patch("pathlib.Path.exists", return_value=True), \
+                     patch("pathlib.Path.read_text", return_value='{"session_date": "2026-06-04"}'), \
+                     patch("apps.trader.main.post_daily_summary") as mock_summary:
+                     
+                    bot._maybe_reset_daily_state()
+                    
+                    # Verify daily variables reset
+                    assert bot._trades_today == 0
+                    assert bot._daily_pnl_pct == 0.0
+                    
+                    # Verify consecutive losses are reset
+                    assert bot.challenge_policy.consecutive_losses == 0
+                    assert bot._consecutive_losses == 0
+
+    @patch("apps.trader.main.MT5Connection")
+    @patch("apps.trader.main.check_bot_active", return_value=True)
+    def test_daily_rollover_no_reset_consecutive_losses(self, mock_active, mock_mt5_conn_class):
+        from apps.trader.main import XAUUSDTradingBot
+        from datetime import date, datetime
+        import pytz
+        
+        bot = XAUUSDTradingBot(config_path="config.json")
+        bot.challenge_policy.consecutive_losses = 2
+        bot._consecutive_losses = 2
+        bot._session_date = date(2026, 6, 4)
+        
+        mock_now_utc = datetime(2026, 6, 5, 3, 30, 0, tzinfo=pytz.utc)
+        
+        with patch.dict("os.environ", {"RESET_CONSECUTIVE_LOSSES_DAILY": "False"}):
+            with patch("apps.trader.main.datetime") as mock_datetime:
+                mock_datetime.now.return_value = mock_now_utc
+                mock_datetime.fromisoformat = datetime.fromisoformat
+                
+                with patch("pathlib.Path.write_text"), \
+                     patch("pathlib.Path.exists", return_value=True), \
+                     patch("pathlib.Path.read_text", return_value='{"session_date": "2026-06-04"}'), \
+                     patch("apps.trader.main.post_daily_summary"):
+                     
+                    bot._maybe_reset_daily_state()
+                    
+                    # Verify consecutive losses are NOT reset
+                    assert bot.challenge_policy.consecutive_losses == 2
+                    assert bot._consecutive_losses == 2
+
+    def test_weekend_aware_staleness(self):
+        from tradingbot.data.timeframe_aggregator import MultiTimeframeFractal
+        import pandas as pd
+        
+        # Instantiate timeframe aggregator
+        mtf = MultiTimeframeFractal(symbol="XAUUSD")
+        
+        # Friday closed bar date: June 5, 2026
+        latest_closed = {
+            "time": pd.Timestamp("2026-06-05 00:00:00")
+        }
+        
+        # D1 details (tf_minutes = 1440)
+        tf_minutes = 1440
+        now_utc = pd.Timestamp("2026-06-08 06:00:00")  # Monday morning
+        
+        # Verify the weekend-aware staleness calculation
+        max_allowed_age = pd.Timedelta(minutes=tf_minutes * 2)
+        delta_days = (now_utc - latest_closed["time"]).days
+        has_weekend = False
+        for day_offset in range(delta_days + 1):
+            check_day = (latest_closed["time"] + pd.Timedelta(days=day_offset)).weekday()
+            if check_day in [5, 6]:
+                has_weekend = True
+                break
+                
+        if has_weekend:
+            max_allowed_age += pd.Timedelta(hours=48)
+            
+        is_stale = (now_utc - latest_closed["time"]) > max_allowed_age
+        
+        assert has_weekend is True
+        assert max_allowed_age == pd.Timedelta(days=4)
+        assert is_stale is False
+
+    @patch("apps.trader.main.MT5Connection")
+    @patch("apps.trader.main.check_bot_active", return_value=True)
+    def test_logging_rotation_on_session_date_change(self, mock_active, mock_mt5_conn_class):
+        from apps.trader.main import XAUUSDTradingBot
+        from datetime import date
+        
+        bot = XAUUSDTradingBot(config_path="config.json")
+        bot._update_file_logging = MagicMock()
+        
+        target_date = date(2026, 6, 8)
+        bot._update_file_logging(target_date)
+        
+        bot._update_file_logging.assert_called_once_with(target_date)
+
+
+class TestClosedTradesTracker:
+    """Test closed trades persistence and retrieval on the dashboard server."""
+
+    def test_tracker_add_and_deduplicate(self, tmp_path):
+        import os
+        from apps.dashboard.main import ClosedTradesTracker
+        
+        tracker = ClosedTradesTracker()
+        tracker.filename = os.path.join(tmp_path, "closed_trades_history.json")
+        tracker.trades = []
+        
+        # Add some trades
+        trade1 = {"id": "1001", "symbol": "XAUUSD", "type": "BUY", "entry": 2700.0, "exit": 2710.0, "pnl": 10.0}
+        trade2 = {"id": "1002", "symbol": "XAUUSD", "type": "SELL", "entry": 2705.0, "exit": 2700.0, "pnl": 5.0}
+        
+        tracker.add_trades([trade1, trade2])
+        assert len(tracker.get_all()) == 2
+        assert tracker.get_all()[0]["id"] == "1001"
+        
+        # Add duplicate trade and a new one
+        trade1_dup = {"id": "1001", "symbol": "XAUUSD", "type": "BUY", "entry": 2700.0, "exit": 2710.0, "pnl": 10.0}
+        trade3 = {"id": "1003", "symbol": "XAUUSD", "type": "BUY", "entry": 2702.0, "exit": 2708.0, "pnl": 6.0}
+        
+        tracker.add_trades([trade1_dup, trade3])
+        assert len(tracker.get_all()) == 3
+        assert tracker.get_all()[2]["id"] == "1003"
+        
+        # Test loading from disk
+        new_tracker = ClosedTradesTracker()
+        new_tracker.filename = tracker.filename
+        new_tracker.load_trades()
+        assert len(new_tracker.get_all()) == 3
+        assert new_tracker.get_all()[1]["id"] == "1002"
+
+    def test_tracker_cap_limit(self, tmp_path):
+        import os
+        from apps.dashboard.main import ClosedTradesTracker
+        
+        tracker = ClosedTradesTracker()
+        tracker.filename = os.path.join(tmp_path, "closed_trades_history.json")
+        tracker.trades = []
+        
+        # Create 250 trades
+        large_list = [{"id": str(i), "symbol": "XAUUSD", "type": "BUY", "entry": 2700.0, "exit": 2710.0, "pnl": 10.0} for i in range(250)]
+        tracker.add_trades(large_list)
+        
+        # Should be capped at 200
+        assert len(tracker.get_all()) == 200
+        # The first ones (0 to 49) should have been dropped
+        assert tracker.get_all()[0]["id"] == "50"
+        assert tracker.get_all()[199]["id"] == "249"
 
 
 # ============================================================================

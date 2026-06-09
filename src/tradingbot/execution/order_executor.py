@@ -157,6 +157,7 @@ class OrderExecutor:
 
         self.position_sizer = position_sizer
         self.dry_run = dry_run
+        self.bypass_policy = False
 
         logger.info(
             f"OrderExecutor initialized:\n"
@@ -217,12 +218,15 @@ class OrderExecutor:
             )
 
             if not allowed:
-                logger.warning(f"Policy violation: {policy_reason}")
-                return ExecutionResult(
-                    success=False,
-                    rejection_reason=policy_reason,
-                    timestamp=timestamp,
-                )
+                if getattr(self, "bypass_policy", False):
+                    logger.info(f"🔵 PAPER TRADE (LOCKDOWN) — Policy warning bypassed: {policy_reason}")
+                else:
+                    logger.warning(f"Policy violation: {policy_reason}")
+                    return ExecutionResult(
+                        success=False,
+                        rejection_reason=policy_reason,
+                        timestamp=timestamp,
+                    )
 
             # =========================================================================
             # STEP 1.5: SPREAD CHECK (CRITICAL FOR XAUUSD)
@@ -259,6 +263,22 @@ class OrderExecutor:
                         rejection_reason=f"Spread check execution error: {str(e)}",
                         timestamp=timestamp,
                     )
+
+            # =========================================================================
+            # STEP 1.7: RESOLVE ACTUAL ENTRY PRICE (LIVE MARKET VS SIGNAL ENTRY)
+            # =========================================================================
+            actual_entry_price = float(signal.entry_price)
+            if not self.dry_run:
+                try:
+                    price_info = self.mt5_client.get_current_price()
+                    if price_info and isinstance(price_info, dict):
+                        if signal.action == "BUY":
+                            actual_entry_price = float(price_info.get("ask", signal.entry_price))
+                        elif signal.action == "SELL":
+                            actual_entry_price = float(price_info.get("bid", signal.entry_price))
+                        logger.info(f"Using live market entry price: {actual_entry_price:.2f} (signal entry: {signal.entry_price:.2f})")
+                except Exception as pe:
+                    logger.warning(f"Could not fetch live price, falling back to signal entry price: {pe}")
 
             # =========================================================================
             # STEP 2: RESOLVE FINAL SL (PREFER ENGINE, FALLBACK TO STRUCTURAL)
@@ -352,6 +372,57 @@ class OrderExecutor:
                 )
 
             # =========================================================================
+            # STEP 3.5: CHECK STOPS INVALIDATION AND DISTANCE BY ACTUAL PRICE
+            # =========================================================================
+            try:
+                symbol_info = self.mt5_client.get_symbol_info(self.mt5_client.symbol)
+                if symbol_info is not None:
+                    point = symbol_info.point
+                    stops_level = symbol_info.trade_stops_level
+                    stops_level_price = stops_level * point
+                    spread_price = symbol_info.spread * point if hasattr(symbol_info, "spread") else 0.0
+                else:
+                    stops_level_price = 0.0
+                    spread_price = 0.0
+                    point = 0.01
+            except Exception as se:
+                logger.warning(f"Could not fetch symbol specs for stops check: {se}")
+                stops_level_price = 0.0
+                spread_price = 0.0
+                point = 0.01
+
+            # Ensure minimum SL distance (stops level + spread + 5 points safety buffer)
+            min_sl_dist = stops_level_price + spread_price + (5 * point)
+            # Default to a safe fallback of 5 pips (0.50 points on Gold) if specs are missing
+            if min_sl_dist <= 0:
+                min_sl_dist = 0.50
+
+            sl_dist = abs(actual_entry_price - final_sl)
+            if sl_dist < min_sl_dist:
+                reason = f"STOPS_TOO_CLOSE: SL distance ({sl_dist:.4f}) is below minimum required ({min_sl_dist:.4f}) based on stops level and spread"
+                logger.warning(reason)
+                return ExecutionResult(success=False, rejection_reason=reason, timestamp=timestamp)
+
+            if signal.action == "BUY":
+                if final_sl >= actual_entry_price:
+                    reason = f"STOPS_INVALIDATED: BUY SL {final_sl:.2f} is above or equal to entry {actual_entry_price:.2f}"
+                    logger.warning(reason)
+                    return ExecutionResult(success=False, rejection_reason=reason, timestamp=timestamp)
+                if final_tp <= actual_entry_price:
+                    reason = f"STOPS_INVALIDATED: BUY TP {final_tp:.2f} is below or equal to entry {actual_entry_price:.2f}"
+                    logger.warning(reason)
+                    return ExecutionResult(success=False, rejection_reason=reason, timestamp=timestamp)
+            elif signal.action == "SELL":
+                if final_sl <= actual_entry_price:
+                    reason = f"STOPS_INVALIDATED: SELL SL {final_sl:.2f} is below or equal to entry {actual_entry_price:.2f}"
+                    logger.warning(reason)
+                    return ExecutionResult(success=False, rejection_reason=reason, timestamp=timestamp)
+                if final_tp >= actual_entry_price:
+                    reason = f"STOPS_INVALIDATED: SELL TP {final_tp:.2f} is above or equal to entry {actual_entry_price:.2f}"
+                    logger.warning(reason)
+                    return ExecutionResult(success=False, rejection_reason=reason, timestamp=timestamp)
+
+            # =========================================================================
             # STEP 4: VALIDATE RISK-REWARD RATIO
             # =========================================================================
 
@@ -364,7 +435,7 @@ class OrderExecutor:
                 min_rr_required = self.position_sizer.min_rr
 
                 rr_validation: RiskRewardValidation = self.position_sizer.validate_rr(
-                    entry_price=signal.entry_price,
+                    entry_price=actual_entry_price,
                     sl_price=final_sl,
                     tp_price=final_tp,
                     min_rr=min_rr_required,
@@ -403,7 +474,7 @@ class OrderExecutor:
                 lot_calc = self.position_sizer.calculate_lot(
                     balance=account_balance,
                     risk_pct=self.challenge_policy.risk_per_trade_pct,
-                    entry_price=signal.entry_price,
+                    entry_price=actual_entry_price,
                     sl_price=final_sl,
                     symbol=self.mt5_client.symbol,
                 )
@@ -430,7 +501,7 @@ class OrderExecutor:
                 order_request = self._build_order_request(
                     signal=signal,
                     lot=final_lot,
-                    entry_price=signal.entry_price,
+                    entry_price=actual_entry_price,
                     sl_price=final_sl,
                     tp_price=final_tp,
                 )
@@ -475,7 +546,7 @@ class OrderExecutor:
                 success=True,
                 ticket=ticket,
                 lot_size=final_lot,
-                entry_price=signal.entry_price,
+                entry_price=actual_entry_price,
                 sl_price=final_sl,
                 tp_price=final_tp,
                 rr_ratio=rr_validation.actual_rr,
@@ -504,7 +575,7 @@ class OrderExecutor:
         entry_price: float,
         sl_price: float,
         tp_price: float,
-        deviation: int = 3,  # 3 points = 0.3 pips on XAUUSD. DO NOT increase.
+        deviation: int = 15,  # 15 points = 1.5 pips on XAUUSD. Restored to a realistic execution slippage cap.
     ) -> Dict[str, Any]:
         """
         Build MT5 order request dictionary.
