@@ -72,7 +72,8 @@ class NewsFilter:
             if tier == "ignore":
                 continue
 
-            event_time = self._parse_event_time(event.get("time", ""))
+            country = event.get("country", "US")
+            event_time = self._parse_event_time(event.get("time", ""), country=country)
             if event_time is None:
                 continue
 
@@ -102,8 +103,18 @@ class NewsFilter:
             or (now - self._cache_ts).total_seconds() > CACHE_TTL_SECONDS
         )
         if cache_stale:
-            self._cache = self._fetch_events(now)
-            self._cache_ts = now
+            fresh_events = self._fetch_events(now)
+            # Fail-safe: Only update cache if we successfully retrieved events,
+            # or if we have no cache at all. This preserves existing cached events on timeouts.
+            if fresh_events or self._cache_ts is None:
+                self._cache = fresh_events
+                self._cache_ts = now
+            else:
+                logger.warning(
+                    "⚠️ Finnhub news fetch failed. Retaining previously cached news events for safety."
+                )
+                # Set next refresh attempt 5 minutes in the future to avoid spamming a failing API
+                self._cache_ts = now - timedelta(seconds=CACHE_TTL_SECONDS - 300)
         return self._cache
 
     def _fetch_events(self, now: datetime) -> list:
@@ -131,9 +142,28 @@ class NewsFilter:
             return []
 
     @staticmethod
-    def _parse_event_time(time_str: str) -> Optional[datetime]:
+    def _parse_event_time(time_str: str, country: str = "US") -> Optional[datetime]:
         try:
-            return datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            import pytz
+            clean_str = time_str.strip()
+            
+            # Case 1: ISO 8601 with trailing Z
+            if clean_str.endswith("Z"):
+                try:
+                    return datetime.strptime(clean_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    pass
+            
+            # Case 2: Standard YYYY-MM-DD HH:MM:SS format
+            # If no timezone is specified in the string, and the country is US/USD,
+            # we assume the time represents New York local time (EST/EDT) and convert it to UTC.
+            dt = datetime.strptime(clean_str, "%Y-%m-%d %H:%M:%S")
+            if country.upper() in {"US", "USD"}:
+                ny_tz = pytz.timezone("America/New_York")
+                dt_localized = ny_tz.localize(dt)
+                return dt_localized.astimezone(timezone.utc)
+            else:
+                return dt.replace(tzinfo=timezone.utc)
         except Exception:
             return None
 

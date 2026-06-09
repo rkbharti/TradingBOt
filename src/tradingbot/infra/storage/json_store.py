@@ -1,4 +1,6 @@
 import json
+import logging
+logger = logging.getLogger("tradingbot.json_store")
 import os
 from datetime import datetime, timedelta
 
@@ -40,9 +42,9 @@ class IdeaMemory:
                                     'block_until': block_until,
                                     'reason': value.get('reason', 'Blocked')
                                 }
-                print(f"🧠 IdeaMemory loaded: {len(self.short_term_memory)} active blocks found.")
+                logger.info(f"🧠 IdeaMemory loaded: {len(self.short_term_memory)} active blocks found.")
             except Exception as e:
-                print(f"⚠️ Failed to load IdeaMemory: {e}")
+                logger.error(f"⚠️ Failed to load IdeaMemory: {e}")
                 self.short_term_memory = {}
 
     def save_memory(self):
@@ -59,7 +61,7 @@ class IdeaMemory:
             with open(self.memory_file, 'w') as f:
                 json.dump(serializable_memory, f, indent=4)
         except Exception as e:
-            print(f"⚠️ Failed to save IdeaMemory: {e}")
+            logger.error(f"⚠️ Failed to save IdeaMemory: {e}")
 
     def _get_key(self, direction, zone, session):
         """Create a unique key for the trade setup"""
@@ -91,14 +93,14 @@ class IdeaMemory:
                 'block_until': block_until,
                 'reason': f"Lost {direction} in {zone} ({session})"
             }
-            print(f"🧠 MEMORY BLOCK: Blocking {key} until {block_until.strftime('%H:%M')}")
+            logger.info(f"🧠 MEMORY BLOCK: Blocking {key} until {block_until.strftime('%H:%M')}")
             self.save_memory()  # <--- SAVE IMMEDIATELY
             
         elif outcome == 'WIN':
             # PLEASURE LOGIC: If we win, clear any blocks (reinforce behavior)
             if key in self.short_term_memory:
                 del self.short_term_memory[key]
-                print(f"🧠 MEMORY CLEAR: {key} is safe to trade again.")
+                logger.info(f"🧠 MEMORY CLEAR: {key} is safe to trade again.")
                 self.save_memory()  # <--- SAVE IMMEDIATELY
 
     def is_allowed(self, direction, zone, session, zone_bucket=None):

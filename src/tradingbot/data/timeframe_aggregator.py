@@ -102,6 +102,19 @@ class MultiTimeframeFractal:
             if tf_minutes is not None:
                 now_utc = pd.Timestamp.utcnow().tz_localize(None)
                 max_allowed_age = pd.Timedelta(minutes=tf_minutes * 2)
+                
+                # Check if a weekend (Saturday/Sunday) falls between latest_closed["time"] and now_utc
+                delta_days = (now_utc - latest_closed["time"]).days
+                has_weekend = False
+                for day_offset in range(delta_days + 1):
+                    check_day = (latest_closed["time"] + pd.Timedelta(days=day_offset)).weekday()
+                    if check_day in [5, 6]:  # Saturday or Sunday
+                        has_weekend = True
+                        break
+                        
+                if has_weekend:
+                    max_allowed_age += pd.Timedelta(hours=48)
+                    
                 is_stale = (now_utc - latest_closed["time"]) > max_allowed_age
 
             if debug:

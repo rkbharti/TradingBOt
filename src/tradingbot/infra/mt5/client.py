@@ -2,8 +2,15 @@ import sys
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
 
+import logging
+logger = logging.getLogger("tradingbot.mt5")
 import MetaTrader5 as mt5
 import json
+
+# Fallback constants for symbol filling modes since they are missing from the MetaTrader5 python library
+SYMBOL_FILLING_FOK = getattr(mt5, "SYMBOL_FILLING_FOK", 1)
+SYMBOL_FILLING_IOC = getattr(mt5, "SYMBOL_FILLING_IOC", 2)
+
 from datetime import datetime
 import pytz
 from config.settings import MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
@@ -61,22 +68,22 @@ class MT5Connection:
             init_kwargs["server"] = MT5_SERVER
 
         if not mt5.initialize(**init_kwargs):
-            print(f"❌ MT5 init failed: {mt5.last_error()}")
+            logger.error(f"❌ MT5 init failed: {mt5.last_error()}")
             return False
 
         info = mt5.account_info()
         if info is None:
-            print("❌ Cannot read account info")
+            logger.error("❌ Cannot read account info")
             return False
 
-        print(f"✅ Connected to MT5 Account: {info.login}")
-        print(f"💰 Balance: ${info.balance}")
-        print(f"💼 Broker: {info.server}")
+        logger.info(f"✅ Connected to MT5 Account: {info.login}")
+        logger.info(f"💰 Balance: ${info.balance}")
+        logger.info(f"💼 Broker: {info.server}")
         return True
 
     def shutdown(self):
         mt5.shutdown()
-        print("🔌 MT5 connection closed")
+        logger.info("🔌 MT5 connection closed")
 
     # -------------------------------------------------
     # MARKET DATA
@@ -95,10 +102,10 @@ class MT5Connection:
             symbol = symbol or self.symbol
             info = mt5.symbol_info(symbol)
             if info is None:
-                print(f"❌ symbol_info() returned None for {symbol}")
+                logger.error(f"❌ symbol_info() returned None for {symbol}")
             return info
         except Exception as e:
-            print(f"❌ get_symbol_info error for {symbol}: {e}")
+            logger.error(f"❌ get_symbol_info error for {symbol}: {e}")
             return None
 
     def get_current_price(self):
@@ -127,7 +134,7 @@ class MT5Connection:
         try:
             return mt5.positions_get(symbol=symbol, ticket=ticket)
         except Exception as e:
-            print(f"❌ positions_get error: {e}")
+            logger.error(f"❌ positions_get error: {e}")
             return None
 
     def get_open_positions(self):
@@ -157,23 +164,44 @@ class MT5Connection:
             return result
 
         except Exception as e:
-            print(f"❌ get_open_positions error: {e}")
+            logger.error(f"❌ get_open_positions error: {e}")
             return []
 
-    def history_deals_get(self, ticket: int = None, from_date=None, to_date=None):
+    def history_deals_get(self, ticket=None, from_date=None, to_date=None):
         """
         Used to evaluate closed trade PnL.
+        Supports passing a datetime object as the first argument (fallback).
         """
         try:
+            if isinstance(ticket, datetime):
+                from_date = ticket
+                ticket = None
+
             if ticket is not None:
                 return mt5.history_deals_get(ticket=ticket)
 
-            if from_date and to_date:
+            if from_date:
+                if to_date is None:
+                    to_date = datetime.now()
                 return mt5.history_deals_get(from_date, to_date)
 
             return None
         except Exception as e:
-            print(f"❌ history_deals_get error: {e}")
+            logger.error(f"❌ history_deals_get error: {e}")
+            return None
+
+    def history_deals_get_by_position(self, position_ticket: int, days_lookback: int = 5):
+        """
+        Fetch all deals associated with a position ticket within a lookback window.
+        """
+        try:
+            from datetime import datetime, timedelta
+            date_from = datetime.now() - timedelta(days=days_lookback)
+            date_to = datetime.now() + timedelta(days=1)
+            deals = mt5.history_deals_get(date_from, date_to, position=position_ticket)
+            return deals
+        except Exception as e:
+            logger.error(f"❌ history_deals_get_by_position error: {e}")
             return None
 
     # -------------------------------------------------
@@ -184,7 +212,7 @@ class MT5Connection:
         symbol = self.symbol
         symbol_info = mt5.symbol_info(symbol)
         if not symbol_info:
-            print("❌ Symbol not found")
+            logger.error("❌ Symbol not found")
             return None
 
         if not symbol_info.visible:
@@ -192,7 +220,7 @@ class MT5Connection:
 
         tick = mt5.symbol_info_tick(symbol)
         if not tick:
-            print("❌ No tick data")
+            logger.error("❌ No tick data")
             return None
 
         order_type = (
@@ -203,6 +231,15 @@ class MT5Connection:
         # Normalize volume
         lot_size = round(lot_size / symbol_info.volume_step) * symbol_info.volume_step
         lot_size = max(symbol_info.volume_min, min(lot_size, symbol_info.volume_max))
+
+        # Resolve dynamic filling mode based on broker capabilities
+        filling_mode = symbol_info.filling_mode
+        if filling_mode & SYMBOL_FILLING_FOK:
+            type_filling = mt5.ORDER_FILLING_FOK
+        elif filling_mode & SYMBOL_FILLING_IOC:
+            type_filling = mt5.ORDER_FILLING_IOC
+        else:
+            type_filling = mt5.ORDER_FILLING_RETURN
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -216,14 +253,14 @@ class MT5Connection:
             "magic": 234000,
             "comment": "XAUUSD Bot",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": type_filling,
         }
 
         result = mt5.order_send(request)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
             return result.order
 
-        print(f"❌ Order failed: {result.comment if result else 'None'}")
+        logger.error(f"❌ Order failed: {result.comment if result else 'None'}")
         return None
 
     def send_order(self, order_request: dict):
@@ -258,12 +295,37 @@ class MT5Connection:
             order_request["sl"] = round(order_request["sl"], digits)
             order_request["tp"] = round(order_request["tp"], digits)
 
+            # Resolve dynamic filling mode based on broker capabilities
+            filling_mode = symbol_info.filling_mode
+            if filling_mode & SYMBOL_FILLING_FOK:
+                order_request["type_filling"] = mt5.ORDER_FILLING_FOK
+            elif filling_mode & SYMBOL_FILLING_IOC:
+                order_request["type_filling"] = mt5.ORDER_FILLING_IOC
+            else:
+                order_request["type_filling"] = mt5.ORDER_FILLING_RETURN
+
+            # Final validation of stops relative to live price right before sending
+            sl_val = order_request.get("sl", 0.0)
+            tp_val = order_request.get("tp", 0.0)
+            if order_request["type"] == mt5.ORDER_TYPE_BUY:
+                # BUY: SL must be below BID, TP must be above ASK
+                if sl_val > 0.0 and sl_val >= tick.bid:
+                    raise Exception(f"Invalid BUY Stops: SL ({sl_val}) is above or equal to bid price ({tick.bid})")
+                if tp_val > 0.0 and tp_val <= tick.ask:
+                    raise Exception(f"Invalid BUY Stops: TP ({tp_val}) is below or equal to ask price ({tick.ask})")
+            elif order_request["type"] == mt5.ORDER_TYPE_SELL:
+                # SELL: SL must be above ASK, TP must be below BID
+                if sl_val > 0.0 and sl_val <= tick.ask:
+                    raise Exception(f"Invalid SELL Stops: SL ({sl_val}) is below or equal to ask price ({tick.ask})")
+                if tp_val > 0.0 and tp_val >= tick.bid:
+                    raise Exception(f"Invalid SELL Stops: TP ({tp_val}) is above or equal to bid price ({tick.bid})")
+
             # =========================================================
             # DEBUG LOG
             # =========================================================
 
-            print("\n📤 FINAL MT5 REQUEST")
-            print(order_request)
+            logger.info("📤 FINAL MT5 REQUEST")
+            logger.info(order_request)
 
             # =========================================================
             # SEND ORDER
@@ -280,12 +342,12 @@ class MT5Connection:
                     f"Comment: {result.comment}"
                 )
 
-            print(f"✅ Order executed successfully | Ticket: {result.order}")
+            logger.info(f"✅ Order executed successfully | Ticket: {result.order}")
 
             return result.order
 
         except Exception as e:
-            print(f"❌ send_order() error: {e}")
+            logger.error(f"❌ send_order() error: {e}")
             raise
 
     # -------------------------------------------------
@@ -343,7 +405,7 @@ class MT5Connection:
 
         result = mt5.order_send(request)
         if result.retcode != mt5.TRADE_RETCODE_DONE:
-            print(f"❌ Modify failed: {result.comment}")
+            logger.error(f"❌ Modify failed: {result.comment}")
             return False
 
         return True
@@ -382,8 +444,8 @@ class MT5Connection:
 
         res = mt5.order_send(request)
         if res.retcode != mt5.TRADE_RETCODE_DONE:
-            print(f"❌ Partial close failed: {res.comment}")
+            logger.error(f"❌ Partial close failed: {res.comment}")
             return {"success": False}
 
-        print(f"✅ Closed {volume_to_close} lots")
+        logger.info(f"✅ Closed {volume_to_close} lots")
         return {"success": True, "remaining_volume": pos.volume - volume_to_close}
