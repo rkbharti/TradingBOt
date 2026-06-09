@@ -11,7 +11,7 @@ import pandas as pd
 import csv
 import json
 from pathlib import Path
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from tradingbot.strategy.smc.signal_engine import SignalEngine
 from apps.backtest.backtest_logger import BacktestLogger
 import uuid
@@ -351,25 +351,33 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
             daily_start_equity[today_str] = capital
         daily_min_equity[today_str] = min(daily_min_equity[today_str], capital)
 
-        m15_idx = bisect_left(m15_index, current_time)
-        h4_idx  = bisect_left(h4_index,  current_time)
-        d1_idx  = bisect_left(d1_index,  current_time)
-        w1_idx  = bisect_left(w1_index,  current_time)
+        # Define completion-time check intervals
+        m15_interval = pd.Timedelta(minutes=15)
+        h4_interval  = pd.Timedelta(hours=4)
+        d1_interval  = pd.Timedelta(days=1)
+        w1_interval  = pd.Timedelta(days=7)
+
+        # Use bisect_right to find the first candle starting after (current_time - interval).
+        # This includes only candles that have fully completed at or before current_time.
+        m15_end_idx = bisect_right(m15_index, current_time - m15_interval)
+        h4_end_idx  = bisect_right(h4_index,  current_time - h4_interval)
+        d1_end_idx  = bisect_right(d1_index,  current_time - d1_interval)
+        w1_end_idx  = bisect_right(w1_index,  current_time - w1_interval)
 
         if (
-            i       < cfg.min_m5_candles  or
-            m15_idx < cfg.min_m15_candles or
-            h4_idx  < 50                  or
-            d1_idx  < D1_WARMUP_CANDLES
+            i           < cfg.min_m5_candles  or
+            m15_end_idx < cfg.min_m15_candles or
+            h4_end_idx  < 50                  or
+            d1_end_idx  < D1_WARMUP_CANDLES
         ):
             continue
 
-        # ✅ Slices aligned with creator's 500-bar max_bars_back
+        # ✅ Slices aligned with creator's 500-bar max_bars_back, using completed end index
         m5  = df_m5.iloc[max(0, i       - 500) : i + 1]
-        m15 = df_m15.iloc[max(0, m15_idx - 200) : m15_idx]
-        h4  = df_h4.iloc[max(0, h4_idx  - 300)  : h4_idx]
-        d1  = df_d1.iloc[max(0, d1_idx  - 300)  : d1_idx]
-        w1  = df_w1.iloc[max(0, w1_idx  - 100)  : w1_idx]
+        m15 = df_m15.iloc[max(0, m15_end_idx - 200) : m15_end_idx]
+        h4  = df_h4.iloc[max(0, h4_end_idx  - 300)  : h4_end_idx]
+        d1  = df_d1.iloc[max(0, d1_end_idx  - 300)  : d1_end_idx]
+        w1  = df_w1.iloc[max(0, w1_end_idx  - 100)  : w1_end_idx]
 
         if not first_iter_logged:
             print(f"[SLICE CHECK] m5={len(m5)} m15={len(m15)} "

@@ -8,6 +8,15 @@
 #   4. PRESERVED: All backend logic, routes, schemas
 # ════════════════════════════════════════════════════════════════════
 
+import sys
+# Reconfigure stdout/stderr to UTF-8 on Windows to prevent UnicodeEncodeError in console
+if hasattr(sys.stdout, "reconfigure"):
+    try: sys.stdout.reconfigure(encoding="utf-8")
+    except Exception: pass
+if hasattr(sys.stderr, "reconfigure"):
+    try: sys.stderr.reconfigure(encoding="utf-8")
+    except Exception: pass
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,10 +40,52 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _STATIC_DIR  = os.path.join(_HERE, "static")
 _TEMPLATES_DIR = os.path.join(_HERE, "templates")
 
+# ═══════════════════════════════════════════════════════════════════════════
+# ClosedTradesTracker — Persist closed trades history
+# ═══════════════════════════════════════════════════════════════════════════
+class ClosedTradesTracker:
+    def __init__(self):
+        self.filename = os.path.join(_HERE, "closed_trades_history.json")
+        self.trades = []
+        self.load_trades()
+
+    def load_trades(self):
+        try:
+            if os.path.exists(self.filename):
+                with open(self.filename, "r", encoding="utf-8") as f:
+                    self.trades = json.load(f)
+                print(f"✅ Loaded {len(self.trades)} historical closed trades")
+        except Exception as e:
+            print(f"⚠️ Failed to load closed trades history: {e}")
+
+    def save_trades(self):
+        try:
+            # Keep only last 200 trades
+            self.trades = self.trades[-200:]
+            with open(self.filename, "w", encoding="utf-8") as f:
+                json.dump(self.trades, f, indent=4)
+        except Exception as e:
+            print(f"⚠️ Failed to save closed trades history: {e}")
+
+    def add_trades(self, new_trades: list):
+        added = False
+        for t in new_trades:
+            tid = t.get("id")
+            if not any(existing.get("id") == tid for existing in self.trades):
+                self.trades.append(t)
+                added = True
+        if added:
+            self.save_trades()
+
+    def get_all(self):
+        return self.trades
+
 # ─── Globals ────────────────────────────────────────────────────────────
 active_connections = []
+closed_trades_tracker = ClosedTradesTracker()
 bot_state = {
-    "current_timeframe": "M15"   # default timeframe
+    "current_timeframe": "M15",   # default timeframe
+    "closed_trades": closed_trades_tracker.get_all()[-50:]
 }
 bot_paused = False
 _SERVER_START_TIME = _time.time()
@@ -379,6 +430,11 @@ def update_bot_state_v2(bot_instance, analysis_data):
         print(f"⚠️ Closed trades error: {e}")
 
     try:
+        closed_trades_tracker.add_trades(formatted_closed)
+    except Exception as e:
+        print(f"⚠️ Failed to track closed trades: {e}")
+
+    try:
         market_struct = get_val(analysis_data, "market_structure", {})
         signal_eng    = get_val(analysis_data, "signal_engine", {})
         # Preserve current_timeframe if not overwritten
@@ -399,7 +455,7 @@ def update_bot_state_v2(bot_instance, analysis_data):
             "market_structure": market_struct.get("current_trend", "NEUTRAL"),
             "session":          get_val(bot_instance, "current_session", "ASIAN"),
             "trades":           formatted_trades,
-            "closed_trades":    formatted_closed,
+            "closed_trades":    closed_trades_tracker.get_all()[-50:],
             "chart_overlays":   {
                 "levels": {
                     "pdh": get_val(analysis_data, "poi_overlays", []),

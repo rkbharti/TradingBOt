@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from fastapi import APIRouter
+from pydantic import BaseModel
 from apscheduler.schedulers.background import BackgroundScheduler
 from zoneinfo import ZoneInfo
 
@@ -88,6 +89,60 @@ scheduler.add_job(
     minute=30
 )
 scheduler.start()
+
+class DailySummaryPayload(BaseModel):
+    total_trades: int
+    wins: int
+    losses: int
+    win_rate: float
+    net_pnl: float
+    max_drawdown: float
+    session: str = "ALL"
+
+@router.post("/daily-summary")
+async def receive_daily_summary(payload: DailySummaryPayload):
+    try:
+        from apps.vps_server.routes.bot_control import manager
+        
+        today = datetime.now(IST).strftime("%Y-%m-%d")
+        summary_text = (
+            f"📊 <b>Daily Trading Summary (Bot Update)</b>\n\n"
+            f"Date: {today}\n"
+            f"Session: {payload.session}\n"
+            f"Trades Closed: {payload.total_trades}\n\n"
+            f"✅ Wins: {payload.wins}\n"
+            f"❌ Losses: {payload.losses}\n"
+            f"📈 Win Rate: {payload.win_rate}%\n\n"
+            f"💰 Net PnL: ${payload.net_pnl:.2f}\n"
+            f"📉 Max Drawdown: {payload.max_drawdown}%\n"
+        )
+        
+        send_telegram(summary_text)
+        
+        event = {
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+            "summary": summary_text,
+            "metrics": {
+                "pnl_today": payload.net_pnl,
+                "total_trades": payload.total_trades,
+                "wins": payload.wins,
+                "losses": payload.losses,
+                "win_rate": payload.win_rate,
+                "max_drawdown": payload.max_drawdown,
+                "session": payload.session
+            }
+        }
+        daily_summary_events.append(event)
+        if len(daily_summary_events) > 100:
+            daily_summary_events.pop(0)
+            
+        await manager.broadcast({
+            "pnl_today": payload.net_pnl,
+            "summary_history": daily_summary_events[-10:][::-1]
+        })
+        return {"ok": True, "message": "Daily summary received and broadcasted"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 @router.post("/daily-summary/send")
 async def manual_send_daily_summary():

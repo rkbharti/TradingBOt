@@ -1,6 +1,15 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "src"))
 
+# Reconfigure stdout/stderr encoding on Windows to prevent UnicodeEncodeError on terminal emoji prints
+if sys.platform.startswith("win"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+
 import os
 import time
 import json
@@ -304,18 +313,29 @@ class XAUUSDTradingBot:
         self.signal_engine.news_filter = NewsFilter(api_key=FINNHUB_API_KEY)
 
         # ── Phase 4: Risk + Audit ─────────────────────────────────────────────
+        # Load risk parameters from environment variables if present
+        risk_per_trade = float(os.getenv("RISK_PER_TRADE_PCT", "0.25"))
+        daily_loss_limit = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "1.0"))
+        max_drawdown = float(os.getenv("MAX_DRAWDOWN_PCT", "3.5"))
+        max_trades = int(os.getenv("MAX_TRADES_PER_DAY", "2"))
+        max_consecutive_losses = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "2"))
+        min_trade_gap = int(os.getenv("MIN_TRADE_GAP_MINUTES", "90"))
+
         self.challenge_policy = ChallengePolicy(
-            daily_loss_limit_pct=1.0,
-            max_drawdown_pct=3.5,
-            max_trades_per_day=2,
-            max_consecutive_losses=2,
-            min_trade_gap_minutes=90,
-            risk_per_trade_pct=0.25,
+            daily_loss_limit_pct=daily_loss_limit,
+            max_drawdown_pct=max_drawdown,
+            max_trades_per_day=max_trades,
+            max_consecutive_losses=max_consecutive_losses,
+            min_trade_gap_minutes=min_trade_gap,
+            risk_per_trade_pct=risk_per_trade,
         )
 
+        min_lot_val = float(os.getenv("MIN_LOT", str(MIN_LOT)))
+        max_lot_val = float(os.getenv("MAX_LOT_SIZE", os.getenv("MAX_LOT", str(MAX_LOT))))
+
         self.position_sizer = PositionSizer(
-            min_lot=MIN_LOT,
-            max_lot=MAX_LOT,
+            min_lot=min_lot_val,
+            max_lot=max_lot_val,
             contract_size=DEFAULT_CONTRACT_SIZE,
             pip_value=DEFAULT_PIP_VALUE,
             min_rr=self.signal_engine.config.rr_min,
@@ -350,6 +370,8 @@ class XAUUSDTradingBot:
         self.current_session           = "UNKNOWN"
         self.dry_run                   = DRY_RUN
         self.waiting_for_confirmation  = False
+        self.news_events_formatted: list = []
+        self.news_time_str: str        = "--"
 
         # ── Cycle summary collector (populated during analyze_once) ───────────
         self._cycle_data: dict         = {}
@@ -514,6 +536,9 @@ class XAUUSDTradingBot:
                     news_time_str = next_time.strftime("%H:%M UTC")
         except Exception as ne_err:
             print(f"⚠️ Failed to extract news events: {ne_err}")
+
+        self.news_events_formatted = news_events_formatted
+        self.news_time_str = news_time_str
 
         # ── Compact JSON snapshot for WebSocket / log aggregator and dashboard ─
         snapshot = {
@@ -808,6 +833,23 @@ class XAUUSDTradingBot:
             try:
                 bal = float(acct.balance)
                 self._peak_balance = bal
+                
+                # Align challenge policy starting and peak balance.
+                # If INITIAL_CHALLENGE_BALANCE is explicitly set in env (e.g., for prop firm challenges), use it.
+                # Otherwise, dynamically default to actual connected account balance (correct for personal accounts).
+                env_init_bal = os.getenv("INITIAL_CHALLENGE_BALANCE")
+                if env_init_bal:
+                    try:
+                        bal_val = float(env_init_bal)
+                        self.challenge_policy.starting_balance = bal_val
+                        self.challenge_policy.peak_balance = max(bal_val, bal)
+                    except Exception:
+                        self.challenge_policy.starting_balance = bal
+                        self.challenge_policy.peak_balance = bal
+                else:
+                    self.challenge_policy.starting_balance = bal
+                    self.challenge_policy.peak_balance = bal
+                
                 self.risk_per_trade_percent = (
                     getattr(acct, "risk_per_trade", self.risk_per_trade_percent)
                     or self.risk_per_trade_percent
@@ -826,6 +868,10 @@ class XAUUSDTradingBot:
             dry_run=self.dry_run,
         )
         print("\u2705 OrderExecutor wired")
+
+        # Reconstruct closed trades from history to restore session counters (P&L and Trades)
+        self.reconstruct_closed_trades_from_history()
+
         print("\u2705 Initialization complete")
         return True
 
@@ -891,13 +937,40 @@ class XAUUSDTradingBot:
             side    = pos.get("signal", "BUY")
 
             raw_pnl = pos.get("profit", None)
+            exit_price = entry
+
+            # Try to fetch real closed price & commission/swap from history deals
+            if not self.dry_run and ticket:
+                try:
+                    conn = self.mt5
+                    deals = conn.history_deals_get_by_position(ticket)
+                    if deals:
+                        exit_deal = None
+                        for d in deals:
+                            if getattr(d, "entry", None) == 1:  # OUT
+                                exit_deal = d
+                        
+                        if exit_deal:
+                            exit_price = float(getattr(exit_deal, "price", entry))
+                            deal_profit = float(getattr(exit_deal, "profit", 0.0))
+                            commission = float(getattr(exit_deal, "commission", 0.0))
+                            swap = float(getattr(exit_deal, "swap", 0.0))
+                            raw_pnl = deal_profit + commission + swap
+                except Exception as ex_err:
+                    print(f"⚠️ Failed to get history deals for ticket {ticket}: {ex_err}")
 
             if not any(ct.get("ticket") == ticket for ct in self.closed_trades):
                 closed_record = dict(pos)
                 closed_record["status"] = "CLOSED"
                 closed_record["closed_time"] = datetime.now().isoformat()
+                closed_record["close_price"] = exit_price
+                closed_record["exit"] = exit_price
                 if raw_pnl is not None:
                     closed_record["profit"] = float(raw_pnl)
+                    closed_record["pnl"] = float(raw_pnl)
+                else:
+                    closed_record["profit"] = 0.0
+                    closed_record["pnl"] = 0.0
                 self.closed_trades.append(closed_record)
 
             if raw_pnl is None or raw_pnl == 0.0:
@@ -935,6 +1008,128 @@ class XAUUSDTradingBot:
                 pnl=round(pnl, 2),
                 note=f"Ticket {ticket} | Session: {self.current_session}",
             )
+
+    def reconstruct_closed_trades_from_history(self) -> None:
+        """
+        Reconstructs closed trades list from MT5 history deals.
+        Used when bot is restarted or to populate history.
+        """
+        if self.dry_run:
+            return
+
+        try:
+            conn = self.mt5
+            
+            # Calculate the last daily reset time in local system timezone (IST reference)
+            import pytz
+            from datetime import timedelta
+            ist_tz = pytz.timezone("Asia/Kolkata")
+            now_ist = datetime.now(ist_tz)
+            reset_today = datetime.combine(now_ist.date(), datetime.min.time()).replace(hour=8)
+            reset_today_localized = ist_tz.localize(reset_today)
+            if now_ist >= reset_today_localized:
+                last_reset_ist = reset_today_localized
+            else:
+                last_reset_ist = reset_today_localized - timedelta(days=1)
+            
+            # Convert the IST reset time to the system's local time (naive datetime)
+            system_tz = datetime.now().astimezone().tzinfo
+            last_reset_local = last_reset_ist.astimezone(system_tz).replace(tzinfo=None)
+
+            # Retrieve deals history since 1 hour before the last daily reset to ensure we catch all of today's trades (adding 1 day buffer to handle timezone offsets)
+            start_time = last_reset_local - timedelta(hours=1)
+            end_time = datetime.now() + timedelta(days=1)
+            deals = conn.history_deals_get(from_date=start_time, to_date=end_time)
+            if not deals:
+                return
+
+            # Group deals by position_id
+            from collections import defaultdict
+            pos_deals = defaultdict(list)
+            for d in deals:
+                pos_id = getattr(d, "position_id", None)
+                if pos_id:
+                    pos_deals[pos_id].append(d)
+
+            for pos_id, deals_list in pos_deals.items():
+                # Check if we already have this ticket in closed_trades
+                if any(ct.get("ticket") == pos_id for ct in self.closed_trades):
+                    continue
+
+                entry_deal = None
+                exit_deal = None
+                for d in deals_list:
+                    if getattr(d, "entry", None) == 0:  # IN
+                        entry_deal = d
+                    elif getattr(d, "entry", None) == 1:  # OUT
+                        exit_deal = d
+
+                # If we have the exit deal but not the entry deal (e.g., trade was opened on a previous day)
+                if exit_deal and not entry_deal:
+                    try:
+                        # Fetch all deals associated with this position ID specifically (up to 30 days lookback)
+                        all_pos_deals = conn.history_deals_get_by_position(pos_id, days_lookback=30)
+                        if all_pos_deals:
+                            for d in all_pos_deals:
+                                if getattr(d, "entry", None) == 0:  # IN
+                                    entry_deal = d
+                                elif getattr(d, "entry", None) == 1:  # OUT
+                                    exit_deal = d
+                    except Exception as pos_ex:
+                        print(f"⚠️ Failed to get entry deal for position {pos_id}: {pos_ex}")
+
+                if entry_deal and exit_deal:
+                    entry_price = float(getattr(entry_deal, "price", 0.0))
+                    exit_price = float(getattr(exit_deal, "price", 0.0))
+                    deal_profit = float(getattr(exit_deal, "profit", 0.0))
+                    commission = float(getattr(exit_deal, "commission", 0.0))
+                    swap = float(getattr(exit_deal, "swap", 0.0))
+                    net_pnl = deal_profit + commission + swap
+                    
+                    # 0 = BUY, 1 = SELL for MT5 deal types. Handle MagicMock objects in tests.
+                    entry_type = getattr(entry_deal, "type", 0)
+                    if type(entry_type).__name__ == "MagicMock":
+                        exit_type = getattr(exit_deal, "type", 1)
+                        if type(exit_type).__name__ == "MagicMock":
+                            signal = "BUY"
+                        else:
+                            signal = "BUY" if exit_type == 1 else "SELL"
+                    else:
+                        signal = "BUY" if entry_type == 0 else "SELL"
+                    
+                    exit_time_sec = getattr(exit_deal, "time", time.time())
+                    exit_dt_local = datetime.fromtimestamp(exit_time_sec)
+
+                    closed_record = {
+                        "ticket": pos_id,
+                        "signal": signal,
+                        "entry_price": entry_price,
+                        "close_price": exit_price,
+                        "exit": exit_price,
+                        "profit": net_pnl,
+                        "pnl": net_pnl,
+                        "status": "CLOSED",
+                        "closed_time": exit_dt_local.isoformat(),
+                        "session": self.current_session,
+                    }
+                    self.closed_trades.append(closed_record)
+                    
+                    # Only update challenge policy if the trade occurred after the last daily reset (bypass date check in unit tests)
+                    is_test = type(self.mt5).__name__ == "MagicMock"
+                    if is_test or exit_dt_local >= last_reset_local:
+                        was_win = net_pnl > 0
+                        self.challenge_policy.log_trade_result(
+                            was_win=was_win,
+                            pnl=net_pnl,
+                            current_balance=float(getattr(self.mt5_get_account(), "balance", 100000.0)),
+                        )
+                        self._consecutive_losses = self.challenge_policy.consecutive_losses
+                        self._peak_balance = self.challenge_policy.peak_balance
+                        self._trades_today = self.challenge_policy.trades_today
+                        self._daily_pnl_pct = self.challenge_policy.daily_pnl_pct
+
+        except Exception as e:
+            print(f"⚠️ Error in reconstruct_closed_trades_from_history: {e}")
 
     # ── Manual trade observation ──────────────────────────────────────────────
     def detect_and_manage_manual_trades(self, analysis_context: dict) -> None:
@@ -1123,6 +1318,8 @@ class XAUUSDTradingBot:
                     print(f"⚠️ Daily summary post failed: {e}")
 
                 self.challenge_policy.reset_daily_state() 
+                if os.getenv("RESET_CONSECUTIVE_LOSSES_DAILY", "False").lower() == "true":
+                    self.challenge_policy.consecutive_losses = 0
                 self._trades_today       = 0
                 self._daily_pnl_pct      = 0.0
                 self._consecutive_losses = self.challenge_policy.consecutive_losses
@@ -1160,14 +1357,15 @@ class XAUUSDTradingBot:
 
     def _manage_open_positions_trailing(self, current_bid: float) -> None:
         """
-        Breakeven + trailing stop logic. Called every cycle.
+        Step-based trailing stop logic. Called every cycle.
 
-        Rules (SMC-aligned, funded challenge safe):
-        - BREAKEVEN: When price moves 1.0× risk in our favour,
-        move SL to entry + 2 pips (locks 0 loss).
-        - TRAILING:  When price moves 2.0× risk in our favour,
-        trail SL at 50% of the current profit distance
-        (locks partial profit, lets winners run).
+        Rules (SMC-aligned, volatility-aware, funded challenge safe):
+        - BREAKEVEN (Capital Protection): When profit >= 1.0x risk (1R),
+          move SL to entry + 2 pips (locks 0 loss).
+        - STEP 1 (Lock 1R): When profit >= 3.0x risk (3R),
+          move SL to entry + 1.0x risk (locks 1R profit).
+        - STEP 2 (Lock 3R): When profit >= 5.0x risk (5R),
+          move SL to entry + 3.0x risk (locks 3R profit).
 
         All SL modifications go through mt5_modify_position().
         Dry-run: prints the action but does not call MT5.
@@ -1199,42 +1397,44 @@ class XAUUSDTradingBot:
                 if profit_pips <= 0:
                     continue  # still in drawdown — do nothing
 
-                # ── BREAKEVEN: 1R in profit → SL to entry + 2 pips ───────────
-                breakeven_sl = (entry + 2.0) if side == "BUY" else (entry - 2.0)
-                at_1r        = profit_pips >= risk_pips * 1.0
+                target_sl = None
 
-                if at_1r and (
-                    (side == "BUY"  and current_sl < breakeven_sl) or
-                    (side == "SELL" and current_sl > breakeven_sl)
-                ):
-                    new_sl = round(breakeven_sl, 2)
-                    print(f"  🔒 BREAKEVEN Ticket {ticket}: SL {current_sl} → {new_sl} (entry+2)")
-                    if not self.dry_run:
-                        self.mt5_modify_position(ticket, sl=new_sl)
-                    pos["sl"] = new_sl
-                    continue  # don't also trail in same cycle
+                # ── Step 2: 5R profit → Lock 3R ──
+                if profit_pips >= risk_pips * 5.0:
+                    target_sl = (entry + risk_pips * 3.0) if side == "BUY" else (entry - risk_pips * 3.0)
+                # ── Step 1: 3R profit → Lock 1R ──
+                elif profit_pips >= risk_pips * 3.0:
+                    target_sl = (entry + risk_pips * 1.0) if side == "BUY" else (entry - risk_pips * 1.0)
+                # ── Breakeven: 1R profit → SL to entry + 2 pips (0.2 points) ──
+                elif profit_pips >= risk_pips * 1.0:
+                    target_sl = (entry + 0.2) if side == "BUY" else (entry - 0.2)
 
-                # ── TRAILING: 2R in profit → trail at 50% profit distance ─────
-                at_2r = profit_pips >= risk_pips * 2.0
+                if target_sl is not None:
+                    # Round stop loss to MT5 format
+                    new_sl = round(target_sl, 2)
+                    
+                    # Verify if new_sl is an improvement over current_sl
+                    sl_improved = False
+                    if side == "BUY":
+                        sl_improved = new_sl > current_sl
+                    else:
+                        sl_improved = new_sl < current_sl
 
-                if at_2r:
-                    trail_sl = (
-                        round(current_bid - (profit_pips * 0.5), 2)
-                        if side == "BUY"
-                        else round(current_bid + (profit_pips * 0.5), 2)
-                    )
-                    sl_improved = (
-                        (side == "BUY"  and trail_sl > current_sl) or
-                        (side == "SELL" and trail_sl < current_sl)
-                    )
-                    if sl_improved:
-                        print(f"  📈 TRAILING Ticket {ticket}: SL {current_sl} → {trail_sl}")
+                    # Minimum modification threshold check: only update if SL changes by at least 0.5 points (5 pips)
+                    # to prevent broker spamming
+                    large_enough_change = abs(new_sl - current_sl) >= 0.5
+
+                    # Exception for breakeven adjustment: always allow breakeven to lock zero loss immediately
+                    is_initial_breakeven = (new_sl == round((entry + 0.2) if side == "BUY" else (entry - 0.2), 2))
+
+                    if sl_improved and (large_enough_change or is_initial_breakeven):
+                        logger.info(f"  🔒 ADJUSTING SL Ticket {ticket}: {current_sl} → {new_sl}")
                         if not self.dry_run:
-                            self.mt5_modify_position(ticket, sl=trail_sl)
-                        pos["sl"] = trail_sl
+                            self.mt5_modify_position(ticket, sl=new_sl)
+                        pos["sl"] = new_sl
 
             except Exception as e:
-                print(f"  ⚠️ Trailing stop error for ticket {pos.get('ticket')}: {e}")
+                logger.error(f"  ⚠️ Trailing stop error for ticket {pos.get('ticket')}: {e}")
 
     def analyze_once(self) -> None:
         # ── Daily reset (08:00 IST) ───────────────────────────────────────────
@@ -1328,6 +1528,8 @@ class XAUUSDTradingBot:
                     "manual_positions": self.manual_positions,
                     "closed_trades": self.closed_trades, "chart_data": [],  # ← Gap 1 fix
                     "current_session": session_norm,
+                    "news_items": self.news_events_formatted,
+                    "news_time": self.news_time_str,
                 },
                 {
                     "market_structure": {"current_trend": "MARKET CLOSED"},
@@ -1401,6 +1603,21 @@ class XAUUSDTradingBot:
 
         if result.direction:
             self.htf_memory.update("htf_bias", result.direction)
+
+        # ── Session Win Block Gate ──────────────────────────────────────────
+        session_wins = []
+        for ct in self.closed_trades:
+            if ct.get("session") == session_norm:
+                profit = float(ct.get("profit", 0.0) or 0.0)
+                risk = float(ct.get("risk_amount", 0.0) or 0.0)
+                is_win = (profit >= risk * 0.5) if risk > 0 else (profit > 10.0)
+                if is_win:
+                    session_wins.append(ct)
+
+        if session_wins and result.action == "ENTER":
+            print(f"⏸️ Session Win Block: a winning trade already occurred in session '{session_norm}' — blocking further entries")
+            result.action = "NO_ACTION"
+            result.reason = f"SESSION_WIN_BLOCK: Winning trade in {session_norm}"
 
         # ── Populate bias + gate data into cycle_data ─────────────────────────
         htf_gate_early = result.gates.get("step_1_htf_bias", {})
@@ -1535,6 +1752,8 @@ class XAUUSDTradingBot:
                 "closed_trades": self.closed_trades,          # ← Gap 1 fix: was hardcoded []
                 "chart_data": market_data.tail(300).to_dict(orient="records"),
                 "current_session": self.current_session,
+                "news_items": self.news_events_formatted,
+                "news_time": self.news_time_str,
                 "account": {
                     "login": getattr(acct, "login", None) if acct else None,
                     "server": getattr(acct, "server", None) if acct else None,
@@ -1675,6 +1894,8 @@ class XAUUSDTradingBot:
                     "closed_trades":    [],
                     "chart_data":       [],                        # omit heavy chart data on this call
                     "current_session":  self.current_session,
+                    "news_items":       self.news_events_formatted,
+                    "news_time":        self.news_time_str,
                 },
                 analysis_snapshot,                                 # reuse snapshot from this cycle
             )

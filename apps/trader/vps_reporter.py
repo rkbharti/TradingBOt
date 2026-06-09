@@ -1,6 +1,7 @@
 import requests
 from datetime import datetime
 import logging 
+logger = logging.getLogger("tradingbot.vps_reporter")
 
 VPS_BASE_URL = "http://68.233.99.145:8000"
 TIMEOUT = 5
@@ -10,12 +11,12 @@ def _post(endpoint: str, payload: dict) -> bool:
     try:
         resp = requests.post(f"{VPS_BASE_URL}{endpoint}", json=payload, timeout=TIMEOUT)
         if resp.status_code == 200:
-            print(f"✅ VPS {endpoint} posted")
+            logger.info(f"✅ VPS {endpoint} posted")
             return True
-        print(f"⚠️ VPS {endpoint} returned {resp.status_code}: {resp.text}")
+        logger.warning(f"⚠️ VPS {endpoint} returned {resp.status_code}: {resp.text}")
         return False
     except Exception as e:
-        print(f"⚠️ VPS {endpoint} failed (bot continues): {e}")
+        logger.error(f"⚠️ VPS {endpoint} failed (bot continues): {e}")
         return False
 
 
@@ -23,18 +24,18 @@ def ping_health() -> bool:
     try:
         resp = requests.get(f"{VPS_BASE_URL}/health", timeout=(2, 8))
         if resp.status_code == 200:
-            print(f"✅ VPS health OK: {resp.json()}")
+            logger.info(f"✅ VPS health OK: {resp.json()}")
             return True
-        print(f"⚠️ VPS health returned {resp.status_code}")
+        logger.warning(f"⚠️ VPS health returned {resp.status_code}")
         return False
     except requests.exceptions.ConnectTimeout as e:
-        print(f"⚠️ VPS health connect timeout (bot continues): {e}")
+        logger.warning(f"⚠️ VPS health connect timeout (bot continues): {e}")
         return False
     except requests.exceptions.ReadTimeout as e:
-        print(f"⚠️ VPS health read timeout (bot continues): {e}")
+        logger.warning(f"⚠️ VPS health read timeout (bot continues): {e}")
         return False
     except requests.exceptions.RequestException as e:
-        print(f"⚠️ VPS unreachable at startup (bot continues): {e}")
+        logger.warning(f"⚠️ VPS unreachable at startup (bot continues): {e}")
         return False
 
 
@@ -58,12 +59,12 @@ def post_signal(
         }
         resp = requests.post(f"{VPS_BASE_URL}/signal", json=payload, timeout=TIMEOUT)
         if resp.status_code == 200:
-            print(f"✅ VPS signal posted: {direction} {symbol} @ {entry}")
+            logger.info(f"✅ VPS signal posted: {direction} {symbol} @ {entry}")
             return True
-        print(f"⚠️ VPS /signal returned {resp.status_code}: {resp.text}")
+        logger.warning(f"⚠️ VPS /signal returned {resp.status_code}: {resp.text}")
         return False
     except Exception as e:
-        print(f"⚠️ VPS post_signal failed (bot continues): {e}")
+        logger.error(f"⚠️ VPS post_signal failed (bot continues): {e}")
         return False
 
 
@@ -85,12 +86,12 @@ def post_trade_result(
         }
         resp = requests.post(f"{VPS_BASE_URL}/trade-result", json=payload, timeout=TIMEOUT)
         if resp.status_code == 200:
-            print(f"✅ VPS trade result posted: {result.upper()} PnL={pnl}")
+            logger.info(f"✅ VPS trade result posted: {result.upper()} PnL={pnl}")
             return True
-        print(f"⚠️ VPS /trade-result returned {resp.status_code}: {resp.text}")
+        logger.warning(f"⚠️ VPS /trade-result returned {resp.status_code}: {resp.text}")
         return False
     except Exception as e:
-        print(f"⚠️ VPS post_trade_result failed (bot continues): {e}")
+        logger.error(f"⚠️ VPS post_trade_result failed (bot continues): {e}")
         return False
 
 

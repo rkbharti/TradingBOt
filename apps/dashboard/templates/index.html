@@ -545,8 +545,8 @@
             <div class="panel-title">Closed Trades</div>
             <span
               class="txt-muted mono"
-              x-text="closed_trades.length + ' TODAY'"
-              >0 TODAY</span
+              x-text="closed_trades.length + ' RECENT'"
+              >0 RECENT</span
             >
           </div>
           <div class="panel-body" style="padding: 0">
@@ -591,14 +591,14 @@
                       class="txt-muted"
                       style="text-align: center"
                     >
-                      NO CLOSED TRADES TODAY
+                      NO RECENT CLOSED TRADES
                     </td>
                   </tr>
                 </tbody>
               </table>
             </div>
             <div class="table-footer mono">
-              REALIZED P&L:
+              TOTAL CLOSED P&L:
               <span
                 :class="getClosedTotalPnl() >= 0 ? 'txt-green' : 'txt-red'"
                 x-text="(getClosedTotalPnl() >= 0 ? '+$' : '-$') + Math.abs(getClosedTotalPnl()).toFixed(2)"
