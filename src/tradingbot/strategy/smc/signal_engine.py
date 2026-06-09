@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+logger = logging.getLogger("tradingbot.signal_engine")
 from dataclasses import dataclass, field
 from datetime import datetime, time, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -112,6 +114,9 @@ class SignalEngineConfig:
     # With wick-to-wick OB zones (FIX #4), the OB itself already includes the
     # wick, so the additional buffer only needs to cover minor noise.
     atr_sl_multiplier: float = 0.3
+    atr_sl_multiplier_sweep: float = 0.8  # Wider multiplier for entries without CHoCH confirmation (sweeps)
+    min_sl_distance_pips: float = 35.0    # Minimum SL size on Gold (35 pips = 3.5 points)
+    allow_aggressive_sweeps: bool = True  # Can be disabled to require strict LTF CHoCH confirmation
 
     sweep_atr_tolerance: float = 0.0
     min_atr_threshold: float = 0.05
@@ -221,6 +226,18 @@ class SignalEngine:
         w1_df: Optional[pd.DataFrame] = None,  # ✅ Added
     ) -> SignalResult:
 
+        # Store yesterday's high and low for PDH/PDL targets
+        if len(d1_df) >= 2:
+            self.yesterday_high = float(d1_df["high"].iloc[-2])
+            self.yesterday_low = float(d1_df["low"].iloc[-2])
+        else:
+            self.yesterday_high = None
+            self.yesterday_low = None
+
+        self.pdl_swept = False
+        self.pdh_swept = False
+        self.htf_trend_direction = "BULLISH"
+
         if not hasattr(self, 'rejection_counts'):
             self.rejection_counts = {}
 
@@ -232,19 +249,19 @@ class SignalEngine:
 
         cfg = self.config
         if len(m5_df) < cfg.min_m5_candles:
-            print(f"⚠️ [DATA] m5_df has {len(m5_df)} candles — recommended minimum is {cfg.min_m5_candles}.")
+            logger.warning(f"⚠️ [DATA] m5_df has {len(m5_df)} candles — recommended minimum is {cfg.min_m5_candles}.")
         if len(m15_df) < cfg.min_m15_candles:
-            print(f"⚠️ [DATA] m15_df has {len(m15_df)} candles — recommended minimum is {cfg.min_m15_candles}.")
+            logger.warning(f"⚠️ [DATA] m15_df has {len(m15_df)} candles — recommended minimum is {cfg.min_m15_candles}.")
         if len(h4_df) < cfg.min_h4_candles:
-            print(f"⚠️ [DATA] h4_df has {len(h4_df)} candles — recommended minimum is {cfg.min_h4_candles}.")
+            logger.warning(f"⚠️ [DATA] h4_df has {len(h4_df)} candles — recommended minimum is {cfg.min_h4_candles}.")
         if len(d1_df) < cfg.min_d1_candles:
-            print(f"⚠️ [DATA] d1_df has {len(d1_df)} candles — recommended minimum is {cfg.min_d1_candles}.")
+            logger.warning(f"⚠️ [DATA] d1_df has {len(d1_df)} candles — recommended minimum is {cfg.min_d1_candles}.")
 
         if any(df.empty for df in [m5_df, m15_df, h4_df, d1_df]):
-            print("⚠️ One or more dataframes are empty — continuing cautiously")
+            logger.warning("⚠️ One or more dataframes are empty — continuing cautiously")
 
         if any(len(df) < 15 for df in [m5_df, m15_df, h4_df, d1_df]):
-            print(f"⚠️ LOW DATA → m5:{len(m5_df)}, m15:{len(m15_df)}, h4:{len(h4_df)}, d1:{len(d1_df)}")
+            logger.warning(f"⚠️ LOW DATA → m5:{len(m5_df)}, m15:{len(m15_df)}, h4:{len(h4_df)}, d1:{len(d1_df)}")
 
         # ─── Step 0: ATR Regime Filter ──────────────────────────────
         current_atr = self._calc_atr(m5_df, len(m5_df) - 1, self.config.atr_period)
@@ -268,9 +285,16 @@ class SignalEngine:
         # ─── Aggressive Sweep Entry Module (Without CHoCH) ───
         # Creator: If BOS/CHoCH/IDM sweep occurs, enter on close of IFSC candle if RR >= 3.0
         aggressive_entry = False
-        if sweep is not None and hasattr(sweep, 'candle_index') and sweep.candle_index >= len(m15_df) - 2:
+        if cfg.allow_aggressive_sweeps and sweep is not None and hasattr(sweep, 'candle_index') and sweep.candle_index >= len(m15_df) - 2:
             agg_entry = sweep.close_back_inside
-            agg_sl = sweep.sweep_price - (current_atr * cfg.atr_sl_multiplier) if direction == "BULLISH" else sweep.sweep_price + (current_atr * cfg.atr_sl_multiplier)
+            agg_sl_buf = current_atr * cfg.atr_sl_multiplier_sweep
+            agg_sl = sweep.sweep_price - agg_sl_buf if direction == "BULLISH" else sweep.sweep_price + agg_sl_buf
+            
+            # Enforce minimum SL distance constraint
+            min_dist = float(cfg.min_sl_distance_pips) * 0.1  # Convert pips to points (35.0 -> 3.5 points)
+            if abs(agg_entry - agg_sl) < min_dist:
+                agg_sl = agg_entry - min_dist if direction == "BULLISH" else agg_entry + min_dist
+
             agg_tp = sweep.target_external_liquidity
             agg_risk = abs(agg_entry - agg_sl)
             if agg_risk > 0:
@@ -427,16 +451,16 @@ class SignalEngine:
 
     def print_gate_summary(self):
         if not hasattr(self, 'rejection_counts') or not self.rejection_counts:
-            print("No rejection data recorded.")
+            logger.info("No rejection data recorded.")
             return
         total = sum(self.rejection_counts.values())
-        print("\n📊 GATE REJECTION SUMMARY:")
-        print("-" * 45)
+        logger.info("📊 GATE REJECTION SUMMARY:")
+        logger.info("-" * 45)
         for reason, count in sorted(self.rejection_counts.items(), key=lambda x: -x[1]):
             pct = (count / total) * 100
-            print(f"  {reason:<30} → {count:>6} ({pct:.1f}%)")
-        print(f"  {'TOTAL REJECTIONS':<30} → {total:>6}")
-        print("-" * 45)
+            logger.info(f"  {reason:<30} → {count:>6} ({pct:.1f}%)")
+        logger.info(f"  {'TOTAL REJECTIONS':<30} → {total:>6}")
+        logger.info("-" * 45)
 
     def evaluate_from_context(self, ctx: Dict[str, Any]) -> SignalResult:
         return self.evaluate(
@@ -493,6 +517,20 @@ class SignalEngine:
         # HELPER — THREE CANDLE SWING
         # ============================================================
 
+        w1_bias = (
+            self.w1_bias_override
+            if hasattr(self, "w1_bias_override")
+            else self._infer_bias(w1_df, 3, "W1")
+            if w1_df is not None and len(w1_df) >= 7
+            else "NEUTRAL"
+        )
+
+        d1_bias = self._infer_bias(d1_df, 5, "D1")
+
+        h4_bias = self._infer_bias(h4_df, 10, "H4")
+
+        self.htf_trend_direction = d1_bias if d1_bias in {"BULLISH", "BEARISH"} else "NEUTRAL"
+
         def _has_three_candle_swing_bearish(df: pd.DataFrame) -> bool:
 
             if len(df) < 3:
@@ -548,15 +586,7 @@ class SignalEngine:
         # BIAS INFERENCE
         # ============================================================
 
-        w1_bias = (
-            self._infer_bias(w1_df, 3)
-            if w1_df is not None and len(w1_df) >= 7
-            else "NEUTRAL"
-        )
 
-        d1_bias = self._infer_bias(d1_df, 5)
-
-        h4_bias = self._infer_bias(h4_df, 10)
 
         if self.config.time_column in d1_df.columns:
             ts = d1_df.iloc[-1][self.config.time_column]
@@ -712,6 +742,48 @@ class SignalEngine:
                 "is_pullback": False,
                 "agreement_score": 0,
             }
+
+        # ============================================================
+        # ITH / ITL PROTECTION CHECK
+        # ============================================================
+        if direction == "BEARISH":
+            h4_iths, _ = self._find_ith_itl(h4_df)
+            if h4_iths:
+                latest_ith_idx = h4_iths[-1]
+                latest_ith_high = float(h4_df["high"].iat[latest_ith_idx])
+                latest_close = float(h4_df["close"].iloc[-1])
+                if latest_close > latest_ith_high:
+                    self._bias_filter_counts["ith_blocked"] += 1
+                    _log(None, "ITH_PROTECTION_BEARISH_CANCELLED")
+                    return {
+                        "passed": False,
+                        "direction": None,
+                        "reason": "ITH_PROTECTION_BEARISH_CANCELLED",
+                        "w1_bias": w1_bias,
+                        "d1_bias": d1_bias,
+                        "h4_bias": h4_bias,
+                        "is_pullback": False,
+                        "agreement_score": 0,
+                    }
+        elif direction == "BULLISH":
+            _, h4_itls = self._find_ith_itl(h4_df)
+            if h4_itls:
+                latest_itl_idx = h4_itls[-1]
+                latest_itl_low = float(h4_df["low"].iat[latest_itl_idx])
+                latest_close = float(h4_df["close"].iloc[-1])
+                if latest_close < latest_itl_low:
+                    self._bias_filter_counts["ith_blocked"] += 1
+                    _log(None, "ITL_PROTECTION_BULLISH_CANCELLED")
+                    return {
+                        "passed": False,
+                        "direction": None,
+                        "reason": "ITL_PROTECTION_BULLISH_CANCELLED",
+                        "w1_bias": w1_bias,
+                        "d1_bias": d1_bias,
+                        "h4_bias": h4_bias,
+                        "is_pullback": False,
+                        "agreement_score": 0,
+                    }
 
         # ============================================================
         # FINAL PASS
@@ -1234,6 +1306,15 @@ class SignalEngine:
         equilibrium = (dealing_low + dealing_high) / 2.0
 
         # ─── HTF alignment + mitigation checks ───────────────────────────
+        candidates = [
+            poi for poi in candidates
+            if not self._is_poi_mt_breached(poi, m15_df, h4_df, d1_df, sweep.direction)
+        ]
+        htf_pois = [
+            poi for poi in htf_pois
+            if not self._is_poi_mt_breached(poi, m15_df, h4_df, d1_df, sweep.direction)
+        ]
+
         htf_aligned: List[Tuple[POI, POI]] = []
 
         for poi in candidates:
@@ -1722,16 +1803,21 @@ class SignalEngine:
             poi_mid  = (poi.low + poi.high) / 2.0
 
             # ✅ FIX #12: 50% Mean Threshold Breach Check (Creator Rule)
-            # If latest M5 candle body closed past 50% MT = 90% failure rate
-            # Invalidates entire POI — skip to next candidate
-            if len(m5_df) > 0:
-                latest_close = float(m5_df.iloc[-1]['close'])
+            # Scan M5 candles from the sweep index to the current candle.
+            # If any candle body close is past 50% MT, the POI is broken.
+            mt_breached = False
+            for m5_idx in range(m5_sweep_idx, len(m5_df)):
+                m5_close = float(m5_df["close"].iat[m5_idx])
                 if direction == "BULLISH":
-                    if latest_close < poi_mid:  # Body closed BELOW 50% MT
-                        continue  # Skip this POI, it's broken
+                    if m5_close < poi_mid:
+                        mt_breached = True
+                        break
                 else:  # BEARISH
-                    if latest_close > poi_mid:  # Body closed ABOVE 50% MT
-                        continue  # Skip this POI, it's broken
+                    if m5_close > poi_mid:
+                        mt_breached = True
+                        break
+            if mt_breached:
+                continue
 
             for fvg in fvg_list:
 
@@ -1910,14 +1996,32 @@ class SignalEngine:
     ) -> Dict[str, Any]:
 
         ts = self._resolve_now_utc(now_utc, m5_df)
-        t = ts.time()
+
+        import pytz
+        ny_tz = pytz.timezone("America/New_York")
+        ts_ny = ts.astimezone(ny_tz)
+        t = ts_ny.hour + ts_ny.minute / 60.0
 
         session: Optional[str] = None
 
-        for (kz_start, kz_end, kz_name) in KILLZONES_UTC:
-            if kz_start <= t < kz_end:
-                session = kz_name
-                break
+        if 20.0 <= t < 24.0:
+            session = "ASIAN"
+        elif 0.0 <= t < 2.0:
+            session = "DEAD_ZONE"
+        elif 2.0 <= t < 5.0:
+            session = "LONDON"
+        elif 7.0 <= t < 12.0:
+            session = "NEW_YORK"
+
+        # 🔴 Dead Zone: 00:00 - 02:00 NY Time hard block
+        if session == "DEAD_ZONE":
+            return {
+                "passed": False,
+                "reason": "DEAD_ZONE_HARD_BLOCK",
+                "timestamp_utc": ts.isoformat(),
+                "session": "DEAD_ZONE",
+                "killzone_active": False,
+            }
 
         # 🔴 XAUUSD: Asian session hard-blocked.
         # Broker spreads spike, liquidity is fake, sweeps are traps.
@@ -1994,8 +2098,9 @@ class SignalEngine:
 
             return "POI"
 
-        def _sl_buffer() -> float:
-            return float(sweep.atr_at_sweep) * float(self.config.atr_sl_multiplier)
+        def _sl_buffer(setup_type: str) -> float:
+            mult = float(self.config.atr_sl_multiplier_sweep) if setup_type == "SWEEP" else float(self.config.atr_sl_multiplier)
+            return float(sweep.atr_at_sweep) * mult
 
         def _compute_sl(setup_type: str, sl_buf: float) -> Tuple[float, str]:
             """
@@ -2006,19 +2111,37 @@ class SignalEngine:
             if direction == "BULLISH":
                 if setup_type == "SWEEP":
                     # SL beyond the sweep wick
-                    return float(sweep.sweep_price) - sl_buf, "SWEEP_WICK"
-                if setup_type == "ENGINEERING_LIQ":
+                    sl = float(sweep.sweep_price) - sl_buf
+                    model = "SWEEP_WICK"
+                elif setup_type == "ENGINEERING_LIQ":
                     # SL at CHoCH level (Last Line of Defense)
-                    return float(structure_break.level) - sl_buf, "CHOCH_LEVEL"
-                # Default: refined OB low
-                return float(selected_poi.low) - sl_buf, "POI_OB_LOW"
-
+                    sl = float(structure_break.level) - sl_buf
+                    model = "CHOCH_LEVEL"
+                else:
+                    # Default: refined OB low
+                    sl = float(selected_poi.low) - sl_buf
+                    model = "POI_OB_LOW"
             else:  # BEARISH
                 if setup_type == "SWEEP":
-                    return float(sweep.sweep_price) + sl_buf, "SWEEP_WICK"
-                if setup_type == "ENGINEERING_LIQ":
-                    return float(structure_break.level) + sl_buf, "CHOCH_LEVEL"
-                return float(selected_poi.high) + sl_buf, "POI_OB_HIGH"
+                    sl = float(sweep.sweep_price) + sl_buf
+                    model = "SWEEP_WICK"
+                elif setup_type == "ENGINEERING_LIQ":
+                    sl = float(structure_break.level) + sl_buf
+                    model = "CHOCH_LEVEL"
+                else:
+                    sl = float(selected_poi.high) + sl_buf
+                    model = "POI_OB_HIGH"
+
+            # Enforce minimum SL distance constraint
+            min_dist = float(self.config.min_sl_distance_pips) * 0.1  # Convert pips to points (35.0 -> 3.5 points)
+            actual_dist = abs(entry_price - sl)
+            if actual_dist < min_dist:
+                if direction == "BULLISH":
+                    sl = entry_price - min_dist
+                else:
+                    sl = entry_price + min_dist
+
+            return sl, model
 
         def _compute_tp_primary(sl: float, setup_type: str) -> float:
             """
@@ -2027,6 +2150,40 @@ class SignalEngine:
             - Trend-following: allow farther target if first ERL is too close.
             """
             tp_erl = float(sweep.target_external_liquidity)
+
+            # Check for PDH/PDL Sweep Target Profit rule
+            # Bullish PDL Sweep Setup
+            if direction == "BULLISH" and getattr(self, "pdl_swept", False) and getattr(self, "yesterday_high", None) is not None:
+                htf_trend = getattr(self, "htf_trend_direction", "BULLISH")
+                if htf_trend == "BULLISH":
+                    # Trend Alignment -> Target is yesterday's High (PDH)
+                    return float(self.yesterday_high)
+                else:
+                    # Counter-Trend -> Capped at nearest unmitigated HTF POI above entry
+                    if htf_pois:
+                        pois_above = [p for p in htf_pois if p.high > entry_price]
+                        if pois_above:
+                            # Nearest POI above entry
+                            nearest_poi = min(pois_above, key=lambda p: p.low)
+                            return float(nearest_poi.low)
+                    # Fallback to ERL target
+                    return tp_erl
+
+            # Bearish PDH Sweep Setup
+            elif direction == "BEARISH" and getattr(self, "pdh_swept", False) and getattr(self, "yesterday_low", None) is not None:
+                htf_trend = getattr(self, "htf_trend_direction", "BEARISH")
+                if htf_trend == "BEARISH":
+                    # Target is yesterday's Low (PDL)
+                    return float(self.yesterday_low)
+                else:
+                    # Counter-Trend -> Capped at nearest unmitigated HTF POI below entry
+                    if htf_pois:
+                        pois_below = [p for p in htf_pois if p.low < entry_price]
+                        if pois_below:
+                            nearest_poi = max(pois_below, key=lambda p: p.high)
+                            return float(nearest_poi.high)
+                    # Fallback to ERL target
+                    return tp_erl
 
             risk, reward_to_erl = _risk_reward(sl, tp_erl)
             rr_min = float(self.config.rr_min)
@@ -2060,7 +2217,7 @@ class SignalEngine:
         # --- decision logic ---------------------------------------------- 
 
         setup_type = _infer_setup_type()
-        sl_buffer = _sl_buffer()
+        sl_buffer = _sl_buffer(setup_type)
         sl, sl_model = _compute_sl(setup_type, sl_buffer)
         tp = _compute_tp_primary(sl, setup_type)
 
@@ -2585,6 +2742,91 @@ class SignalEngine:
 
         return False
 
+    def _is_poi_mt_breached(
+        self,
+        poi: POI,
+        m15_df: pd.DataFrame,
+        h4_df: pd.DataFrame,
+        d1_df: pd.DataFrame,
+        direction: str,
+    ) -> bool:
+        if poi.poi_type.startswith("D1"):
+            df = d1_df
+        elif poi.poi_type.startswith("H4"):
+            df = h4_df
+        else:
+            df = m15_df
+
+        poi_mid = (poi.low + poi.high) / 2.0
+        start_idx = poi.candle_index
+        
+        if start_idx < 0 or start_idx >= len(df):
+            return False
+
+        for idx in range(start_idx, len(df)):
+            close = float(df["close"].iat[idx])
+            if direction == "BULLISH":
+                if close < poi_mid:
+                    return True
+            else:  # BEARISH
+                if close > poi_mid:
+                    return True
+        return False
+
+    def _find_sth_stl(self, df: pd.DataFrame) -> Tuple[List[int], List[int]]:
+        """
+        Find Short-Term Highs (STH) and Short-Term Lows (STL) swing points.
+        A 3-candle swing pivot.
+        """
+        sths = []
+        stls = []
+        n = len(df)
+        if n < 3:
+            return sths, stls
+            
+        highs = df["high"].to_numpy(dtype=float)
+        lows = df["low"].to_numpy(dtype=float)
+        
+        for i in range(1, n - 1):
+            if highs[i] > highs[i - 1] and highs[i] > highs[i + 1]:
+                sths.append(i)
+            if lows[i] < lows[i - 1] and lows[i] < lows[i + 1]:
+                stls.append(i)
+                
+        return sths, stls
+
+    def _find_ith_itl(self, df: pd.DataFrame) -> Tuple[List[int], List[int]]:
+        """
+        Find Intermediate-Term Highs (ITH) and Intermediate-Term Lows (ITL).
+        An ITH is an STH flanked by a lower STH on its left and right.
+        An ITL is an STL flanked by a higher STL on its left and right.
+        """
+        sths, stls = self._find_sth_stl(df)
+        iths = []
+        itls = []
+        
+        n_sth = len(sths)
+        if n_sth >= 3:
+            highs = df["high"].to_numpy(dtype=float)
+            for idx in range(1, n_sth - 1):
+                mid = sths[idx]
+                left = sths[idx - 1]
+                right = sths[idx + 1]
+                if highs[mid] > highs[left] and highs[mid] > highs[right]:
+                    iths.append(mid)
+                    
+        n_stl = len(stls)
+        if n_stl >= 3:
+            lows = df["low"].to_numpy(dtype=float)
+            for idx in range(1, n_stl - 1):
+                mid = stls[idx]
+                left = stls[idx - 1]
+                right = stls[idx + 1]
+                if lows[mid] < lows[left] and lows[mid] < lows[right]:
+                    itls.append(mid)
+                    
+        return iths, itls
+
     def _calc_atr(self, df: pd.DataFrame, end_idx: int, period: int) -> float:
         start = max(1, end_idx - period + 1)
         highs = df["high"].to_numpy(dtype=float)[start : end_idx + 1]
@@ -2601,7 +2843,7 @@ class SignalEngine:
         )
         return float(np.mean(tr))
 
-    def _infer_bias(self, df: pd.DataFrame, window: int) -> str:
+    def _infer_bias(self, df: pd.DataFrame, window: int, timeframe_name: Optional[str] = None) -> str:
         """
         Creator-aligned bias inference:
         Priority 1 — Liquidity sweep of key level + close back
@@ -2639,6 +2881,27 @@ class SignalEngine:
         last_idx   = len(recent) - 1
         last_close = float(recent["close"].iat[last_idx])
         last_open  = float(recent["open"].iat[last_idx])
+
+        # ═══════════════════════════════════════════════════════════════
+        # PRIORITY 0 — Literal PDH/PDL Sweep of Yesterday's Daily Candle
+        # (Only checked for D1 timeframe)
+        # ═══════════════════════════════════════════════════════════════
+        if timeframe_name == "D1" and len(df) >= 3:
+            y_high  = float(df["high"].iloc[-2])
+            y_low   = float(df["low"].iloc[-2])
+            y_close = float(df["close"].iloc[-2])
+            p_high  = float(df["high"].iloc[-3])
+            p_low   = float(df["low"].iloc[-3])
+
+            pdl_swept = (y_low < p_low) and (y_close > p_low)
+            pdh_swept = (y_high > p_high) and (y_close < p_high)
+
+            if pdl_swept and not pdh_swept:
+                self.pdl_swept = True
+                return "BULLISH"
+            elif pdh_swept and not pdl_swept:
+                self.pdh_swept = True
+                return "BEARISH"
 
         # ═══════════════════════════════════════════════════════════════
         # PRIORITY 1 — Liquidity Sweep of Key Level
@@ -2924,7 +3187,7 @@ class SignalEngine:
 
     def _normalize_ohlc(self, df: pd.DataFrame, name: str) -> pd.DataFrame:
         if not isinstance(df, pd.DataFrame):
-            print(f"{name} invalid input type")
+            logger.info(f"{name} invalid input type")
             return pd.DataFrame()
 
         out = df.copy()
@@ -2934,7 +3197,7 @@ class SignalEngine:
         required = {cfg.open_col, cfg.high_col, cfg.low_col, cfg.close_col}
         missing = required.difference(out.columns)
         if missing:
-            print(f"{name} missing columns: {sorted(missing)}")
+            logger.info(f"{name} missing columns: {sorted(missing)}")
             return pd.DataFrame()
 
         cols = ["open", "high", "low", "close"]
@@ -2946,7 +3209,7 @@ class SignalEngine:
         out = out.reset_index(drop=True)
         dropped = before - len(out)
         if dropped > 0:
-            print(f"{name} dropped {dropped} rows with invalid OHLC values")
+            logger.info(f"{name} dropped {dropped} rows with invalid OHLC values")
 
         if isinstance(out.index, pd.DatetimeIndex):
             out[cfg.time_column] = out.index
@@ -2969,7 +3232,7 @@ class SignalEngine:
         out = out.reset_index(drop=True)
 
         if len(out) == 0:
-            print(f"{name} empty after normalization")
+            logger.info(f"{name} empty after normalization")
             return pd.DataFrame()
 
         return out

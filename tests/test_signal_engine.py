@@ -32,7 +32,7 @@ def generate_candles(n=60, base=100):
 
 def test_htf_bias_pass():
     engine = SignalEngine()
-    engine._infer_bias = lambda df, w: "BULLISH"
+    engine._infer_bias = lambda df, w, *a, **k: "BULLISH"
 
     df = generate_candles()
 
@@ -309,9 +309,50 @@ def test_killzone_allows_ny_session():
     assert result["session"] == "NEW_YORK"
     assert result["reason"] == "INSIDE_NEW_YORK_KILLZONE"
 
+
+def test_killzone_blocks_dead_zone():
+    from datetime import datetime, timezone
+    engine = SignalEngine()
+    df = generate_candles()
+    dead_time = datetime(2025, 1, 15, 6, 0, 0, tzinfo=timezone.utc)
+    result = engine._step_killzone(dead_time, df)
+    assert result["passed"] is False
+    assert result["session"] == "DEAD_ZONE"
+    assert result["reason"] == "DEAD_ZONE_HARD_BLOCK"
+
+
+def test_killzone_dst_shifts():
+    from datetime import datetime, timezone
+    engine = SignalEngine()
+    df = generate_candles()
+
+    # 1. Summer (DST active: UTC-4) - June 15, 2025
+    # London Killzone is 02:00 - 05:00 NY time.
+    # In summer, 02:30 NY is 06:30 UTC.
+    summer_london = datetime(2025, 6, 15, 6, 30, 0, tzinfo=timezone.utc)
+    res_summer = engine._step_killzone(summer_london, df)
+    assert res_summer["passed"] is True
+    assert res_summer["session"] == "LONDON"
+
+    # 2. Winter (Standard time: UTC-5) - December 15, 2025
+    # London Killzone is 02:00 - 05:00 NY time.
+    # In winter, 02:30 NY is 07:30 UTC. 06:30 UTC is 01:30 NY (Dead Zone/Asian).
+    winter_london = datetime(2025, 12, 15, 7, 30, 0, tzinfo=timezone.utc)
+    res_winter = engine._step_killzone(winter_london, df)
+    assert res_winter["passed"] is True
+    assert res_winter["session"] == "LONDON"
+
+    # 06:30 UTC in winter is 01:30 NY, which is Dead Zone
+    winter_dead = datetime(2025, 12, 15, 6, 30, 0, tzinfo=timezone.utc)
+    res_dead = engine._step_killzone(winter_dead, df)
+    assert res_dead["passed"] is False
+    assert res_dead["reason"] == "DEAD_ZONE_HARD_BLOCK"
+
+
 # =========================
 # NEWS FILTER TESTS
 # =========================
+
 
 def test_news_filter_blocks_during_high_impact_event():
     from datetime import datetime, timezone, timedelta
@@ -325,7 +366,7 @@ def test_news_filter_blocks_during_high_impact_event():
         "event": "FOMC Rate Decision",
         "country": "US",
         "impact": "high",
-        "time": event_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "time": event_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }]
     nf._cache_ts = datetime.now(timezone.utc)
 
@@ -347,7 +388,7 @@ def test_news_filter_allows_outside_blackout_window():
         "event": "CPI m/m",
         "country": "US",
         "impact": "high",
-        "time": event_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "time": event_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }]
     nf._cache_ts = datetime.now(timezone.utc)
 
@@ -368,7 +409,7 @@ def test_news_filter_ignores_low_impact_events():
         "event": "Balance of Trade",
         "country": "US",
         "impact": "low",
-        "time": event_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "time": event_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }]
     nf._cache_ts = datetime.now(timezone.utc)
 
@@ -383,3 +424,145 @@ def test_news_filter_disabled_when_no_api_key():
     blocked, reason = nf.is_news_blackout()
     assert blocked is False
     assert reason is None
+
+
+def test_is_poi_mt_breached():
+    engine = SignalEngine()
+    from tradingbot.strategy.smc.signal_engine import POI
+    
+    # Bullish POI with range 100 to 110, midpoint is 105
+    poi = POI("OB", 0, 100.0, 110.0)
+    
+    # case 1: no breach (close is above 105)
+    df_no_breach = pd.DataFrame([
+        {"open": 108.0, "high": 111.0, "low": 107.0, "close": 109.0},
+        {"open": 109.0, "high": 112.0, "low": 106.0, "close": 108.0},
+    ])
+    assert engine._is_poi_mt_breached(poi, df_no_breach, df_no_breach, df_no_breach, "BULLISH") is False
+    
+    # case 2: breach (one of the closes is below 105)
+    df_breach = pd.DataFrame([
+        {"open": 108.0, "high": 111.0, "low": 107.0, "close": 109.0},
+        {"open": 109.0, "high": 112.0, "low": 103.0, "close": 104.0}, # closes at 104 (below 105)
+    ])
+    assert engine._is_poi_mt_breached(poi, df_breach, df_breach, df_breach, "BULLISH") is True
+
+
+def test_ith_itl_detection():
+    engine = SignalEngine()
+    
+    # Generate candles to create a Short Term Low (STL) flanked by higher STLs to form an ITL
+    # Pivot low at index 3: STL
+    # Pivot low at index 6: STL (lowest)
+    # Pivot low at index 9: STL
+    data = []
+    # 0 to 2
+    for p in [110, 108, 106]:
+        data.append({"high": p + 2, "low": p, "close": p + 1, "open": p + 1})
+    # index 3: STL (low = 104)
+    data.append({"high": 106, "low": 104, "close": 105, "open": 105})
+    # 4 to 5
+    for p in [106, 108]:
+        data.append({"high": p + 2, "low": p, "close": p + 1, "open": p + 1})
+    # index 6: STL (lowest low = 102)
+    data.append({"high": 104, "low": 102, "close": 103, "open": 103})
+    # 7 to 8
+    for p in [104, 106]:
+        data.append({"high": p + 2, "low": p, "close": p + 1, "open": p + 1})
+    # index 9: STL (low = 104)
+    data.append({"high": 106, "low": 104, "close": 105, "open": 105})
+    # 10 to 12
+    for p in [106, 108, 110]:
+        data.append({"high": p + 2, "low": p, "close": p + 1, "open": p + 1})
+        
+    df = pd.DataFrame(data)
+    iths, itls = engine._find_ith_itl(df)
+    
+    # It should identify index 6 as an Intermediate-Term Low (ITL)
+    assert 6 in itls
+
+
+def test_pdh_pdl_bias_sweep():
+    engine = SignalEngine()
+    
+    # d1_df with 3 candles:
+    # Day -3: High 100, Low 90, Close 95
+    # Day -2 (Yesterday): High 98, Low 89 (sweeps Day -3 Low), Close 91 (closes back above Day -3 Low)
+    # Day -1 (Today): High 95, Low 92, Close 94
+    df = pd.DataFrame([
+        {"open": 95.0, "high": 100.0, "low": 90.0, "close": 95.0},
+        {"open": 94.0, "high": 98.0, "low": 89.0, "close": 91.0}, # sweeps 90.0, closes above it
+        {"open": 91.0, "high": 95.0, "low": 92.0, "close": 94.0},
+    ])
+    
+    bias = engine._infer_bias(df, 1, "D1")
+    assert bias == "BULLISH"
+    assert engine.pdl_swept is True
+
+
+def test_stop_loss_calculation_refinements():
+    # Test atr_sl_multiplier_sweep and min_sl_distance_pips enforcement
+    from src.tradingbot.strategy.smc.signal_engine import SignalEngineConfig, SignalEngine, SweepEvent, POI, StructureBreak
+    
+    cfg = SignalEngineConfig(
+        atr_sl_multiplier=0.3,
+        atr_sl_multiplier_sweep=0.8,
+        min_sl_distance_pips=35.0,
+    )
+    engine = SignalEngine(cfg)
+    
+    # 1. Test Sweep Entry SL Buffer (uses atr_sl_multiplier_sweep = 0.8)
+    sweep = SweepEvent(
+        direction="BEARISH",
+        sweep_side="BUY_SIDE",
+        reference_index=10,
+        reference_level=4300.0,
+        candle_index=20,
+        sweep_price=4310.0,
+        close_back_inside=4295.0,
+        target_external_liquidity=4250.0,
+        atr_at_sweep=10.0,  # 10.0 points ATR
+    )
+    
+    selected_poi = POI(poi_type="IDM_SWEEP", candle_index=20, low=4280.0, high=4300.0)
+    structure_break = StructureBreak(direction="BEARISH", choch_label="CHOCH", level=4300.0, candle_index=20, close_price=4295.0)
+    
+    # Sell entry at 4295.0. Sweep high is 4310.0.
+    # Calculated SL for BEARISH SWEEP = sweep_price + sl_buf = 4310.0 + (10.0 * 0.8) = 4318.0.
+    # Distance: 4318.0 - 4295.0 = 23.0 points (which is > min_sl_distance_pips * 0.1 = 3.5 points).
+    # So SL should be exactly 4318.0.
+    res, sl, tp = engine._step_rr(
+        direction="BEARISH",
+        entry_price=4295.0,
+        sweep=sweep,
+        selected_poi=selected_poi,
+        structure_break=structure_break,
+    )
+    assert res["passed"] is True
+    assert sl == 4318.0
+    
+    # 2. Test Minimum SL Distance Enforcement
+    # Suppose sweep price is 4296.0, entry is 4295.0, atr is 1.0.
+    # Calculated SL for BEARISH SWEEP = 4296.0 + (1.0 * 0.8) = 4296.8.
+    # Distance from entry (4295.0) is 1.8 points, which is LESS than min_sl_distance_pips * 0.1 = 3.5 points.
+    # So SL should be padded to entry + min_dist = 4295.0 + 3.5 = 4298.5.
+    sweep_tight = SweepEvent(
+        direction="BEARISH",
+        sweep_side="BUY_SIDE",
+        reference_index=10,
+        reference_level=4295.5,
+        candle_index=20,
+        sweep_price=4296.0,
+        close_back_inside=4295.0,
+        target_external_liquidity=4250.0,
+        atr_at_sweep=1.0,
+    )
+    res_tight, sl_tight, tp_tight = engine._step_rr(
+        direction="BEARISH",
+        entry_price=4295.0,
+        sweep=sweep_tight,
+        selected_poi=selected_poi,
+        structure_break=structure_break,
+    )
+    assert res_tight["passed"] is True
+    assert sl_tight == 4298.5
