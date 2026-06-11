@@ -990,6 +990,7 @@ class XAUUSDTradingBot:
 
             self._consecutive_losses = self.challenge_policy.consecutive_losses
             self._peak_balance = self.challenge_policy.peak_balance
+            self._trades_today = self.challenge_policy.trades_today
 
             if current_balance > 0 and self.challenge_policy.starting_balance > 0:
                 self._daily_pnl_pct = (
