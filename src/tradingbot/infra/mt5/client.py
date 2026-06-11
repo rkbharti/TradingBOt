@@ -155,9 +155,12 @@ class MT5Connection:
                         "symbol": pos.symbol,
                         "type": "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL",
                         "volume": pos.volume,
+                        "price_open": pos.price_open,
                         "open_price": pos.price_open,
                         "sl": pos.sl,
                         "tp": pos.tp,
+                        "price_current": getattr(pos, "price_current", 0.0),
+                        "profit": getattr(pos, "profit", 0.0),
                     }
                 )
 

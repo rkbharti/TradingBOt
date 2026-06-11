@@ -1454,6 +1454,26 @@ class XAUUSDTradingBot:
 
         # ── Trailing stop / breakeven management ──────────────────────────────
         if self.open_positions:
+            # Refresh open positions' latest values from MT5
+            try:
+                live_pos_map = {
+                    p["ticket"]: p
+                    for p in self.mt5_get_all_positions()
+                    if p.get("ticket")
+                }
+                for op in self.open_positions:
+                    ticket = op.get("ticket")
+                    if ticket and ticket in live_pos_map:
+                        live = live_pos_map[ticket]
+                        op["price_current"] = live.get("price_current", op.get("price_current", 0.0))
+                        op["profit"]        = live.get("profit",        op.get("profit", 0.0))
+                        op["sl"]            = live.get("sl",            op.get("sl", 0.0))
+                        op["tp"]            = live.get("tp",            op.get("tp", 0.0))
+                        if float(op.get("entry_price", 0.0)) == 0.0:
+                            op["entry_price"] = live.get("price_open", 0.0)
+            except Exception as _pnl_err:
+                print(f"⚠️ Live P&L refresh failed before trailing stop: {_pnl_err}")
+
             acct_trail = self.mt5_get_account()
             price_trail = self.mt5_get_current_price()
             if price_trail is not None:
@@ -1502,6 +1522,26 @@ class XAUUSDTradingBot:
                 "market_structure": {"current_trend": previous_bias},
                 "current_zone": "UNKNOWN",
             })
+            # Refresh open positions' latest values from MT5 off-killzone
+            try:
+                live_pos_map = {
+                    p["ticket"]: p
+                    for p in self.mt5_get_all_positions()
+                    if p.get("ticket")
+                }
+                for op in self.open_positions:
+                    ticket = op.get("ticket")
+                    if ticket and ticket in live_pos_map:
+                        live = live_pos_map[ticket]
+                        op["price_current"] = live.get("price_current", op.get("price_current", 0.0))
+                        op["profit"]        = live.get("profit",        op.get("profit", 0.0))
+                        op["sl"]            = live.get("sl",            op.get("sl", 0.0))
+                        op["tp"]            = live.get("tp",            op.get("tp", 0.0))
+                        if float(op.get("entry_price", 0.0)) == 0.0:
+                            op["entry_price"] = live.get("price_open", 0.0)
+            except Exception as _pnl_err:
+                print(f"⚠️ Live P&L refresh failed off-killzone: {_pnl_err}")
+
             acct = self.mt5_get_account()
             equity = float(getattr(acct, "equity", 0.0)) if acct else 0.0
             balance = float(getattr(acct, "balance", 0.0)) if acct else 0.0
