@@ -21,6 +21,8 @@ import pandas as pd
 import pytz
 import requests
 import signal as _signal  # renamed: avoids clash with local 'signal' trade variable
+import logging
+logger = logging.getLogger("tradingbot.trader")
 
 # ── Infra ─────────────────────────────────────────────────────────────────────
 from tradingbot.infra.mt5.client import MT5Connection
