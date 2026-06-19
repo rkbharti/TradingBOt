@@ -1,4 +1,6 @@
 # 🤖 SMC Trading Bot (v5.0.0)
+<img width="1917" height="982" alt="image" src="https://github.com/user-attachments/assets/c1402cce-cf85-4b4f-b970-bc17a200509b" />
+
 
 An advanced, production-grade automated trading system utilizing **Smart Money Concepts (SMC)** for MetaTrader 5 (MT5). The system is built for safety and strict risk compliance, specifically optimized to pass Prop Firm evaluation challenges (such as the **Atlas Funded $5K Step 1 Challenge**) while supporting dynamic, parallel multi-symbol execution (Gold, Bitcoin, and Forex).
 
