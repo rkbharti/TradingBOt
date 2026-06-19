@@ -186,8 +186,10 @@ def is_trading_session():
     - OFF_KILLZONE:       all other times
     - WEEKEND_MARKET_CLOSED: Sat + Sun
     """
+    symbol = os.getenv("SYMBOL", "XAUUSD").upper()
     now_utc = datetime.now(pytz.utc)
-    if now_utc.weekday() >= 5:
+    is_crypto = "BTC" in symbol or "ETH" in symbol or "CRYPTO" in symbol
+    if not is_crypto and now_utc.weekday() >= 5:
         return False, "WEEKEND_MARKET_CLOSED"
 
     ny_tz  = pytz.timezone("America/New_York")
@@ -302,7 +304,8 @@ class XAUUSDTradingBot:
 
         # ── Infrastructure ────────────────────────────────────────────────────
         self.mt5         = MT5Connection(config_path)
-        self.mtf         = MultiTimeframeFractal(symbol="XAUUSD")
+        self.symbol      = os.getenv("SYMBOL", "XAUUSD").upper()
+        self.mtf         = MultiTimeframeFractal(symbol=self.symbol)
         self.idea_memory = IdeaMemory(expiry_minutes=30)
         self.htf_memory  = HTFMemory()
 
@@ -312,6 +315,7 @@ class XAUUSDTradingBot:
 
         self.signal_engine_config = SignalEngineConfig()
         self.signal_engine = SignalEngine(self.signal_engine_config)
+        self.signal_engine.symbol = self.symbol
         self.signal_engine.news_filter = NewsFilter(api_key=FINNHUB_API_KEY)
 
         # ── Phase 4: Risk + Audit ─────────────────────────────────────────────
@@ -346,8 +350,8 @@ class XAUUSDTradingBot:
         self.order_executor: Optional[OrderExecutor] = None
 
         self.audit_logger = AuditLogger(
-            log_path="logs/decisions/audit.jsonl",
-            symbol="XAUUSD",
+            log_path=f"logs/decisions/audit_{self.symbol}.jsonl",
+            symbol=self.symbol,
             timeframe="M5",
         )
 
@@ -358,6 +362,16 @@ class XAUUSDTradingBot:
         self._consecutive_losses: int  = 0
         self._last_trade_time: Optional[datetime] = None
         self._session_date: Optional[date] = None
+
+        # Trailing floors state variables (Atlas Funded Challenge)
+        account_size = float(os.getenv("ACCOUNT_SIZE", "5000.0"))
+        self.all_time_highest_balance: float = account_size
+        self.all_time_highest_equity: float = account_size
+        self.previous_day_highest_balance: float = account_size
+        self.previous_day_highest_equity: float = account_size
+        self.daily_highest_balance: float = account_size
+        self.daily_highest_equity: float = account_size
+        self.daily_halted: bool = False
 
         # ── State ─────────────────────────────────────────────────────────────
         self.running                   = False
@@ -408,7 +422,7 @@ class XAUUSDTradingBot:
         ts    = d.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         sess  = d.get("session", "UNKNOWN")
         mode  = "🔴 LIVE" if not self.dry_run else "🟡 DRY-RUN"
-        title = f"  XAUUSD  │  {ts}  │  {sess}  │  {mode}"
+        title = f"  {self.symbol}  │  {ts}  │  {sess}  │  {mode}"
         lines.append(f"╔{'═' * W}╗")
         lines.append(f"║{title:<{W}}║")
 
@@ -428,7 +442,7 @@ class XAUUSDTradingBot:
 
         # ── Live price ────────────────────────────────────────────────────────
         lines.append(divider())
-        lines.append(f"║{'  📈 LIVE PRICE  ─  XAUUSD':<{W}}║")
+        lines.append(f"║{'  📈 LIVE PRICE  ─  ' + self.symbol:<{W}}║")
         candle = d.get("candle", {})
         lines.append(row("Bid / Ask:",  f"{d.get('bid', 0):.2f}  /  {d.get('ask', 0):.2f}   Spread: {d.get('spread', 0):.2f} pts"))
         lines.append(row("M5 Candle:",  f"O:{candle.get('open','─')}  H:{candle.get('high','─')}  L:{candle.get('low','─')}  C:{candle.get('close','─')}"))
@@ -825,7 +839,7 @@ class XAUUSDTradingBot:
 
     # ── Initialization ────────────────────────────────────────────────────────
     def initialize(self) -> bool:
-        print("=== Initializing XAUUSDTradingBot ===")
+        print(f"=== Initializing {self.symbol}TradingBot ===")
         if not self.mt5_initialize():
             print("\u274c MT5 initialization failed")
             return False
@@ -873,6 +887,10 @@ class XAUUSDTradingBot:
 
         # Reconstruct closed trades from history to restore session counters (P&L and Trades)
         self.reconstruct_closed_trades_from_history()
+
+        # Load dynamic state and verify challenge configuration
+        self.load_session_state()
+        self.verify_challenge_config()
 
         print("\u2705 Initialization complete")
         return True
@@ -1005,7 +1023,7 @@ class XAUUSDTradingBot:
                 f"Peak: ${self._peak_balance:,.2f}"
             )
             post_trade_result(
-                symbol="XAUUSD",
+                symbol=self.symbol,
                 direction=side,
                 result="win" if was_win else "loss",
                 pnl=round(pnl, 2),
@@ -1270,42 +1288,319 @@ class XAUUSDTradingBot:
 
     # ── Main analysis cycle ───────────────────────────────────────────────────
 
+    def load_session_state(self) -> None:
+        """Load session state from logs/session_state.json."""
+        from pathlib import Path
+        import json
+        STATE_FILE = Path(__file__).resolve().parents[2] / "logs" / f"session_state_{self.symbol}.json"
+        
+        # Default initialization values
+        account_size = float(os.getenv("ACCOUNT_SIZE", "5000.0"))
+        self.all_time_highest_balance = account_size
+        self.all_time_highest_equity = account_size
+        self.previous_day_highest_balance = account_size
+        self.previous_day_highest_equity = account_size
+        self.daily_highest_balance = account_size
+        self.daily_highest_equity = account_size
+        self._session_date = None
+
+        if STATE_FILE.exists():
+            try:
+                saved = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                saved_date_str = saved.get("session_date", "")
+                if saved_date_str:
+                    from datetime import date
+                    self._session_date = date.fromisoformat(saved_date_str)
+                
+                self.all_time_highest_balance = float(saved.get("all_time_highest_balance", account_size))
+                self.all_time_highest_equity = float(saved.get("all_time_highest_equity", account_size))
+                self.previous_day_highest_balance = float(saved.get("previous_day_highest_balance", account_size))
+                self.previous_day_highest_equity = float(saved.get("previous_day_highest_equity", account_size))
+                self.daily_highest_balance = float(saved.get("daily_highest_balance", account_size))
+                self.daily_highest_equity = float(saved.get("daily_highest_equity", account_size))
+                
+                # Sync ChallengePolicy with loaded state
+                self.challenge_policy.daily_floor = max(self.previous_day_highest_balance, self.previous_day_highest_equity) * 0.95
+                self.challenge_policy.max_overall_floor = max(self.all_time_highest_balance, self.all_time_highest_equity) * 0.93
+                
+                print(f"📂 Restored session state from disk. Date: {self._session_date}")
+                print(f"   Peaks: All-Time Bal Peak=${self.all_time_highest_balance:.2f}, Daily Bal Peak=${self.daily_highest_balance:.2f}")
+            except Exception as load_err:
+                print(f"⚠️ Could not load session state: {load_err}")
+
+    def save_session_state(self) -> None:
+        """Save session state to logs/session_state.json."""
+        from pathlib import Path
+        import json
+        STATE_FILE = Path(__file__).resolve().parents[2] / "logs" / f"session_state_{self.symbol}.json"
+        try:
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            state_data = {
+                "session_date": self._session_date.isoformat() if self._session_date else None,
+                "all_time_highest_balance": self.all_time_highest_balance,
+                "all_time_highest_equity": self.all_time_highest_equity,
+                "previous_day_highest_balance": self.previous_day_highest_balance,
+                "previous_day_highest_equity": self.previous_day_highest_equity,
+                "daily_highest_balance": self.daily_highest_balance,
+                "daily_highest_equity": self.daily_highest_equity,
+                "updated_at": datetime.now().isoformat()
+            }
+            STATE_FILE.write_text(json.dumps(state_data, indent=4), encoding="utf-8")
+        except Exception as save_err:
+            print(f"⚠️ Could not persist session state: {save_err}")
+
+    def resolve_symbol(self) -> str:
+        """Resolve the active trading symbol on the current broker."""
+        import MetaTrader5 as mt
+        target_symbol = os.getenv("SYMBOL", "XAUUSD").upper()
+        if target_symbol == "XAUUSD":
+            candidates = ["XAUUSD", "XAUUSD.a", "XAUUSD.b", "XAUUSD.pro", "XAUUSD.raw", "GOLD"]
+        else:
+            candidates = [target_symbol, f"{target_symbol}.a", f"{target_symbol}.b", f"{target_symbol}.pro", f"{target_symbol}.raw"]
+        
+        for symbol in candidates:
+            info = mt.symbol_info(symbol)
+            if info is not None:
+                if mt.symbol_select(symbol, True):
+                    print(f"✅ Resolved symbol to: {symbol}")
+                    self.symbol = symbol
+                    self.mt5.symbol = symbol
+                    self.mtf.symbol = symbol
+                    self.signal_engine.symbol = symbol
+                    self.audit_logger.symbol = symbol
+                    if hasattr(self, "position_sizer") and self.position_sizer is not None:
+                        self.position_sizer.contract_size = float(info.trade_contract_size)
+                    return symbol
+        raise ValueError(f"❌ No valid symbol found on the broker server for {target_symbol}")
+
+    def send_startup_summary_telegram(self, symbol: str, account_size: float, balance: float, equity: float, daily_floor: float, max_overall_floor: float, profit_target: float) -> None:
+        """Send a formatted startup summary table via Telegram."""
+        msg = (
+            f"🚀 <b>ATLAS CHALLENGE BOT STARTED</b>\n"
+            f"----------------------------------------\n"
+            f"📊 <b>Account:</b>\n"
+            f"  • Size: ${account_size:,.2f}\n"
+            f"  • Balance: ${balance:,.2f}\n"
+            f"  • Equity: ${equity:,.2f}\n"
+            f"  • Symbol: <code>{symbol}</code>\n"
+            f"----------------------------------------\n"
+            f"🛡️ <b>Risk Parameters:</b>\n"
+            f"  • Risk/Trade: {os.getenv('RISK_PER_TRADE_PCT') or '0.25'}%\n"
+            f"  • Daily Drawdown Floor: ${daily_floor:,.2f}\n"
+            f"  • Overall Drawdown Floor: ${max_overall_floor:,.2f}\n"
+            f"  • Target: ${profit_target:,.2f}\n"
+            f"----------------------------------------\n"
+            f"🚦 Status: <b>READY & MONITORING</b>"
+        )
+        send_telegram(msg)
+
+    def verify_challenge_config(self) -> None:
+        """
+        Validate all challenge rules at startup.
+        Aborts with exit code 1 if any validation checks fail.
+        """
+        print("🔍 Verifying Challenge Configuration...")
+        errors = []
+
+        # 1. Check MT5 connection
+        acct = self.mt5_get_account()
+        if not acct:
+            errors.append("MT5 is not connected or account info cannot be retrieved.")
+        else:
+            print(f"Connected to MT5 Login: {acct.login}, Server: {acct.server}, Company: {getattr(acct, 'company', 'Unknown')}")
+            
+            # 2. Check starting balance: $5,000 ± $10
+            bal = float(acct.balance)
+            expected_bal = float(os.getenv("ACCOUNT_SIZE", "5000.0"))
+            if abs(bal - expected_bal) > 10.0:
+                errors.append(f"Connected account balance ${bal:,.2f} does not match the expected challenge balance ${expected_bal:,.2f} (±$10).")
+            
+        # 3. Verify TRADING_MODE is CHALLENGE
+        trading_mode = os.getenv("TRADING_MODE")
+        if trading_mode != "CHALLENGE":
+            errors.append(f"TRADING_MODE is configured as '{trading_mode}', expected 'CHALLENGE'.")
+
+        # 4. Check risk per trade is <= 1%
+        risk_pct = float(os.getenv("RISK_PER_TRADE_PCT", "0.25"))
+        if risk_pct > 1.0:
+            errors.append(f"RISK_PER_TRADE_PCT is {risk_pct}%, which is greater than the allowed maximum of 1.0% for this challenge.")
+
+        # 5. Verify there are no open positions (fail unless --force is in args)
+        import sys
+        if "--force" not in sys.argv:
+            try:
+                positions = self.mt5_get_all_positions()
+                if positions and len(positions) > 0:
+                    errors.append(f"Found {len(positions)} active open positions. Close all positions before starting, or restart with '--force'.")
+            except Exception as e:
+                errors.append(f"Could not check open positions: {e}")
+
+        # 6. Resolve Gold symbol
+        try:
+            resolved_symbol = self.resolve_symbol()
+        except Exception as e:
+            errors.append(str(e))
+            resolved_symbol = self.symbol
+
+        # 7. Recompute floors and verify equity is safely above them
+        if acct:
+            eq = float(acct.equity)
+            bal = float(acct.balance)
+            
+            daily_floor = max(self.previous_day_highest_balance, self.previous_day_highest_equity) * 0.95
+            max_overall_floor = max(self.all_time_highest_balance, self.all_time_highest_equity) * 0.93
+            
+            print(f"Drawdown Floors:")
+            print(f"  Daily Floor: ${daily_floor:,.2f} (Current Equity: ${eq:,.2f})")
+            print(f"  Overall Trailing Floor: ${max_overall_floor:,.2f}")
+            
+            if eq <= daily_floor:
+                errors.append(f"Current Equity ${eq:,.2f} is below or equal to the Daily Floor ${daily_floor:,.2f}.")
+            if eq <= max_overall_floor:
+                errors.append(f"Current Equity ${eq:,.2f} is below or equal to the Overall Trailing Floor ${max_overall_floor:,.2f}.")
+                
+            # 8. Confirm profit target is not already reached
+            profit_target_pct = float(os.getenv("PROFIT_TARGET_PCT", "4.0"))
+            profit_target_value = expected_bal * (1 + profit_target_pct / 100.0)
+            if bal >= profit_target_value:
+                errors.append(f"Profit target already reached: Balance ${bal:,.2f} >= Target ${profit_target_value:,.2f}.")
+
+        # Handle verification errors
+        if errors:
+            print("\n❌ CHALLENGE CONFIGURATION VERIFICATION FAILED:")
+            for err in errors:
+                print(f"  - {err}")
+            
+            fail_msg = "❌ <b>CHALLENGE STARTUP FAILED</b>\n\n" + "\n".join([f"• {err}" for err in errors])
+            send_telegram(fail_msg)
+            sys.exit(1)
+            
+        print("✅ Challenge Configuration Verified successfully.")
+        
+        # Send Telegram Summary Table
+        self.send_startup_summary_telegram(resolved_symbol, expected_bal, bal, eq, daily_floor, max_overall_floor, profit_target_value)
+
+    def close_all_positions_and_halt(self, reason: str, permanent: bool = False) -> None:
+        """Close all open positions, send Telegram alert, and halt the bot."""
+        print(f"⚠️ HALTING BOT: {reason}")
+        
+        # 1. Close all open positions
+        try:
+            positions = self.mt5_get_all_positions()
+            if positions:
+                print(f"Closing {len(positions)} open positions...")
+                for pos in positions:
+                    ticket = pos.get("ticket")
+                    if ticket:
+                        self.mt5_close_position(ticket)
+        except Exception as e:
+            print(f"⚠️ Error closing positions during halt: {e}")
+            
+        # 2. Send Telegram Alert
+        message = f"🔔 <b>BOT HALTED</b>\n\n<b>Reason:</b> {reason}\n<b>Type:</b> {'PERMANENT' if permanent else 'DAILY_RESET'}"
+        send_telegram(message)
+        
+        # 3. Halt the bot
+        if permanent:
+            self.running = False
+            self.challenge_policy.permanent_halted = True
+        else:
+            self.daily_halted = True
+            self.challenge_policy.daily_halted = True
+
+    def run_risk_and_pnl_monitoring(self) -> None:
+        """
+        Monitor equity and balance in real-time.
+        Updates peaks and verifies drawdown and profit target thresholds.
+        Halts the bot if any threshold is breached.
+        """
+        acct = self.mt5_get_account()
+        if not acct:
+            return
+
+        bal = float(acct.balance)
+        eq = float(acct.equity)
+
+        # Update all-time peaks
+        updated = False
+        if bal > self.all_time_highest_balance:
+            self.all_time_highest_balance = bal
+            updated = True
+        if eq > self.all_time_highest_equity:
+            self.all_time_highest_equity = eq
+            updated = True
+
+        # Update daily peaks
+        if bal > self.daily_highest_balance:
+            self.daily_highest_balance = bal
+            updated = True
+        if eq > self.daily_highest_equity:
+            self.daily_highest_equity = eq
+            updated = True
+
+        if updated:
+            self.save_session_state()
+
+        # Compute floors dynamically
+        daily_floor = max(self.previous_day_highest_balance, self.previous_day_highest_equity) * 0.95
+        max_overall_floor = max(self.all_time_highest_balance, self.all_time_highest_equity) * 0.93
+
+        # Sync ChallengePolicy properties
+        self.challenge_policy.daily_floor = daily_floor
+        self.challenge_policy.max_overall_floor = max_overall_floor
+
+        # Profit Target check
+        account_size = float(os.getenv("ACCOUNT_SIZE", "5000.0"))
+        profit_target_pct = float(os.getenv("PROFIT_TARGET_PCT", "4.0"))
+        profit_target_value = account_size * (1 + profit_target_pct / 100.0)
+
+        if bal >= profit_target_value:
+            reason = f"Profit target reached: Balance ${bal:,.2f} >= Target ${profit_target_value:,.2f}"
+            self.close_all_positions_and_halt(reason, permanent=True)
+            return
+
+        # Overall drawdown check
+        if eq <= max_overall_floor:
+            reason = f"Overall trailing drawdown breached: Equity ${eq:,.2f} <= Floor ${max_overall_floor:,.2f}"
+            self.close_all_positions_and_halt(reason, permanent=True)
+            return
+
+        # Daily drawdown check
+        if eq <= daily_floor:
+            reason = f"Daily trailing drawdown breached: Equity ${eq:,.2f} <= Floor ${daily_floor:,.2f}"
+            self.close_all_positions_and_halt(reason, permanent=False)
+            return
+
     def _maybe_reset_daily_state(self) -> None:
         """
-        Reset daily counters at 08:00 IST on a new calendar day.
+        Reset daily counters at Midnight UTC (or 08:00 IST) on a new calendar day.
 
         Persists _session_date to disk so bot restarts mid-session
         do NOT trigger a false daily reset.
         """
         try:
             import pytz
-            import json
-            from pathlib import Path
+            
+            tz_str = os.getenv("DAILY_RESET_TZ", "Asia/Kolkata")
+            tz = pytz.timezone(tz_str)
+            now_tz = datetime.now(timezone.utc).astimezone(tz)
+            today = now_tz.date()
 
-            STATE_FILE = Path("logs/session_state.json")
-
-            ist_tz  = pytz.timezone("Asia/Kolkata")
-            now_ist = datetime.now(pytz.utc).astimezone(ist_tz)
-            today   = now_ist.date()
-
-            # ── Load persisted session date on first call ─────────────────────
+            # If not initialized yet, load state first
             if self._session_date is None:
-                if STATE_FILE.exists():
-                    try:
-                        saved = json.loads(STATE_FILE.read_text())
-                        saved_date_str = saved.get("session_date", "")
-                        if saved_date_str:
-                            from datetime import date
-                            self._session_date = date.fromisoformat(saved_date_str)
-                            print(f"📂 Restored session_date from disk: {self._session_date}")
-                    except Exception as load_err:
-                        print(f"⚠️ Could not load session state: {load_err}")
+                self.load_session_state()
+                if self._session_date is None:
+                    self._session_date = today
+                    self.save_session_state()
 
-            # ── Only reset if it's genuinely a new calendar day AND past 08:00 IST
-            if self._session_date != today and now_ist.hour >= 8:
+            # Determine reset hour
+            reset_hour = 8 if tz_str == "Asia/Kolkata" else 0
+
+            # Only reset if it's genuinely a new calendar day AND past reset_hour
+            if self._session_date != today and now_tz.hour >= reset_hour:
                 print(f"🔄 New trading day ({today}) — resetting daily counters")
 
-                # ── Fire daily summary BEFORE resetting counters ──────────────
+                # Fire daily summary BEFORE resetting counters
                 try:
                     cp = self.challenge_policy
                     total = cp.daily_wins + cp.daily_losses
@@ -1320,26 +1615,35 @@ class XAUUSDTradingBot:
                 except Exception as e:
                     print(f"⚠️ Daily summary post failed: {e}")
 
-                self.challenge_policy.reset_daily_state() 
+                # Copy daily peaks to previous day peaks
+                self.previous_day_highest_balance = self.daily_highest_balance
+                self.previous_day_highest_equity = self.daily_highest_equity
+
+                # Reset daily state
+                self.challenge_policy.reset_daily_state()
+                self.challenge_policy.daily_halted = False
+                self.daily_halted = False
+                
                 if os.getenv("RESET_CONSECUTIVE_LOSSES_DAILY", "False").lower() == "true":
                     self.challenge_policy.consecutive_losses = 0
-                self._trades_today       = 0
-                self._daily_pnl_pct      = 0.0
+                self._trades_today = 0
+                self._daily_pnl_pct = 0.0
                 self._consecutive_losses = self.challenge_policy.consecutive_losses
-                self._session_date       = today
+                self._session_date = today
 
-                # ── Persist new session date so restarts don't re-trigger ─────
-                try:
-                    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-                    STATE_FILE.write_text(
-                        json.dumps({
-                            "session_date": today.isoformat(),
-                            "reset_at_ist": now_ist.isoformat(),
-                        })
-                    )
-                    print(f"💾 session_date persisted: {today}")
-                except Exception as save_err:
-                    print(f"⚠️ Could not persist session state: {save_err}")
+                # Reset daily highest to current balance/equity
+                acct = self.mt5_get_account()
+                if acct:
+                    self.daily_highest_balance = float(acct.balance)
+                    self.daily_highest_equity = float(acct.equity)
+                else:
+                    account_size = float(os.getenv("ACCOUNT_SIZE", "5000.0"))
+                    self.daily_highest_balance = account_size
+                    self.daily_highest_equity = account_size
+
+                # Persist new session date and peaks
+                self.save_session_state()
+                print(f"💾 session_date persisted: {today}")
 
         except Exception as e:
             print(f"⚠️ Daily reset error: {e}")
@@ -1440,8 +1744,15 @@ class XAUUSDTradingBot:
                 logger.error(f"  ⚠️ Trailing stop error for ticket {pos.get('ticket')}: {e}")
 
     def analyze_once(self) -> None:
-        # ── Daily reset (08:00 IST) ───────────────────────────────────────────
+        # ── Daily reset (Midnight UTC or 08:00 IST) ───────────────────────────
         self._maybe_reset_daily_state()
+        
+        # ── Real-time Risk & PnL Monitoring ───────────────────────────────────
+        self.run_risk_and_pnl_monitoring()
+        
+        if getattr(self, "daily_halted", False):
+            print("🛑 Bot daily halted due to daily drawdown limit breach — skipping cycle")
+            return
         
         # ── Pause flag check (from dashboard control) ──────────────────────────
         if self.paused:
@@ -1950,7 +2261,7 @@ class XAUUSDTradingBot:
                 f"Confidence: {result.confidence_score}% | Session: {self.current_session}"
             )
             post_signal(
-                symbol="XAUUSD",
+                symbol=self.symbol,
                 direction=trade_side,
                 entry=float(result.entry_price or 0.0),
                 sl=float(final_sl or 0.0),

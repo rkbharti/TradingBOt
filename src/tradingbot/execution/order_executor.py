@@ -239,9 +239,17 @@ class OrderExecutor:
                 if symbol_info is None:
                     raise ValueError(f"Could not fetch info for {self.mt5_client.symbol}")
 
-                # MT5 spread is in points. For Gold (XAUUSD), 10 points = 1 pip ($0.10)
+                # Dynamic pip divisor based on symbol (Gold, BTC, Forex)
+                symbol_name = self.mt5_client.symbol.upper()
+                if "BTC" in symbol_name:
+                    pip_divisor = 100.0  # $1.00 = 1 pip (100 points)
+                elif "XAU" in symbol_name or "GOLD" in symbol_name:
+                    pip_divisor = 10.0   # $0.10 = 1 pip (10 points)
+                else:
+                    pip_divisor = 10.0   # 10 points = 1 pip (standard Forex)
+
                 current_spread_points = symbol_info.spread
-                current_spread_pips = current_spread_points / 10.0
+                current_spread_pips = current_spread_points / pip_divisor
 
                 if current_spread_pips > max_spread_pips:
                     reason = f"SPREAD_TOO_HIGH: {current_spread_pips} pips (Max: {max_spread_pips})"
@@ -396,10 +404,14 @@ class OrderExecutor:
             # Default to a safe fallback of 5 pips (0.50 points on Gold) if specs are missing
             if min_sl_dist <= 0:
                 min_sl_dist = 0.50
+            
+            # Enforce system minimum SL distance (3.5 points / 35 pips on Gold) to prevent executing
+            # trades that have drifted too close to the Stop Loss level.
+            min_sl_dist = max(min_sl_dist, 3.5)
 
             sl_dist = abs(actual_entry_price - final_sl)
             if sl_dist < min_sl_dist:
-                reason = f"STOPS_TOO_CLOSE: SL distance ({sl_dist:.4f}) is below minimum required ({min_sl_dist:.4f}) based on stops level and spread"
+                reason = f"STOPS_TOO_CLOSE: Actual SL distance ({sl_dist:.2f} points) is below the minimum required ({min_sl_dist:.2f} points) due to market price drift."
                 logger.warning(reason)
                 return ExecutionResult(success=False, rejection_reason=reason, timestamp=timestamp)
 

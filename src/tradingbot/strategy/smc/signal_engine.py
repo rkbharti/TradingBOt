@@ -201,6 +201,7 @@ class SignalEngine:
 
     def __init__(self, config: Optional[SignalEngineConfig] = None) -> None:
         self.config = config or SignalEngineConfig()
+        self.symbol: str = "XAUUSD"
         self.news_filter: Optional[NewsFilter] = None
         # ✅ FIX #4b — Stateful itrend tracking, matching Pine Script's `var int itrend = 0`.
         # Pine Script sets itrend := 1 after any bullish BOS/CHoCH, itrend := -1 after bearish.
@@ -371,7 +372,8 @@ class SignalEngine:
 
         # ─── Step 7.5: News Filter ───────────────────────────────────
         if self.news_filter is not None:
-            blocked, news_reason = self.news_filter.is_news_blackout(now_utc)
+            symbol = getattr(self, "symbol", "XAUUSD")
+            blocked, news_reason = self.news_filter.is_news_blackout(now_utc, symbol=symbol)
             step7b = {
                 "passed": not blocked,
                 "reason": news_reason or "NO_HIGH_IMPACT_NEWS",
@@ -386,6 +388,7 @@ class SignalEngine:
         step8, sl_price, tp_price = self._step_rr(
             direction, entry_price, sweep, selected_poi, structure_break,
             htf_pois=step4.get("htf_pois"),
+            h4_df=h4_df,
         )
         gates["step_8_risk_reward"] = step8
         if not step8["passed"]:
@@ -1329,14 +1332,31 @@ class SignalEngine:
 
             poi_size = max(poi.high - poi.low, 1e-9)
 
-            # ✅ 50% overlap threshold — not fully_inside
+            # ✅ 50% overlap threshold — not fully_inside (allowing near-misses)
             for htf_poi in htf_pois:
                 overlap_low  = max(poi.low,  htf_poi.low)
                 overlap_high = min(poi.high, htf_poi.high)
                 overlap_size = overlap_high - overlap_low
 
                 sufficiently_inside = (overlap_size > 0)
-                if sufficiently_inside:
+                
+                # Near-miss fallback: check if M15 POI is close to the HTF POI
+                is_near_miss = False
+                if not sufficiently_inside:
+                    atr = sweep.atr_at_sweep
+                    near_miss_limit = 1.5 * atr if atr else (poi.high - poi.low)
+                    if sweep.direction == "BULLISH":
+                        # M15 POI is above HTF POI (price dropped near but not quite into HTF POI)
+                        distance = poi.low - htf_poi.high
+                        if distance > 0 and distance <= near_miss_limit:
+                            is_near_miss = True
+                    else:  # BEARISH
+                        # M15 POI is below HTF POI (price rose near but not quite into HTF POI)
+                        distance = htf_poi.low - poi.high
+                        if distance > 0 and distance <= near_miss_limit:
+                            is_near_miss = True
+
+                if sufficiently_inside or is_near_miss:
                     htf_aligned.append((poi, htf_poi))
                     break
 
@@ -1373,12 +1393,22 @@ class SignalEngine:
 
 
         def _validate_pd_overlap(m15_poi: POI, htf_poi: POI, min_overlap_ratio: float = 0.0) -> bool:
-            """Validate PD Array overlap for 90%+ confidence"""
+            """Validate PD Array overlap for 90%+ confidence, allowing near-misses"""
             overlap_low = max(m15_poi.low, htf_poi.low)
             overlap_high = min(m15_poi.high, htf_poi.high)
             overlap_size = overlap_high - overlap_low
             
-            return overlap_size > 0
+            if overlap_size > 0:
+                return True
+                
+            atr = sweep.atr_at_sweep
+            near_miss_limit = 1.5 * atr if atr else (m15_poi.high - m15_poi.low)
+            if sweep.direction == "BULLISH":
+                distance = m15_poi.low - htf_poi.high
+                return distance > 0 and distance <= near_miss_limit
+            else:
+                distance = htf_poi.low - m15_poi.high
+                return distance > 0 and distance <= near_miss_limit
 
         # ─── Priority: First OB after IDM > Extreme OB ───────────────────
         def _poi_priority(pair: Tuple[POI, POI]) -> int:
@@ -2063,6 +2093,7 @@ class SignalEngine:
         selected_poi: "POI",
         structure_break: StructureBreak,
         htf_pois: Optional[List[POI]] = None,
+        h4_df: Optional[pd.DataFrame] = None,
     ) -> Tuple[Dict[str, Any], Optional[float], Optional[float]]:
         """
         Step 8 — Risk/Reward check.
@@ -2147,7 +2178,8 @@ class SignalEngine:
             """
             TP selection:
             - Counter-trend / engineering-liquidity style: keep conservative target at first ERL.
-            - Trend-following: allow farther target if first ERL is too close.
+            - Trend-following: target structural extremes like Intermediate-Term Highs (ITH)
+              or Intermediate-Term Lows (ITL) on the H4 timeframe for higher RR.
             """
             tp_erl = float(sweep.target_external_liquidity)
 
@@ -2184,6 +2216,26 @@ class SignalEngine:
                             return float(nearest_poi.high)
                     # Fallback to ERL target
                     return tp_erl
+
+            # Trend alignment with HTF bias (ITH/ITL targeting)
+            htf_trend = getattr(self, "htf_trend_direction", "BULLISH")
+            is_trend_aligned = (direction == htf_trend)
+
+            if is_trend_aligned and setup_type != "ENGINEERING_LIQ" and h4_df is not None:
+                if direction == "BULLISH":
+                    # Target structural extremes like ITH or External Liquidity pools
+                    h4_iths, _ = self._find_ith_itl(h4_df)
+                    if h4_iths:
+                        valid_iths = [float(h4_df["high"].iat[idx]) for idx in h4_iths if float(h4_df["high"].iat[idx]) > entry_price]
+                        if valid_iths:
+                            return max(tp_erl, max(valid_iths))
+                else:  # BEARISH
+                    # Target structural extremes like ITL or External Liquidity pools
+                    _, h4_itls = self._find_ith_itl(h4_df)
+                    if h4_itls:
+                        valid_itls = [float(h4_df["low"].iat[idx]) for idx in h4_itls if float(h4_df["low"].iat[idx]) < entry_price]
+                        if valid_itls:
+                            return min(tp_erl, min(valid_itls))
 
             risk, reward_to_erl = _risk_reward(sl, tp_erl)
             rr_min = float(self.config.rr_min)

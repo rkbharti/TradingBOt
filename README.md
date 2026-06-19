@@ -1,392 +1,207 @@
-# TradingBOt
+# 🤖 SMC Trading Bot (v5.0.0)
 
-##TradingBOt is a safety-first, demo-only automated XAUUSD trading system
-focused on discipline, structure, and professional risk management.
-<img width="1902" height="981" alt="image" src="https://github.com/user-attachments/assets/4c181eb7-b193-4272-967b-d880779820b5" />
-
-
-## XAUUSD Smart Money Concepts (SMC) Trading Bot for MT5
-
-A professional automated trading bot for XAUUSD (Gold) using **Guardeer 10-Video Enhanced SMC Strategy**, designed for MT5 with production-grade safety systems and market hours filtering.
+An advanced, production-grade automated trading system utilizing **Smart Money Concepts (SMC)** for MetaTrader 5 (MT5). The system is built for safety and strict risk compliance, specifically optimized to pass Prop Firm evaluation challenges (such as the **Atlas Funded $5K Step 1 Challenge**) while supporting dynamic, parallel multi-symbol execution (Gold, Bitcoin, and Forex).
 
 ---
 
-## ✨ Latest Updates (v4.1.0 - April 20, 2025)
+## 📐 System Architecture
 
-### 🆕 Market Hours & Weekend Detection
+The trading bot operates as a sequential pipeline, channeling raw market data through an 8-gate verification process before executing orders:
 
-- ✅ **Weekend Protection**: Automatically detects Saturday/Sunday and prevents initialization
-- ✅ **Session-Based Trading**: Only trades during London (1pm-11pm IST) and NY sessions (6pm-4am IST)
-- ✅ **Smart Sleep Mode**: Skips analysis during Asian session (low liquidity)
-- ✅ **Resource Optimization**: Reduces API calls and compute usage by 60%
-
-### 🔒 Production Safety Systems
-
-- **Circuit Breaker #1**: Daily loss limit (-2% account balance)
-- **Circuit Breaker #2**: Consecutive loss protection (3 losses → 30min pause)
-- **Cooldown System**: 5-minute cooldown between same-direction trades
-- **Zone Validation**: Strong/weak zone detection with override protection
-- **Position Limits**: Max 3 positions, 1 per direction
+```mermaid
+graph TD
+    A[MT5 Market Data] --> B[Multi-Timeframe Aggregator]
+    B --> C[8-Gate SMC Signal Engine]
+    C -->|Signal Generated| D[Challenge Risk Policy]
+    D -->|Passed Risk Checks| E[Position Sizer]
+    E -->|SL / TP Recalculated| F[Order Executor]
+    F -->|Live Execution| G[MetaTrader 5 Client]
+    F -->|Dry Run| H[Simulation Logs]
+```
 
 ---
 
-## 🚀 Features
+## 🌟 Key Features
 
-### 📊 Core Trading Strategy
+### 1. 🔬 Canonical 8-Gate SMC Signal Engine
+Replaced legacy heuristic strategies with a unified sequential analysis engine. For a trade signal to be generated, it must pass all 8 gates:
+- **Gate 0 (MT5 Connection):** Verifies active and stable connection to the MT5 terminal.
+- **Gate 1 (Market Data Fetch):** Ensures sufficient and fresh bar data across all timeframes.
+- **Gate 2 (Liquidity Sweep):** Confirms a recent sweep of high-timeframe (HTF) external liquidity.
+- **Gate 3 (CHoCH/MSS Body Close):** Verifies a structural shift (Change of Character) on the lower timeframe (LTF) via a candle body close.
+- **Gate 4 (POI Validity):** Identifies valid HTF Points of Interest (Order Blocks/FVGs) with **inducement** criteria. Supports a **1.5 * ATR near-miss buffer** to align M15 POIs that are extremely close to the HTF POI.
+- **Gate 5 (OB/FVG Confluence):** Validates concurrent order blocks and imbalances at the entry area.
+- **Gate 6 (Dealing Range):** Confirms that buys occur in the **Discount** zone and sells occur in the **Premium** zone (Mean Threshold breach check).
+- **Gate 7 (Killzone Check):** Restricts trading to high-liquidity session windows: London Killzone (02:00-05:00 NY), NY Killzone (07:00-12:00 NY), and Asian Killzone. Hard-blocks the 00:00-02:00 NY Dead Zone.
+- **Gate 8 (Risk-to-Reward):** Rejects any trade where the projected Risk-to-Reward ratio is below **3.0x**.
 
-- **Guardeer 10-Video Enhanced SMC**: Professional Smart Money Concepts implementation
-- **Order Blocks**: Supply/demand zone identification
-- **Break of Structure (BOS)**: Market structure shift detection
-- **Fair Value Gaps (FVG)**: Imbalance detection and trading
-- **Liquidity Sweeps**: Stop hunt identification
-- **Session Analysis**: London/NY overlap priority trading
+### 2. 🛡️ Prop Firm Challenge Policy (Atlas Funded)
+Implements strict drawdown rules required by the Atlas Funded challenge program:
+- **Daily Drawdown Floor:** Recalculated at Midnight UTC as `max(previous_day_highest_balance, previous_day_highest_equity) * 0.95` (5% limit).
+- **Overall Trailing Drawdown Floor:** Recalculated in real-time as `max(all_time_highest_balance, all_time_highest_equity) * 0.93` (7% overall limit).
+- **Profit Target Halt:** Instantly locks in challenge passes and stops trading when account balance reaches **$5,200** (for $5K challenges) or **4% profit**.
+- **Startup Guard rails:** Validates broker server details, starting balance, sizer limits, and sizer risk per trade (<= 1.0%) on boot. Rejects startup if configurations fail.
 
-### 🛡️ Risk Management
+### 3. 🌐 Dynamic Multi-Symbol Support
+- **Single-Configuration Symbol Switching:** Resolves active trading symbol via the `SYMBOL` environment variable. Suffixes (e.g. `.pro`, `.raw`, `.a`) are dynamically detected.
+- **Position Sizing Integration:** Automatically fetches `trade_contract_size` from MT5 to dynamically adjust sizing (Gold contract = 100; Bitcoin contract = 1.0).
+- **Segregated State Persistence:** Saves states to `logs/session_state_{symbol}.json` and decision audit logs to `logs/decisions/audit_{symbol}.jsonl` to allow safe, parallel running of multiple symbol instances.
 
-- **Dynamic Position Sizing**: 0.5% risk per trade
-- **Smart Stop-Loss**: Minimum 10 pips, ATR-based calculation
-- **Max Lot Size**: 2.0 lots per trade
-- **Total Risk Cap**: 1.5% account exposure
-- **Trailing Stop**: Protects profits on winning trades
+### 4. 📰 Economic Calendar News Blackout
+- **Free ForexFactory Weekly Feed:** Dynamically pulls high-impact events from the public weekly JSON feed. No premium API keys required.
+- **Dynamic Base/Quote Filtering:** Parses base and quote currencies from the active symbol (e.g. extracts `EUR` and `USD` from `EURUSD`) and filters news events on both.
+- **15-Minute Blackout Window:** Prevents trade entries 15 minutes before and after high-impact news releases.
 
-### 📈 Technical Analysis
-
-- **Multi-Timeframe**: M15, M30, H1, H4 analysis
-- **Trend Filter**: H1 trend confirmation
-- **Moving Averages**: MA20, MA50, EMA200
-- **Support/Resistance**: Dynamic level calculation
-- **ATR Volatility**: Adaptive to market conditions
-
-### 🌐 Dashboard & Monitoring
-
-- **Web Dashboard**: Real-time monitoring at `http://localhost:8000/dashboard`
-- **Mobile Access**: Phone/tablet support on same WiFi
-- **Live Updates**: Current positions, P&L, signals
-- **Trade History**: Complete audit trail
-- **Performance Stats**: Win rate, profit factor, drawdown
-
-### 📱 Telegram Integration
-
-- Trade notifications with entry/exit details
-- P&L updates in real-time
-- Error alerts and warnings
-- Session status updates
+### 5. ⚙️ Strategy & Stop Loss Refinements
+- **Adaptive ATR Buffers:** Standard OB/FVG entries use a `0.3x ATR` buffer. Sweeps and aggressive entries use a `0.8x ATR` buffer to survive wicks.
+- **Minimum Stop Loss cap:** Restricts minimum Gold SL size to **35 pips (3.5 points)** to survive broker spreads. Bypasses this cap on BTCUSD by utilizing a dynamic stops checker.
+- **Dynamic Pip Divisors:** Correctly computes MT5 spreads using a **100-point divisor for Bitcoin** ($1.00 = 1 pip) and a **10-point divisor for Gold/Forex** ($0.10 = 1 pip), preventing false spread rejections on crypto.
+- **H4 Structural TP:** Trend-following targets look for H4 Intermediate-Term Highs (ITH) for buy setups and Intermediate-Term Lows (ITL) for sell setups.
+- **Weekend Crypto Bypass:** Automatically detects crypto symbols (`BTC`, `ETH`) and bypasses weekend market shutdown blocks for 24/7 trading.
 
 ---
 
-## 📋 Prerequisites
+## 📂 Project Structure
 
-1. **MetaTrader 5 Desktop** installed
-2. **Python 3.8+** installed
-3. **MT5 Demo Account** (see setup instructions below)
-4. **Stable Internet Connection** for continuous operation
+```text
+c:/Python_Project/tradingbot/TradingBOt/
+├── apps/
+│   └── trader/
+│       ├── main.py                     # Main trading bot loop & startup validation
+│       └── vps_reporter.py             # Oracle Cloud integration & status pings
+├── config/
+│   ├── .env                            # Active environment credentials and variables
+│   └── settings.py                     # Config parser
+├── logs/                               # Session state & audit logs
+│   ├── decisions/
+│   │   └── audit_{symbol}.jsonl        # Sequence audit logs of every analysis cycle
+│   └── session_state_{symbol}.json     # Persisted watermarks and drawdown peaks
+├── src/
+│   └── tradingbot/
+│       ├── data/
+│       │   └── timeframe_aggregator.py # Multi-timeframe bar data fetcher
+│       ├── execution/
+│       │   └── order_executor.py       # Spread checking and order placement
+│       ├── infra/
+│       │   ├── mt5/
+│       │   │   └── client.py           # MT5 Connection layer
+│       │   └── news/
+│       │       └── news_filter.py      # ForexFactory news scheduler
+│       ├── risk/
+│       │   ├── challenge_policy.py     # Prop firm drawdown rules engine
+│       │   └── position_sizing.py      # Lot sizer, ATR buffer, and ITH/ITL finder
+│       └── strategy/
+│           └── smc/
+│               └── signal_engine.py    # 8-Gate SMC Signal Engine
+└── tests/                              # Pytest test suite
+```
 
 ---
 
-## 🔧 MT5 Demo Account Setup
+## 🔧 Installation & Setup
 
-### Step 1: Create Demo Account
-
-1. Open MT5 Desktop
-2. Go to `File` → `Open an Account`
-3. Select your broker and choose **"Demo Account"**
-4. Fill in registration details
-5. **Note down**: Account number, password, and server name
-
-### Step 2: Enable Automated Trading
-
-1. In MT5: `Tools` → `Options` → `Expert Advisors`
-2. ✅ Check "Allow automated trading"
-3. ✅ Check "Allow WebRequest for listed URL"
-4. ✅ Check "Allow DLL imports"
-5. Click **OK**
-
-### Step 3: Verify XAUUSD Symbol
-
-1. Open **Market Watch** (Ctrl+M)
-2. Right-click → **Show All**
-3. Find **XAUUSD** (or **GOLD** depending on broker)
-4. Right-click → **Chart Window**
-
----
-
-## ⚙️ Installation
-
-### 1. Clone Repository
-
+### 1. Clone & Set Up Python Environment
+Ensure Python 3.10+ is installed on your Windows machine.
+```powershell
+# Clone the repository
 git clone https://github.com/rkbharti/TradingBOt.git
 cd TradingBOt
 
-text
-
-### 2. Create Virtual Environment
-
+# Create a virtual environment
 python -m venv .venv
-
-Windows
 .venv\Scripts\activate
 
-Mac/Linux
-source .venv/bin/activate
-
-text
-
-### 3. Install Dependencies
-
+# Install dependencies
 pip install -r requirements.txt
+```
 
-text
+### 2. Configure MetaTrader 5
+1. Install the desktop version of **MetaTrader 5**.
+2. Log into your broker account (e.g., **Atlas Funded**).
+3. In MT5, go to `Tools` -> `Options` -> `Expert Advisors` and check:
+   - ✅ **Allow automated trading**
+   - ✅ **Allow WebRequest for listed URLs**
+   - ✅ **Allow DLL imports**
+4. Keep the terminal running on your machine.
 
-### 4. Configure Settings
+### 3. Create the Environment File
+Create a `.env` file inside the `config/` directory:
 
-Edit `config.py` with your MT5 account details:
+```env
+# --- MT5 CREDENTIALS ---
+MT5_LOGIN=your_mt5_login_id
+MT5_PASSWORD=your_mt5_password
+MT5_SERVER=AtlasFunded-Server
+MT5_PATH=C:/Program Files/Atlas Funded MT5 Terminal/terminal64.exe
 
-MT5 Configuration
-MT5_ACCOUNT = # Your demo account number
-MT5_PASSWORD = "YourPassword"
-MT5_SERVER = "YourBrokerServer-Demo"
+# --- ACTIVE TRADING SYMBOL ---
+SYMBOL=XAUUSD
+DASH_SYMBOLS=XAUUSD
 
-Risk Settings
-RISK_PER_TRADE = 0.5 # 0.5% per trade
-MAX_TOTAL_POSITIONS = 3
-MAX_POSITIONS_PER_DIRECTION = 1
+# --- PROP FIRM RISK CONTROLS ---
+PROP_FIRM=AtlasFunded
+ACCOUNT_SIZE=5000
+ACCOUNT_CURRENCY=USD
+PROFIT_TARGET_PCT=4.0
+DAILY_DRAWDOWN_PCT=5.0
+MAX_DRAWDOWN_PCT=7.0
+TRADING_MODE=CHALLENGE
+DAILY_RESET_TZ=UTC
 
-Trading Hours (IST)
-LONDON_SESSION = (13, 23) # 1pm - 11pm
-NY_SESSION = (18, 4) # 6pm - 4am (next day)
-
-text
-
-### 5. Setup Telegram (Optional)
-
-1. Create bot with [@BotFather](https://t.me/BotFather)
-2. Get your Chat ID from [@userinfobot](https://t.me/userinfobot)
-3. Add to `config.py`:
-   TELEGRAM_BOT_TOKEN = "your_bot_token"
-   TELEGRAM_CHAT_ID = "your_chat_id"
-
-text
+# --- ADDITIONAL RISK CONTROLS ---
+RISK_PER_TRADE_PCT=0.25
+MAX_TRADES_PER_DAY=5
+MAX_CONSECUTIVE_LOSSES=5
+MIN_TRADE_GAP_MINUTES=5
+MAX_LOT_SIZE=0.5
+RESET_CONSECUTIVE_LOSSES_DAILY=True
+```
 
 ---
 
 ## 🚀 Running the Bot
 
-### Start Trading Bot
+To start the bot, run the following command in your terminal:
+```powershell
+python apps/trader/main.py
+```
 
-python main.py
+### Diagnostic Output Example:
+```text
+=== Initializing XAUUSDTradingBot ===
+✅ Account balance: $5,000.00
+✅ OrderExecutor wired
+📂 Restored session state from disk. Date: 2026-06-19
+🔍 Verifying Challenge Configuration...
+Connected to MT5 Login: 212119512, Server: AtlasFunded-Server
+✅ Resolved symbol to: XAUUSD
+Drawdown Floors:
+  Daily Floor: $4,750.00 (Current Equity: $5,000.00)
+  Overall Trailing Floor: $4,650.00
+✅ Challenge Configuration Verified successfully.
+✅ Initialization complete
+🌐 Starting bot control server on port 5000...
+🔬 Running diagnostics...
 
-text
-
-### Expected Output
-
-======================================================================
-🤖 Initializing Enhanced XAUUSD Trading Bot...
-✅ Trading: London/NY Overlap ⭐ BEST TIME
-📊 Running Enhanced SMC Analysis (Guardeer 10-Videos)...
-
-text
-
-### Weekend Behavior
-
-⏸️ Market CLOSED (Weekend - Saturday)
-Next open: Monday 03:30 IST
-💤 Waiting for market to open..
-
-text
-
-### Access Dashboard
-
-- **Desktop**: http://localhost:8000/dashboard
-- **Mobile**: http://192.168.0.108:8000/dashboard (same WiFi)
-
----
-
-## 📊 Trading Schedule
-
-| Session               | IST Time         | Status      | Liquidity |
-| --------------------- | ---------------- | ----------- | --------- |
-| **Asian**             | 3:30am - 1:00pm  | ⏸️ Sleeping | Low       |
-| **London**            | 1:00pm - 6:00pm  | ✅ Trading  | Medium    |
-| **London/NY Overlap** | 6:00pm - 11:00pm | ⭐ **BEST** | High      |
-| **NY Late**           | 11:00pm - 3:30am | ✅ Trading  | Medium    |
-| **Weekend**           | Saturday/Sunday  | 🚫 Closed   | None      |
+=================================================================
+🔬  SMC SIGNAL ENGINE — LIVE DIAGNOSTICS
+=================================================================
+[GATE 0] MT5 Connection           -> ✅ PASS
+[GATE 1] Market Data Fetch        -> ✅ PASS — 300 bars
+[GATE 2] Session Check            -> ✅ PASS — London Killzone
+[GATE 3] Multi-Timeframe Data     -> ✅ M5, M15, H4, D1 fresh
+=================================================================
+```
 
 ---
 
-## 🛡️ Safety Systems
-
-### Circuit Breaker #1: Daily Loss Limit
-
-- **Trigger**: -2% daily loss
-- **Action**: Stop all new trades, monitoring only
-- **Reset**: Next trading day (3:30am IST Monday)
-
-### Circuit Breaker #2: Consecutive Losses
-
-- **Trigger**: 3 consecutive losing trades
-- **Action**: 30-minute trading pause
-- **Reset**: After timeout or winning trade
-
-### Zone Override Protection
-
-STRONG_ZONE_THRESHOLD = 50% # High-quality zones only
-WEAK_ZONE_THRESHOLD = 30% # Minimum quality
-STRONG_ZONE_OVERRIDE = True # Block weak zones
-
-text
-
-### Position Management
-
-- **Max Total Positions**: 3
-- **Max Per Direction**: 1 (prevents overexposure)
-- **Cooldown**: 5 minutes between same-direction trades
-
----
-
-## 📁 Project Structure
-
-Directory structure:
-└── rkbharti-tradingbot/
-├── README.md
-├── requirements.txt
-├── server.py
-├── main.py
-├── strategy/
-│ ├── backtester.py
-│ ├── idea_memory.py
-│ ├── market_structure.py
-│ ├── multi_timeframe_fractal.py
-│ ├── smc_strategy.py
-│ ├── stoploss_calc.py
-│ ├── timeframe_hierarchy.py
-│ └── smc_enhanced/
-│ ├── **init**.py
-│ ├── bias.py
-│ ├── inducement.py
-│ ├── liquidity.py
-│ ├── narrative.py
-│ ├── poi.py
-│ ├── session_detector.py
-│ ├── volume_analyzer.py
-│ └── zones.py
-└── utils/
-├── mt5_connection.py
-├── smart_exits.py
-├── volume_analyzer_gold.py
-└── xauusd_filter.py
-
----
-
-## 🐛 Troubleshooting
-
-### Bot Won't Connect to MT5
-
-1. Check MT5 is **running** on desktop
-2. Verify account credentials in `config.py`
-3. Ensure "Allow automated trading" is enabled
-4. Restart MT5 and try again
-
-### No Trades Executing
-
-- **Weekend**: Bot will sleep until Monday 3:30am IST
-- **Asian Session**: Bot sleeps 30min during low liquidity
-- **Circuit Breaker Active**: Check for loss limits in logs
-- **No Valid Signals**: SMC strategy may not detect setup
-
-### Dashboard Not Loading
-
-Check if port 8000 is available
-netstat -ano | findstr :8000
-
-Try different port in config.py
-DASHBOARD_PORT = 8001
-
-text
-
-### Telegram Not Working
-
-1. Verify bot token is correct
-2. Start conversation with bot first (send `/start`)
-3. Check chat ID matches your account
-
----
-
-## 📈 Performance Monitoring
-
-### Key Metrics to Track
-
-- **Win Rate**: Target 50%+ (SMC typical: 45-55%)
-- **Risk:Reward**: Minimum 1:2 ratio
-- **Max Drawdown**: Keep under 10%
-- **Profit Factor**: Target 1.5+ (profitable trading)
-
-### Daily Checklist
-
-- [ ] Check bot is running (not sleeping)
-- [ ] Verify MT5 connection is active
-- [ ] Review open positions on dashboard
-- [ ] Check Telegram notifications
-- [ ] Monitor P&L vs daily loss limit
+## 🧪 Running Tests
+The bot includes a robust unit testing suite verifying strategy extensions, News filters, trailing floors, and drawdown policies. Run tests via pytest:
+```powershell
+pytest
+```
 
 ---
 
 ## ⚠️ Disclaimer
-
-**DEMO TRADING ONLY**: This bot is designed for MetaTrader 5 **demo accounts** only. Never use with real money without extensive testing and understanding of risks involved.
-
-- Trading involves substantial risk of loss
-- Past performance does not guarantee future results
-- Always test thoroughly on demo before considering live trading
-- Use proper risk management (never risk more than 1-2% per trade)
-
----
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/improvement`)
-3. Commit changes (`git commit -m 'Add new feature'`)
-4. Push to branch (`git push origin feature/improvement`)
-5. Open Pull Request
-
----
-
-## 📝 License
-
-This project is for educational purposes. Use at your own risk.
-“Manual trades are currently not observed or advised by the bot.”
-
----
-
-## 📞 Support
-
-- **Issues**: Open GitHub issue
-- **Questions**: Check troubleshooting section first
-- **Updates**: Follow repository for latest improvements
-
----
-
-## 🎯 Roadmap
-
-### v3.2.0 (Planned)
-
-- [ ] Machine learning signal confidence scoring
-- [ ] Multi-symbol support (EURUSD, GBPUSD)
-- [ ] Advanced backtesting engine
-- [ ] Mobile app for iOS/Android
-
-### v3.3.0 (Future)
-
-- [ ] Live account support (with safety checks)
-- [ ] Portfolio management across symbols
-- [ ] Advanced analytics dashboard
-- [ ] Cloud deployment option
-
----
-
-**Version**: 3.1.0  
-**Last Updated**: December 20, 2025  
-**Author**: Ravi Kumar
-**Status**: ✅ Production-Ready (Demo Only)
+This system is built for **DEMO ACCOUNTS** only. Algorithmic trading carries significant financial risk. Always test configurations in sandbox environments before considering live deployments.

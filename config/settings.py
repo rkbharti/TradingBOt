@@ -18,4 +18,4 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 ENABLE_TELEGRAM    = os.getenv("ENABLE_TELEGRAM", "false").lower() == "true"
 
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()

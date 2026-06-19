@@ -14,6 +14,7 @@ funded trading challenge requirements.
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Tuple, Optional
@@ -61,6 +62,12 @@ class ChallengePolicy:
     min_trade_gap_minutes: int = DEFAULT_MIN_TRADE_GAP_MINUTES
     risk_per_trade_pct: float = DEFAULT_RISK_PER_TRADE_PCT
     starting_balance: float = 100000.0
+
+    # Dynamic trailing fields
+    daily_floor: float = 0.0
+    max_overall_floor: float = 0.0
+    daily_halted: bool = False
+    permanent_halted: bool = False
 
     # =========================================================================
     # RUNTIME STATE (updated after each trade)
@@ -140,29 +147,40 @@ class ChallengePolicy:
                 print(f"Trade blocked: {reason}")
         """
         try:
-            # =========================================================================
-            # RULE 1: Daily Loss Limit
-            # =========================================================================
-            if daily_pnl_pct < -self.daily_loss_limit_pct:
-                reason = (
-                    f"DAILY_LOSS_LIMIT breached: {daily_pnl_pct:.2f}% loss exceeds "
-                    f"limit of {self.daily_loss_limit_pct}%"
-                )
-                logger.warning(f"Trade BLOCKED: {reason}")
-                return (False, reason)
-
-            # =========================================================================
-            # RULE 2: Maximum Drawdown
-            # =========================================================================
-            if peak_balance > 0 and current_balance > 0:
-                drawdown_pct = round(((peak_balance - current_balance) / peak_balance) * 100, 8)
-                if drawdown_pct > self.max_drawdown_pct:
+            # If Atlas Funded and floors are active, use the dynamic floor halts instead of static loss/drawdown limits
+            if os.getenv("PROP_FIRM") == "AtlasFunded" and (self.daily_floor > 0 or self.max_overall_floor > 0):
+                if getattr(self, "permanent_halted", False):
+                    reason = "PERMANENT_HALT: Overall trailing drawdown or profit target reached"
+                    logger.warning(f"Trade BLOCKED: {reason}")
+                    return (False, reason)
+                if getattr(self, "daily_halted", False):
+                    reason = "DAILY_HALT: Daily trailing drawdown breached"
+                    logger.warning(f"Trade BLOCKED: {reason}")
+                    return (False, reason)
+            else:
+                # =========================================================================
+                # RULE 1: Daily Loss Limit
+                # =========================================================================
+                if daily_pnl_pct < -self.daily_loss_limit_pct:
                     reason = (
-                        f"MAX_DRAWDOWN breached: {drawdown_pct:.2f}% drawdown "
-                        f"exceeds limit of {self.max_drawdown_pct}%"
+                        f"DAILY_LOSS_LIMIT breached: {daily_pnl_pct:.2f}% loss exceeds "
+                        f"limit of {self.daily_loss_limit_pct}%"
                     )
                     logger.warning(f"Trade BLOCKED: {reason}")
                     return (False, reason)
+
+                # =========================================================================
+                # RULE 2: Maximum Drawdown
+                # =========================================================================
+                if peak_balance > 0 and current_balance > 0:
+                    drawdown_pct = round(((peak_balance - current_balance) / peak_balance) * 100, 8)
+                    if drawdown_pct > self.max_drawdown_pct:
+                        reason = (
+                            f"MAX_DRAWDOWN breached: {drawdown_pct:.2f}% drawdown "
+                            f"exceeds limit of {self.max_drawdown_pct}%"
+                        )
+                        logger.warning(f"Trade BLOCKED: {reason}")
+                        return (False, reason)
 
             # =========================================================================
             # RULE 3: Consecutive Losses (checked before max trades per day)
@@ -247,6 +265,13 @@ class ChallengePolicy:
                 print(f"Account locked: {reason}")
         """
         try:
+            if os.getenv("PROP_FIRM") == "AtlasFunded" and (self.daily_floor > 0 or self.max_overall_floor > 0):
+                if getattr(self, "permanent_halted", False):
+                    return "Overall trailing drawdown or profit target reached"
+                if getattr(self, "daily_halted", False):
+                    return "Daily trailing drawdown breached"
+                return None
+
             # Check daily loss
             if daily_pnl_pct < -self.daily_loss_limit_pct:
                 return (
