@@ -376,23 +376,47 @@ def normalize_webhook_payload(payload: dict) -> tuple:
             bot_inst["last_price"] = price_val
 
         bot_inst["current_session"] = payload.get("session", "ASIAN")
-        bot_inst["open_positions"]  = payload.get("positions", [])
-        bot_inst["closed_trades"]   = payload.get("closed_trades", [])
+        
+        # Positions normalization:
+        positions_raw = payload.get("positions", None)
+        if positions_raw is not None:
+            if isinstance(positions_raw, dict):
+                bot_pos = positions_raw.get("bot", [])
+                manual_pos = positions_raw.get("manual", [])
+                if not isinstance(bot_pos, list): bot_pos = []
+                if not isinstance(manual_pos, list): manual_pos = []
+                bot_inst["open_positions"] = bot_pos + manual_pos
+            else:
+                bot_inst["open_positions"] = positions_raw if isinstance(positions_raw, list) else []
+        else:
+            bot_inst["open_positions"] = None
+
+        if "closed_trades" in payload:
+            bot_inst["closed_trades"] = payload.get("closed_trades", [])
+        else:
+            bot_inst["closed_trades"] = None
+
         if "chart_data" in payload:
             bot_inst["chart_data"]  = payload.get("chart_data", [])[-300:]
+        else:
+            bot_inst["chart_data"] = None
+
         bias = payload.get("bias", {})
-        if isinstance(bias, dict):
+        if isinstance(bias, dict) and bias:
             analysis["market_structure"] = {
-                "current_trend": bias.get("d1", "NEUTRAL"),
+                "current_trend": bias.get("current", bias.get("d1", "NEUTRAL")),
                 "d1_bias":       bias.get("d1", "NEUTRAL"),
                 "h4_bias":       bias.get("h4", "NEUTRAL"),
             }
-        else:
+        elif "bias" in payload:
             analysis["market_structure"] = {
                 "current_trend": "NEUTRAL", "d1_bias": "NEUTRAL", "h4_bias": "NEUTRAL"
             }
+        else:
+            analysis["market_structure"] = None
+
         signal = payload.get("signal", {})
-        if isinstance(signal, dict):
+        if isinstance(signal, dict) and signal:
             analysis["signal_engine"] = {
                 "action":       signal.get("action", "NO_TRADE"),
                 "direction":    signal.get("direction", "NEUTRAL"),
@@ -404,14 +428,35 @@ def normalize_webhook_payload(payload: dict) -> tuple:
                 "tp_price":     signal.get("tp_price"),
                 "gates":        signal.get("gates", {}),
             }
-        else:
+        elif "signal" in payload:
             analysis["signal_engine"] = {
                 "action": "NO_TRADE", "direction": "NEUTRAL",
                 "confidence": 0, "reason": "--",
                 "reason_code": None, "gates": {},
             }
-        analysis["poi_overlays"]  = payload.get("poi_overlays", [])
-        analysis["chart_objects"] = payload.get("chart_objects", {})
+        else:
+            analysis["signal_engine"] = None
+
+        if "poi_overlays" in payload:
+            analysis["poi_overlays"] = payload.get("poi_overlays", [])
+        else:
+            analysis["poi_overlays"] = None
+
+        if "chart_objects" in payload:
+            analysis["chart_objects"] = payload.get("chart_objects", {})
+        else:
+            analysis["chart_objects"] = None
+
+        if "news_items" in payload:
+            bot_inst["news_items"] = payload.get("news_items", [])
+        else:
+            bot_inst["news_items"] = None
+
+        if "news_time" in payload:
+            bot_inst["news_time"] = payload.get("news_time", "--")
+        else:
+            bot_inst["news_time"] = None
+
     except Exception as e:
         print(f"⚠️ Normalization error: {e}")
         traceback.print_exc()
@@ -424,142 +469,139 @@ def update_bot_state_v2(symbol, bot_instance, analysis_data):
     pnl_tracker = pnl_trackers[symbol]
     closed_trades_tracker = closed_trades_trackers[symbol]
     try:
-        equity         = float(get_val(bot_instance, "equity", 0.0) or 0.0)
-        balance        = float(get_val(bot_instance, "balance", 0.0) or 0.0)
-        account_login  = str(get_val(bot_instance, "account_login", "--"))
-        account_server = str(get_val(bot_instance, "account_server", "--"))
-        current_price  = float(get_val(bot_instance, "last_price", 0.0) or 0.0)
-        if math.isnan(equity):        equity = 0.0
-        if math.isnan(balance):       balance = 0.0
-        if math.isnan(current_price): current_price = 0.0
+        incoming_equity = get_val(bot_instance, "equity", None)
+        equity = float(incoming_equity) if incoming_equity is not None else state.get("equity", 0.0)
+
+        incoming_balance = get_val(bot_instance, "balance", None)
+        balance = float(incoming_balance) if incoming_balance is not None else state.get("balance", 0.0)
+
+        incoming_login = get_val(bot_instance, "account_login", None)
+        account_login = str(incoming_login) if incoming_login is not None else state.get("account_login", "--")
+
+        incoming_server = get_val(bot_instance, "account_server", None)
+        account_server = str(incoming_server) if incoming_server is not None else state.get("account_server", "--")
+
+        incoming_price = get_val(bot_instance, "last_price", None)
+        current_price = float(incoming_price) if incoming_price is not None else state.get("price", 0.0)
+
+        if math.isnan(equity):        equity = state.get("equity", 0.0)
+        if math.isnan(balance):       balance = state.get("balance", 0.0)
+        if math.isnan(current_price): current_price = state.get("price", 0.0)
     except Exception as e:
         print(f"⚠️ Account parsing error for {symbol}: {e}")
-        equity = balance = current_price = 0.0
-        account_login = account_server = "--"
+        equity = state.get("equity", 0.0)
+        balance = state.get("balance", 0.0)
+        current_price = state.get("price", 0.0)
+        account_login = state.get("account_login", "--")
+        account_server = state.get("account_server", "--")
 
     open_pnl = 0.0
     formatted_trades = []
     try:
-        positions = get_val(bot_instance, "open_positions", []) or []
-        if not isinstance(positions, list): positions = []
-        for p in positions:
-            profit_raw = get_val(p, "profit", None)
-            if profit_raw is None: profit_raw = get_val(p, "pnl", None)
-            profit = parse_profit(profit_raw)
-            commission = parse_profit(get_val(p, "commission", 0.0))
-            swap = parse_profit(get_val(p, "swap", 0.0))
-            net_profit = profit + commission + swap
+        positions = get_val(bot_instance, "open_positions", None)
+        if positions is not None:
+            if not isinstance(positions, list): positions = []
+            for p in positions:
+                profit_raw = get_val(p, "profit", None)
+                if profit_raw is None: profit_raw = get_val(p, "pnl", None)
+                profit = parse_profit(profit_raw)
+                commission = parse_profit(get_val(p, "commission", 0.0))
+                swap = parse_profit(get_val(p, "swap", 0.0))
+                net_profit = profit + commission + swap
 
-            entry  = parse_profit(get_val(p, "price", get_val(p, "entry_price", 0.0)))
-            lot    = parse_profit(get_val(p, "lot_size", get_val(p, "volume", 0.0)))
-            signal = get_val(p, "signal", get_val(p, "type", "N/A"))
-            if (profit == 0.0) and (current_price > 0 and entry > 0 and lot > 0):
-                try:
-                    contract_size = float(get_val(p, "contract_size", 100.0))
-                    profit = (current_price - entry) * lot * contract_size if str(signal).upper() == "BUY" else (entry - current_price) * lot * contract_size
-                    net_profit = profit + commission + swap
-                except Exception:
-                    pass
-            open_pnl += float(net_profit)
-            formatted_trades.append({
-                "id":       str(get_val(p, "ticket", get_val(p, "id", "000")))[:12],
-                "symbol":   get_val(p, "symbol", symbol),
-                "type":     str(signal).upper(),
-                "lot_size": round(float(lot or 0.0), 3),
-                "volume":   round(float(lot or 0.0), 3),
-                "entry":    round(float(entry or 0.0), 5) if entry else 0.0,
-                "price":    round(float(entry or 0.0), 5) if entry else 0.0,
-                "pnl":      round(float(net_profit), 2),
-                "tp":       get_val(p, "tp", 0),
-                "sl":       get_val(p, "sl", 0),
-            })
+                entry  = parse_profit(get_val(p, "price", get_val(p, "entry_price", 0.0)))
+                lot    = parse_profit(get_val(p, "lot_size", get_val(p, "volume", 0.0)))
+                signal = get_val(p, "signal", get_val(p, "type", "N/A"))
+                if (profit == 0.0) and (current_price > 0 and entry > 0 and lot > 0):
+                    try:
+                        contract_size = float(get_val(p, "contract_size", 100.0))
+                        profit = (current_price - entry) * lot * contract_size if str(signal).upper() == "BUY" else (entry - current_price) * lot * contract_size
+                        net_profit = profit + commission + swap
+                    except Exception:
+                        pass
+                open_pnl += float(net_profit)
+                formatted_trades.append({
+                    "id":       str(get_val(p, "ticket", get_val(p, "id", "000")))[:12],
+                    "symbol":   get_val(p, "symbol", symbol),
+                    "type":     str(signal).upper(),
+                    "lot_size": round(float(lot or 0.0), 3),
+                    "volume":   round(float(lot or 0.0), 3),
+                    "entry":    round(float(entry or 0.0), 5) if entry else 0.0,
+                    "price":    round(float(entry or 0.0), 5) if entry else 0.0,
+                    "pnl":      round(float(net_profit), 2),
+                    "tp":       get_val(p, "tp", 0),
+                    "sl":       get_val(p, "sl", 0),
+                })
+        else:
+            formatted_trades = state.get("trades", [])
+            open_pnl = state.get("open_pnl", 0.0)
     except Exception as e:
         print(f"⚠️ Positions parsing error for {symbol}: {e}")
+        formatted_trades = state.get("trades", [])
+        open_pnl = state.get("open_pnl", 0.0)
 
     formatted_closed = []
-    try:
-        closed = get_val(bot_instance, "closed_trades", []) or []
-        if not isinstance(closed, list): closed = []
-        for ct in closed:
-            profit_raw = None
-            for k in ("profit", "pnl", "profit_usd", "deal_profit"):
-                profit_raw = get_val(ct, k, None)
-                if profit_raw is not None: break
-            profit = parse_profit(profit_raw)
-            commission = parse_profit(get_val(ct, "commission", 0.0))
-            swap = parse_profit(get_val(ct, "swap", 0.0))
-            net_profit = profit + commission + swap
+    closed = get_val(bot_instance, "closed_trades", None)
+    if closed is not None:
+        try:
+            if not isinstance(closed, list): closed = []
+            for ct in closed:
+                profit_raw = None
+                for k in ("profit", "pnl", "profit_usd", "deal_profit"):
+                    profit_raw = get_val(ct, k, None)
+                    if profit_raw is not None: break
+                profit = parse_profit(profit_raw)
+                commission = parse_profit(get_val(ct, "commission", 0.0))
+                swap = parse_profit(get_val(ct, "swap", 0.0))
+                net_profit = profit + commission + swap
 
-            formatted_closed.append({
-                "id":     str(get_val(ct, "ticket", get_val(ct, "id", "000")))[:12],
-                "symbol": get_val(ct, "symbol", symbol),
-                "type":   str(get_val(ct, "signal", get_val(ct, "type", "N/A"))).upper(),
-                "entry":  round(float(get_val(ct, "entry_price", get_val(ct, "price", 0.0))), 5),
-                "exit":   round(float(get_val(ct, "close_price", get_val(ct, "exit", 0.0))), 5),
-                "pnl":    round(float(net_profit), 2),
-            })
-            if abs(net_profit) > 0.01:
-                when = None
-                ts = get_val(ct, "time", None) or get_val(ct, "close_time", None)
-                if ts:
+                formatted_closed.append({
+                    "id":     str(get_val(ct, "ticket", get_val(ct, "id", "000")))[:12],
+                    "symbol": get_val(ct, "symbol", symbol),
+                    "type":   str(get_val(ct, "signal", get_val(ct, "type", "N/A"))).upper(),
+                    "entry":  round(float(get_val(ct, "entry_price", get_val(ct, "price", 0.0))), 5),
+                    "exit":   round(float(get_val(ct, "close_price", get_val(ct, "exit", 0.0))), 5),
+                    "pnl":    round(float(net_profit), 2),
+                })
+                if abs(net_profit) > 0.01:
+                    when = None
+                    ts = get_val(ct, "time", None) or get_val(ct, "close_time", None)
+                    if ts:
+                        try:
+                            if isinstance(ts, str):
+                                try:    when = datetime.fromisoformat(ts)
+                                except:
+                                    try: when = datetime.strptime(ts, "%Y.%m.%d %H:%M:%S")
+                                    except: when = None
+                            elif isinstance(ts, (int, float)):
+                                when = datetime.fromtimestamp(float(ts)/1000.0 if ts > 1e12 else float(ts))
+                        except Exception: when = None
                     try:
-                        if isinstance(ts, str):
-                            try:    when = datetime.fromisoformat(ts)
-                            except:
-                                try: when = datetime.strptime(ts, "%Y.%m.%d %H:%M:%S")
-                                except: when = None
-                        elif isinstance(ts, (int, float)):
-                            when = datetime.fromtimestamp(float(ts)/1000.0 if ts > 1e12 else float(ts))
-                    except Exception: when = None
-                try:
-                    tid = get_val(ct, "ticket", get_val(ct, "id", None))
-                    pnl_tracker.add_closed_trade(float(net_profit), when=when, ticket=str(tid) if tid else None)
-                except Exception: pass
-    except Exception as e:
-        print(f"⚠️ Closed trades error for {symbol}: {e}")
+                        tid = get_val(ct, "ticket", get_val(ct, "id", None))
+                        pnl_tracker.add_closed_trade(float(net_profit), when=when, ticket=str(tid) if tid else None)
+                    except Exception: pass
+        except Exception as e:
+            print(f"⚠️ Closed trades error for {symbol}: {e}")
+
+        try:
+            closed_trades_tracker.add_trades(formatted_closed)
+        except Exception as e:
+            print(f"⚠️ Failed to track closed trades for {symbol}: {e}")
 
     try:
-        closed_trades_tracker.add_trades(formatted_closed)
-    except Exception as e:
-        print(f"⚠️ Failed to track closed trades for {symbol}: {e}")
+        market_struct = get_val(analysis_data, "market_structure", None)
+        if market_struct is not None:
+            market_structure_to_save = market_struct.get("current_trend", "NEUTRAL")
+            d1_bias_to_save = market_struct.get("d1_bias", "NEUTRAL")
+            h4_bias_to_save = market_struct.get("h4_bias", "NEUTRAL")
+        else:
+            market_structure_to_save = state.get("market_structure", "NEUTRAL")
+            d1_bias_to_save = state.get("d1_bias", "NEUTRAL")
+            h4_bias_to_save = state.get("h4_bias", "NEUTRAL")
 
-    try:
-        market_struct = get_val(analysis_data, "market_structure", {})
-        signal_eng    = get_val(analysis_data, "signal_engine", {})
-        current_tf = state.get("current_timeframe", "M15")
-        state.update({
-            "symbol":           symbol,
-            "webhook_age_seconds": 0,
-            "account_login":    account_login,
-            "account_server":   account_server,
-            "account_name":     get_val(bot_instance, "account_name", f"REAL-{symbol}"),
-            "equity":           round(float(equity), 2),
-            "balance":          round(float(balance), 2),
-            "pnl_daily":        round(pnl_tracker.get_daily() + open_pnl, 2),
-            "pnl_today":        round(pnl_tracker.get_daily() + open_pnl, 2),
-            "pnl_week":         round(pnl_tracker.get_weekly() + open_pnl, 2),
-            "pnl_total":        round(pnl_tracker.get_total() + open_pnl, 2),
-            "open_pnl":         round(open_pnl, 2),
-            "price":            current_price,
-            "market_structure": market_struct.get("current_trend", "NEUTRAL"),
-            "session":          get_val(bot_instance, "current_session", "ASIAN"),
-            "trades":           formatted_trades,
-            "closed_trades":    closed_trades_tracker.get_all()[-50:],
-            "chart_overlays":   {
-                "levels": {
-                    "pdh": get_val(analysis_data, "poi_overlays", []),
-                    "pdl": get_val(analysis_data, "chart_objects", {}),
-                }
-            },
-            "poi_overlays":   get_val(analysis_data, "poi_overlays", []),
-            "chart_objects":  get_val(analysis_data, "chart_objects", {}),
-            "chart_data":     get_val(bot_instance, "chart_data", [])[-300:],
-            "trading":        state.get("trading", True),
-            "d1_bias":        market_struct.get("d1_bias", "NEUTRAL"),
-            "h4_bias":        market_struct.get("h4_bias", "NEUTRAL"),
-            "news_items":     get_val(bot_instance, "news_items", []),
-            "news_time":      get_val(bot_instance, "news_time", "--"),
-            "signal_engine":  {
+        signal_eng = get_val(analysis_data, "signal_engine", None)
+        if signal_eng is not None:
+            signal_engine_to_save = {
                 "action":       signal_eng.get("action", "NO_TRADE"),
                 "direction":    signal_eng.get("direction", "NEUTRAL"),
                 "confidence":   int(signal_eng.get("confidence", signal_eng.get("confidence_score", 0))),
@@ -569,7 +611,78 @@ def update_bot_state_v2(symbol, bot_instance, analysis_data):
                 "sl_price":     signal_eng.get("sl_price"),
                 "tp_price":     signal_eng.get("tp_price"),
                 "gates":        signal_eng.get("gates", {}),
+            }
+        else:
+            signal_engine_to_save = state.get("signal_engine", {
+                "action": "NO_TRADE", "direction": "NEUTRAL",
+                "confidence": 0, "reason": "--", "gates": {}
+            })
+
+        poi_overlays_incoming = get_val(analysis_data, "poi_overlays", None)
+        if poi_overlays_incoming is not None:
+            poi_overlays_to_save = poi_overlays_incoming
+        else:
+            poi_overlays_to_save = state.get("poi_overlays", [])
+
+        chart_objects_incoming = get_val(analysis_data, "chart_objects", None)
+        if chart_objects_incoming is not None:
+            chart_objects_to_save = chart_objects_incoming
+        else:
+            chart_objects_to_save = state.get("chart_objects", {})
+
+        chart_data_incoming = get_val(bot_instance, "chart_data", None)
+        if chart_data_incoming is not None and len(chart_data_incoming) > 0:
+            chart_data_to_save = chart_data_incoming[-300:]
+        else:
+            chart_data_to_save = state.get("chart_data", [])
+
+        news_items_incoming = get_val(bot_instance, "news_items", None)
+        if news_items_incoming is not None:
+            news_items_to_save = news_items_incoming
+        else:
+            news_items_to_save = state.get("news_items", [])
+
+        news_time_incoming = get_val(bot_instance, "news_time", None)
+        if news_time_incoming is not None:
+            news_time_to_save = news_time_incoming
+        else:
+            news_time_to_save = state.get("news_time", "--")
+
+        current_tf = state.get("current_timeframe", "M15")
+
+        state.update({
+            "symbol":           symbol,
+            "webhook_age_seconds": 0,
+            "account_login":    account_login,
+            "account_server":   account_server,
+            "account_name":     get_val(bot_instance, "account_name", state.get("account_name", f"REAL-{symbol}")),
+            "equity":           round(float(equity), 2),
+            "balance":          round(float(balance), 2),
+            "pnl_daily":        round(pnl_tracker.get_daily() + open_pnl, 2),
+            "pnl_today":        round(pnl_tracker.get_daily() + open_pnl, 2),
+            "pnl_week":         round(pnl_tracker.get_weekly() + open_pnl, 2),
+            "pnl_total":        round(pnl_tracker.get_total() + open_pnl, 2),
+            "open_pnl":         round(open_pnl, 2),
+            "price":            current_price,
+            "market_structure": market_structure_to_save,
+            "session":          get_val(bot_instance, "current_session", state.get("session", "ASIAN")),
+            "trades":           formatted_trades,
+            "closed_trades":    closed_trades_tracker.get_all()[-50:],
+            "chart_overlays":   {
+                "levels": {
+                    "pdh": poi_overlays_to_save,
+                    "pdl": chart_objects_to_save,
+                }
             },
+            "poi_overlays":   poi_overlays_to_save,
+            "chart_objects":  chart_objects_to_save,
+            "chart_data":     chart_data_to_save,
+            "trading":        state.get("trading", True),
+            "d1_bias":        d1_bias_to_save,
+            "h4_bias":        h4_bias_to_save,
+            "news_items":     news_items_to_save,
+            "news_time":      news_time_to_save,
+            "signal_engine":  signal_engine_to_save,
             "current_timeframe": current_tf,
         })
     except Exception as e:
