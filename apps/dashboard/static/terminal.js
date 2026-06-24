@@ -2,6 +2,25 @@
    GUARDEER OS – terminal.js v5 (Production Ready)
    ============================================================ */
 
+// Safe localStorage wrapper to prevent private browsing crashes on mobile
+const safeStorage = {
+    getItem(key) {
+        try {
+            return localStorage.getItem(key);
+        } catch (e) {
+            console.warn('[STORAGE] getItem failed for key:', key, e);
+            return null;
+        }
+    },
+    setItem(key, value) {
+        try {
+            localStorage.setItem(key, value);
+        } catch (e) {
+            console.warn('[STORAGE] setItem failed for key:', key, e);
+        }
+    }
+};
+
 // ------------------------------------------------------------------
 //  Global helpers & constants
 // ------------------------------------------------------------------
@@ -184,14 +203,14 @@ function DS() {
 
         // --- Multi-symbol states ---
         bot_states: {},
-        active_symbol: localStorage.getItem('gos_active_symbol') || '',
+        active_symbol: safeStorage.getItem('gos_active_symbol') || '',
         _lastChartDataHash: null,
 
         // --- Bot control ---
         bot_status: true,
         current_tf: 'M15',
-        theme_mode: localStorage.getItem('gos_theme') || 'dark',
-        palette: localStorage.getItem('gos_palette') || 'stranger-things',
+        theme_mode: safeStorage.getItem('gos_theme') || 'dark',
+        palette: safeStorage.getItem('gos_palette') || 'stranger-things',
         available_palettes: GOS_PALETTES,
 
         // --- Account / equity ---
@@ -252,15 +271,29 @@ function DS() {
         //  Lifecycle
         // ------------------------------------------------------------------
         init() {
-            this._applyThemeMode();
-            this._applyPalette();
+            try {
+                this._applyThemeMode();
+                this._applyPalette();
+            } catch (e) { console.error('Theme init error:', e); }
+
             this.$nextTick(() => {
-                _initChart(this.theme_mode);
-                _applyChartTheme(this.theme_mode);
+                try {
+                    _initChart(this.theme_mode);
+                    _applyChartTheme(this.theme_mode);
+                } catch (e) { console.error('Chart init error:', e); }
             });
-            this._connectWebSocket();
-            this._startHealthPoll();
-            this._startClocks();
+
+            try {
+                this._connectWebSocket();
+            } catch (e) { console.error('WS init error:', e); }
+
+            try {
+                this._startHealthPoll();
+            } catch (e) { console.error('Health poll error:', e); }
+
+            try {
+                this._startClocks();
+            } catch (e) { console.error('Clocks error:', e); }
         },
 
         // ------------------------------------------------------------------
@@ -278,13 +311,13 @@ function DS() {
             if (paletteName === 'custom') return;
             if (!GOS_PALETTES.includes(paletteName)) paletteName = 'stranger-things';
             this.palette = paletteName;
-            localStorage.setItem('gos_palette', paletteName);
+            safeStorage.setItem('gos_palette', paletteName);
             this._applyPalette();
             _applyChartTheme(this.theme_mode);
         },
         toggleTheme() {
             this.theme_mode = this.theme_mode === 'dark' ? 'light' : 'dark';
-            localStorage.setItem('gos_theme', this.theme_mode);
+            safeStorage.setItem('gos_theme', this.theme_mode);
             this._applyThemeMode();
             _applyChartTheme(this.theme_mode);
         },
@@ -298,19 +331,28 @@ function DS() {
         // ------------------------------------------------------------------
         _startClocks() {
             const update = () => {
-                const now = new Date();
-                const utcEl = document.getElementById('utc-clock');
-                const istEl = document.getElementById('ist-clock');
-                if (utcEl) utcEl.innerText = now.toUTCString().split(' ')[4];
-                if (istEl) {
-                    istEl.innerText = now.toLocaleTimeString('en-IN', {
-                        timeZone: 'Asia/Kolkata',
-                        hour12: false
-                    });
-                }
+                try {
+                    const now = new Date();
+                    const utcEl = document.getElementById('utc-clock');
+                    const istEl = document.getElementById('ist-clock');
+                    if (utcEl) utcEl.innerText = now.toUTCString().split(' ')[4];
+                    if (istEl) {
+                        try {
+                            istEl.innerText = now.toLocaleTimeString('en-IN', {
+                                timeZone: 'Asia/Kolkata',
+                                hour12: false
+                            });
+                        } catch (tzErr) {
+                            // Fallback for unsupported timezones on iOS/mobile
+                            istEl.innerText = now.toLocaleTimeString('en-IN', { hour12: false });
+                        }
+                    }
+                } catch (e) { console.error('Clock tick error:', e); }
             };
-            update();
-            setInterval(update, 1000);
+            try {
+                update();
+                setInterval(update, 1000);
+            } catch (e) { console.error('Clock start error:', e); }
         },
 
         // ------------------------------------------------------------------
@@ -420,7 +462,7 @@ function DS() {
         selectSymbol(symbol) {
             if (symbol === this.active_symbol) return;
             this.active_symbol = symbol;
-            localStorage.setItem('gos_active_symbol', symbol);
+            safeStorage.setItem('gos_active_symbol', symbol);
             _lastOverlaysHash = null;
             this._lastChartDataHash = null;
             this.syncActiveState();
@@ -572,7 +614,7 @@ function DS() {
             try {
                 return Object.entries(this.signal_engine.gates || {}).map(([key, value]) => ({
                     name: GATE_NAMES[key] || key,
-                    passed: typeof value === 'boolean' ? value : (value?.passed === true),
+                    passed: typeof value === 'boolean' ? value : (value && value.passed === true),
                 }));
             } catch(e) { return []; }
         },

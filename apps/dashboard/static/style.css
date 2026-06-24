@@ -406,3 +406,70 @@ body::before {
   border-color: var(--accent);
   box-shadow: 2px 2px 0 rgba(0,0,0,0.15);
 }
+
+/* ---------- Debug Terminal Panel ---------- */
+.debug-panel {
+  background: var(--paper-dark);
+  border: 2px solid var(--border-strong);
+  border-radius: 8px 3px 10px 3px;
+  font-family: 'Courier Prime', monospace;
+  font-size: 12px;
+  overflow: hidden;
+  box-shadow: 4px 4px 0 rgba(0,0,0,0.15);
+  position: relative;
+  z-index: 10;
+}
+.debug-panel::after {
+  content: '';
+  position: absolute;
+  inset: 4px;
+  border: 1px dotted var(--border-soft);
+  pointer-events: none;
+}
+.debug-header {
+  background: var(--paper);
+  border-bottom: 1px solid var(--border-strong);
+  padding: 8px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+.debug-title {
+  color: var(--warn);
+  font-weight: 800;
+  letter-spacing: 1px;
+}
+.debug-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  font-weight: 800;
+  cursor: pointer;
+  font-family: inherit;
+}
+.debug-content {
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--ink);
+}
+.log-line {
+  margin-bottom: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-bottom: 1px dotted rgba(255, 255, 255, 0.05);
+  padding-bottom: 4px;
+}
+.log-error, .log-critical {
+  color: var(--danger);
+  font-weight: bold;
+}
+.log-warn {
+  color: var(--warn);
+}
+.log-info {
+  color: var(--ink-light);
+}

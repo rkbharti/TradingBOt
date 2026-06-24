@@ -7,6 +7,64 @@
       content="width=device-width, initial-scale=1.0, user-scalable=yes"
     />
     <title>GUARDEER OS – Themed Terminal</title>
+    <script>
+      // Safe localStorage wrapper to prevent private browsing crashes on mobile
+      window.safeStorage = {
+          getItem(key) {
+              try {
+                  return localStorage.getItem(key);
+              } catch (e) {
+                  console.warn('[STORAGE] getItem failed for key:', key, e);
+                  return null;
+              }
+          },
+          setItem(key, value) {
+              try {
+                  localStorage.setItem(key, value);
+              } catch (e) {
+                  console.warn('[STORAGE] setItem failed for key:', key, e);
+              }
+          }
+      };
+
+      // Diagnostic logging setup
+      (function() {
+        window.terminalLogs = [];
+        window.addTerminalLog = function(type, msg) {
+          window.terminalLogs.push({ type, msg, time: new Date().toLocaleTimeString() });
+          const el = document.getElementById('debug-log-content');
+          if (el) {
+            const div = document.createElement('div');
+            div.className = 'log-line log-' + type;
+            div.innerText = '[' + new Date().toLocaleTimeString() + '] [' + type.toUpperCase() + '] ' + msg;
+            el.appendChild(div);
+            el.scrollTop = el.scrollHeight;
+          }
+        };
+        const originalLog = console.log;
+        console.log = function(...args) {
+          originalLog.apply(console, args);
+          window.addTerminalLog('info', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+        };
+        const originalError = console.error;
+        console.error = function(...args) {
+          originalError.apply(console, args);
+          window.addTerminalLog('error', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+        };
+        const originalWarn = console.warn;
+        console.warn = function(...args) {
+          originalWarn.apply(console, args);
+          window.addTerminalLog('warn', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+        };
+        window.onerror = function(message, source, lineno, colno, error) {
+          window.addTerminalLog('critical', message + ' (at ' + source + ':' + lineno + ':' + colno + ')');
+          return false;
+        };
+        window.addEventListener('unhandledrejection', function(event) {
+          window.addTerminalLog('critical', 'Unhandled Promise Rejection: ' + event.reason);
+        });
+      })();
+    </script>
     <script src="https://unpkg.com/lightweight-charts@4.0.0/dist/lightweight-charts.standalone.production.js"></script>
     <link
       href="https://fonts.googleapis.com/css2?family=Gaegu&family=Short+Stack&family=Courier+Prime:wght@400;700&display=swap"
@@ -667,19 +725,52 @@
           const color = e.target.value;
           document.body.setAttribute("data-palette", "custom");
           document.body.style.setProperty("--accent", color);
-          localStorage.setItem("gos_palette", "custom");
-          localStorage.setItem("custom_accent", color);
+          safeStorage.setItem("gos_palette", "custom");
+          safeStorage.setItem("custom_accent", color);
           // Also update the Alpine store if needed
           if (window.Alpine && Alpine.store("theme")) {
             Alpine.store("theme").setCustomColor(color);
           }
         });
-        const saved = localStorage.getItem("custom_accent");
-        if (saved && localStorage.getItem("gos_palette") === "custom") {
+        const saved = safeStorage.getItem("custom_accent");
+        if (saved && safeStorage.getItem("gos_palette") === "custom") {
           picker.value = saved;
           document.body.style.setProperty("--accent", saved);
         }
       }
+    </script>
+
+    <!-- System Debug Terminal -->
+    <div class="debug-panel" style="margin: 20px 20px 80px 20px;">
+      <div class="debug-header" onclick="toggleDebugLogs()">
+        <span class="debug-title">⚙️ SYSTEM DIAGNOSTIC LOGS</span>
+        <button class="debug-toggle-btn" id="debug-toggle-btn">[COLLAPSE]</button>
+      </div>
+      <div class="debug-content" id="debug-log-content">
+        <div class="log-line log-info">[SYSTEM] Diagnostic logger initialized. Waiting for connections/logs...</div>
+      </div>
+    </div>
+
+    <script>
+      function toggleDebugLogs() {
+        const content = document.getElementById('debug-log-content');
+        const btn = document.getElementById('debug-toggle-btn');
+        if (content.style.display === 'none') {
+          content.style.display = 'block';
+          btn.innerText = '[COLLAPSE]';
+        } else {
+          content.style.display = 'none';
+          btn.innerText = '[EXPAND]';
+        }
+      }
+      
+      // Auto-collapse debug logs after 3 seconds if there are no errors, to keep the UI clean
+      setTimeout(() => {
+        const errorLogs = window.terminalLogs.filter(l => l.type === 'error' || l.type === 'critical');
+        if (errorLogs.length === 0) {
+          toggleDebugLogs();
+        }
+      }, 3000);
     </script>
   </body>
 </html>
