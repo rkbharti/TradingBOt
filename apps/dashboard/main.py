@@ -44,8 +44,14 @@ _TEMPLATES_DIR = os.path.join(_HERE, "templates")
 # ClosedTradesTracker — Persist closed trades history
 # ═══════════════════════════════════════════════════════════════════════════
 class ClosedTradesTracker:
-    def __init__(self):
-        self.filename = os.path.join(_HERE, "closed_trades_history.json")
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+        self.filename = os.path.join(_HERE, f"closed_trades_history_{symbol}.json")
+        # For compatibility:
+        if not os.path.exists(self.filename) and symbol == "XAUUSD":
+            old_file = os.path.join(_HERE, "closed_trades_history.json")
+            if os.path.exists(old_file):
+                self.filename = old_file
         self.trades = []
         self.load_trades()
 
@@ -54,9 +60,9 @@ class ClosedTradesTracker:
             if os.path.exists(self.filename):
                 with open(self.filename, "r", encoding="utf-8") as f:
                     self.trades = json.load(f)
-                print(f"✅ Loaded {len(self.trades)} historical closed trades")
+                print(f"✅ Loaded {len(self.trades)} historical closed trades for {self.symbol}")
         except Exception as e:
-            print(f"⚠️ Failed to load closed trades history: {e}")
+            print(f"⚠️ Failed to load closed trades history for {self.symbol}: {e}")
 
     def save_trades(self):
         try:
@@ -65,7 +71,7 @@ class ClosedTradesTracker:
             with open(self.filename, "w", encoding="utf-8") as f:
                 json.dump(self.trades, f, indent=4)
         except Exception as e:
-            print(f"⚠️ Failed to save closed trades history: {e}")
+            print(f"⚠️ Failed to save closed trades history for {self.symbol}: {e}")
 
     def add_trades(self, new_trades: list):
         added = False
@@ -80,24 +86,62 @@ class ClosedTradesTracker:
     def get_all(self):
         return self.trades
 
+import pytz
+
 # ─── Globals ────────────────────────────────────────────────────────────
 active_connections = []
-closed_trades_tracker = ClosedTradesTracker()
-bot_state = {
-    "current_timeframe": "M15",   # default timeframe
-    "closed_trades": closed_trades_tracker.get_all()[-50:]
-}
-bot_paused = False
+bot_states = {} # mapping symbol -> state
+closed_trades_trackers = {} # mapping symbol -> ClosedTradesTracker
+pnl_trackers = {} # mapping symbol -> DailyPnLTracker
 _SERVER_START_TIME = _time.time()
 last_webhook_timestamp = None
+
+def get_symbol_state(symbol: str) -> dict:
+    if symbol not in bot_states:
+        if symbol not in closed_trades_trackers:
+            closed_trades_trackers[symbol] = ClosedTradesTracker(symbol)
+        if symbol not in pnl_trackers:
+            pnl_trackers[symbol] = DailyPnLTracker(symbol)
+        bot_states[symbol] = {
+            "symbol":            symbol,
+            "current_timeframe": "M15",
+            "closed_trades":     closed_trades_trackers[symbol].get_all()[-50:],
+            "trading":           True,
+            "equity":            0.0,
+            "balance":           0.0,
+            "pnl_daily":         0.0,
+            "pnl_today":         0.0,
+            "pnl_week":          0.0,
+            "pnl_total":         0.0,
+            "open_pnl":          0.0,
+            "price":             0.0,
+            "market_structure":  "NEUTRAL",
+            "session":           "ASIAN",
+            "trades":            [],
+            "poi_overlays":      [],
+            "chart_objects":     {},
+            "chart_data":        [],
+            "news_items":        [],
+            "news_time":         "--",
+            "signal_engine":     {
+                "action":      "NO_TRADE",
+                "direction":   "NEUTRAL",
+                "confidence":  0,
+                "reason":      "Scanning...",
+                "gates":       {}
+            }
+        }
+    return bot_states[symbol]
 
 # ═══════════════════════════════════════════════════════════════════════════
 # DailyPnLTracker — UNCHANGED
 # ═══════════════════════════════════════════════════════════════════════════
 class DailyPnLTracker:
-    def __init__(self):
+    def __init__(self, symbol: str):
+        self.symbol = symbol
         self.realized_pnl = 0.0
-        self.last_reset_date = datetime.now().date()
+        tz = pytz.timezone('Asia/Kolkata')
+        self.last_reset_date = datetime.now(tz).date()
         self.history = {}
         self.total_realized = 0.0
         self.processed_ticket_ids = set()
@@ -105,7 +149,11 @@ class DailyPnLTracker:
 
     def load_state(self):
         try:
-            state_file = os.path.join(_HERE, "dashboard_state.json")
+            state_file = os.path.join(_HERE, f"dashboard_state_{self.symbol}.json")
+            if not os.path.exists(state_file) and self.symbol == "XAUUSD":
+                old_file = os.path.join(_HERE, "dashboard_state.json")
+                if os.path.exists(old_file):
+                    state_file = old_file
             if os.path.exists(state_file):
                 with open(state_file, "r") as f:
                     data = json.load(f)
@@ -115,13 +163,13 @@ class DailyPnLTracker:
                     self.processed_ticket_ids = set(data.get("processed_ticket_ids", []))
                     if "last_reset_date" in data:
                         self.last_reset_date = date.fromisoformat(data["last_reset_date"])
-                print("✅ Dashboard Daily PnL state loaded from disk")
+                print(f"✅ Dashboard Daily PnL state for {self.symbol} loaded from disk")
         except Exception as e:
-            print(f"⚠️ Failed to load Daily PnL state: {e}")
+            print(f"⚠️ Failed to load Daily PnL state for {self.symbol}: {e}")
 
     def save_state(self):
         try:
-            state_file = os.path.join(_HERE, "dashboard_state.json")
+            state_file = os.path.join(_HERE, f"dashboard_state_{self.symbol}.json")
             with open(state_file, "w") as f:
                 json.dump({
                     "realized_pnl": self.realized_pnl,
@@ -131,10 +179,11 @@ class DailyPnLTracker:
                     "processed_ticket_ids": list(self.processed_ticket_ids),
                 }, f, indent=4)
         except Exception as e:
-            print(f"⚠️ Failed to save Daily PnL state: {e}")
+            print(f"⚠️ Failed to save Daily PnL state for {self.symbol}: {e}")
 
     def _ensure_today(self):
-        today = datetime.now().date()
+        tz = pytz.timezone('Asia/Kolkata')
+        today = datetime.now(tz).date()
         if today > self.last_reset_date:
             self.last_reset_date = today
             self.realized_pnl = 0.0
@@ -148,13 +197,23 @@ class DailyPnLTracker:
                 self.processed_ticket_ids.add(ticket)
             except Exception:
                 pass
+        
+        tz = pytz.timezone('Asia/Kolkata')
         if when is None:
-            when = datetime.now()
+            when = datetime.now(tz)
+        else:
+            if when.tzinfo is None:
+                when = tz.localize(when)
+            else:
+                when = when.astimezone(tz)
+                
         d = when.date()
         self._ensure_today()
         ds = d.isoformat()
         self.history[ds] = self.history.get(ds, 0.0) + float(pnl)
-        if d == datetime.now().date():
+        
+        today = datetime.now(tz).date()
+        if d == today:
             self.realized_pnl += float(pnl)
         self.total_realized += float(pnl)
         self.save_state()
@@ -164,7 +223,8 @@ class DailyPnLTracker:
         return float(self.realized_pnl)
 
     def get_weekly(self):
-        today = datetime.now().date()
+        tz = pytz.timezone('Asia/Kolkata')
+        today = datetime.now(tz).date()
         start = today - timedelta(days=today.weekday())
         total = 0.0
         d = start
@@ -177,17 +237,15 @@ class DailyPnLTracker:
     def get_total(self):
         return float(self.total_realized)
 
-pnl_tracker = DailyPnLTracker()
-
 # ═══════════════════════════════════════════════════════════════════════════
-# broadcast_loop — sends bot_state to all WebSocket clients
+# broadcast_loop — sends bot_states to all WebSocket clients
 # ═══════════════════════════════════════════════════════════════════════════
 async def broadcast_loop():
     last_state_hash = None
     while True:
-        if active_connections and bot_state:
+        if active_connections and bot_states:
             try:
-                state_json = json.dumps(bot_state, sort_keys=True, default=str).replace("NaN", "null")
+                state_json = json.dumps(bot_states, sort_keys=True, default=str).replace("NaN", "null")
                 state_hash = hashlib.sha256(state_json.encode()).hexdigest()
                 if state_hash != last_state_hash:
                     payload = state_json
@@ -199,11 +257,12 @@ async def broadcast_loop():
                         try:
                             await conn.send_text(payload)
                         except Exception:
-                            pass
+                            try: active_connections.remove(conn)
+                            except Exception: pass
                     last_state_hash = state_hash
             except Exception as e:
-                print(f"⚠️ Broadcast error: {e}")
-        await asyncio.sleep(3)
+                print(f"📡 Broadcast error: {e}")
+        await asyncio.sleep(3.0)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -358,9 +417,12 @@ def normalize_webhook_payload(payload: dict) -> tuple:
         traceback.print_exc()
     return bot_inst, analysis
 
-def update_bot_state_v2(bot_instance, analysis_data):
-    global bot_state, last_webhook_timestamp
+def update_bot_state_v2(symbol, bot_instance, analysis_data):
+    global bot_states, last_webhook_timestamp
     last_webhook_timestamp = datetime.now()
+    state = get_symbol_state(symbol)
+    pnl_tracker = pnl_trackers[symbol]
+    closed_trades_tracker = closed_trades_trackers[symbol]
     try:
         equity         = float(get_val(bot_instance, "equity", 0.0) or 0.0)
         balance        = float(get_val(bot_instance, "balance", 0.0) or 0.0)
@@ -371,7 +433,7 @@ def update_bot_state_v2(bot_instance, analysis_data):
         if math.isnan(balance):       balance = 0.0
         if math.isnan(current_price): current_price = 0.0
     except Exception as e:
-        print(f"⚠️ Account parsing error: {e}")
+        print(f"⚠️ Account parsing error for {symbol}: {e}")
         equity = balance = current_price = 0.0
         account_login = account_server = "--"
 
@@ -384,29 +446,35 @@ def update_bot_state_v2(bot_instance, analysis_data):
             profit_raw = get_val(p, "profit", None)
             if profit_raw is None: profit_raw = get_val(p, "pnl", None)
             profit = parse_profit(profit_raw)
+            commission = parse_profit(get_val(p, "commission", 0.0))
+            swap = parse_profit(get_val(p, "swap", 0.0))
+            net_profit = profit + commission + swap
+
             entry  = parse_profit(get_val(p, "price", get_val(p, "entry_price", 0.0)))
             lot    = parse_profit(get_val(p, "lot_size", get_val(p, "volume", 0.0)))
             signal = get_val(p, "signal", get_val(p, "type", "N/A"))
             if (profit == 0.0) and (current_price > 0 and entry > 0 and lot > 0):
                 try:
-                    profit = (current_price - entry) * lot * 100 if str(signal).upper() == "BUY" else (entry - current_price) * lot * 100
+                    contract_size = float(get_val(p, "contract_size", 100.0))
+                    profit = (current_price - entry) * lot * contract_size if str(signal).upper() == "BUY" else (entry - current_price) * lot * contract_size
+                    net_profit = profit + commission + swap
                 except Exception:
-                    profit = 0.0
-            open_pnl += float(profit)
+                    pass
+            open_pnl += float(net_profit)
             formatted_trades.append({
                 "id":       str(get_val(p, "ticket", get_val(p, "id", "000")))[:12],
-                "symbol":   get_val(p, "symbol", "XAUUSD"),
+                "symbol":   get_val(p, "symbol", symbol),
                 "type":     str(signal).upper(),
                 "lot_size": round(float(lot or 0.0), 3),
                 "volume":   round(float(lot or 0.0), 3),
                 "entry":    round(float(entry or 0.0), 5) if entry else 0.0,
                 "price":    round(float(entry or 0.0), 5) if entry else 0.0,
-                "pnl":      round(float(profit), 2),
+                "pnl":      round(float(net_profit), 2),
                 "tp":       get_val(p, "tp", 0),
                 "sl":       get_val(p, "sl", 0),
             })
     except Exception as e:
-        print(f"⚠️ Positions parsing error: {e}")
+        print(f"⚠️ Positions parsing error for {symbol}: {e}")
 
     formatted_closed = []
     try:
@@ -418,15 +486,19 @@ def update_bot_state_v2(bot_instance, analysis_data):
                 profit_raw = get_val(ct, k, None)
                 if profit_raw is not None: break
             profit = parse_profit(profit_raw)
+            commission = parse_profit(get_val(ct, "commission", 0.0))
+            swap = parse_profit(get_val(ct, "swap", 0.0))
+            net_profit = profit + commission + swap
+
             formatted_closed.append({
                 "id":     str(get_val(ct, "ticket", get_val(ct, "id", "000")))[:12],
-                "symbol": get_val(ct, "symbol", "XAUUSD"),
+                "symbol": get_val(ct, "symbol", symbol),
                 "type":   str(get_val(ct, "signal", get_val(ct, "type", "N/A"))).upper(),
                 "entry":  round(float(get_val(ct, "entry_price", get_val(ct, "price", 0.0))), 5),
                 "exit":   round(float(get_val(ct, "close_price", get_val(ct, "exit", 0.0))), 5),
-                "pnl":    round(float(profit), 2),
+                "pnl":    round(float(net_profit), 2),
             })
-            if abs(profit) > 0.01:
+            if abs(net_profit) > 0.01:
                 when = None
                 ts = get_val(ct, "time", None) or get_val(ct, "close_time", None)
                 if ts:
@@ -441,26 +513,26 @@ def update_bot_state_v2(bot_instance, analysis_data):
                     except Exception: when = None
                 try:
                     tid = get_val(ct, "ticket", get_val(ct, "id", None))
-                    pnl_tracker.add_closed_trade(float(profit), when=when, ticket=str(tid) if tid else None)
+                    pnl_tracker.add_closed_trade(float(net_profit), when=when, ticket=str(tid) if tid else None)
                 except Exception: pass
     except Exception as e:
-        print(f"⚠️ Closed trades error: {e}")
+        print(f"⚠️ Closed trades error for {symbol}: {e}")
 
     try:
         closed_trades_tracker.add_trades(formatted_closed)
     except Exception as e:
-        print(f"⚠️ Failed to track closed trades: {e}")
+        print(f"⚠️ Failed to track closed trades for {symbol}: {e}")
 
     try:
         market_struct = get_val(analysis_data, "market_structure", {})
         signal_eng    = get_val(analysis_data, "signal_engine", {})
-        # Preserve current_timeframe if not overwritten
-        current_tf = bot_state.get("current_timeframe", "M15")
-        bot_state.update({
+        current_tf = state.get("current_timeframe", "M15")
+        state.update({
+            "symbol":           symbol,
             "webhook_age_seconds": 0,
             "account_login":    account_login,
             "account_server":   account_server,
-            "account_name":     get_val(bot_instance, "account_name", "REAL-01"),
+            "account_name":     get_val(bot_instance, "account_name", f"REAL-{symbol}"),
             "equity":           round(float(equity), 2),
             "balance":          round(float(balance), 2),
             "pnl_daily":        round(pnl_tracker.get_daily() + open_pnl, 2),
@@ -482,7 +554,7 @@ def update_bot_state_v2(bot_instance, analysis_data):
             "poi_overlays":   get_val(analysis_data, "poi_overlays", []),
             "chart_objects":  get_val(analysis_data, "chart_objects", {}),
             "chart_data":     get_val(bot_instance, "chart_data", [])[-300:],
-            "trading":        not bot_paused,
+            "trading":        state.get("trading", True),
             "d1_bias":        market_struct.get("d1_bias", "NEUTRAL"),
             "h4_bias":        market_struct.get("h4_bias", "NEUTRAL"),
             "news_items":     get_val(bot_instance, "news_items", []),
@@ -498,20 +570,27 @@ def update_bot_state_v2(bot_instance, analysis_data):
                 "tp_price":     signal_eng.get("tp_price"),
                 "gates":        signal_eng.get("gates", {}),
             },
-            "current_timeframe": current_tf,   # preserve timeframe
+            "current_timeframe": current_tf,
         })
     except Exception as e:
-        print(f"⚠️ State update error: {e}")
+        print(f"⚠️ State update error for {symbol}: {e}")
         traceback.print_exc()
 
 # ═══════════════════════════════════════════════════════════════════════════
-# /webhook — unchanged
+# /webhook
 # ═══════════════════════════════════════════════════════════════════════════
 @app.post("/webhook")
 async def webhook(payload: dict = Body(...)):
     try:
+        symbol = payload.get("symbol")
+        if not symbol:
+            symbol = "XAUUSD"
+        state = get_symbol_state(symbol)
+        if "control_url" in payload:
+            state["control_url"] = payload["control_url"]
+            
         bot_inst, analysis = normalize_webhook_payload(payload)
-        update_bot_state_v2(bot_inst, analysis)
+        update_bot_state_v2(symbol, bot_inst, analysis)
         return {"status": "ok"}
     except Exception as e:
         print(f"❌ Webhook error: {e}")
@@ -519,32 +598,59 @@ async def webhook(payload: dict = Body(...)):
         return {"status": "error", "reason": str(e)}
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Bot control endpoints — unchanged
+# Bot control endpoints
 # ═══════════════════════════════════════════════════════════════════════════
 @app.get("/bot/status")
-async def bot_status():
-    return {"status": "PAUSED" if bot_paused else "ACTIVE"}
+async def bot_status(symbol: str = "XAUUSD"):
+    state = get_symbol_state(symbol)
+    return {"status": "PAUSED" if not state.get("trading", True) else "ACTIVE"}
 
 @app.post("/bot/pause")
-async def pause_bot():
-    global bot_paused
-    bot_paused = True
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post("http://localhost:8000/bot/pause")
-    except Exception: pass
-    print("⏸️  Bot PAUSED via dashboard")
+async def pause_bot(symbol: str = "XAUUSD"):
+    state = get_symbol_state(symbol)
+    state["trading"] = False
+    control_url = state.get("control_url")
+    if control_url:
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                await client.post(f"{control_url}/control/pause")
+            print(f"⏸️ Forwarded pause command to {symbol} bot at {control_url}/control/pause")
+        except Exception as e:
+            print(f"⚠️ Failed to forward pause to {symbol} bot: {e}")
+    else:
+        # Fallback to local
+        for fallback_url in ("http://localhost:5000/control/pause", "http://localhost:8000/bot/pause"):
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    await client.post(fallback_url)
+                print(f"⏸️ Forwarded pause command to fallback: {fallback_url}")
+                break
+            except Exception: pass
+    print(f"⏸️  Bot {symbol} PAUSED via dashboard")
     return {"status": "PAUSED"}
 
 @app.post("/bot/resume")
-async def resume_bot():
-    global bot_paused
-    bot_paused = False
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            await client.post("http://localhost:8000/bot/resume")
-    except Exception: pass
-    print("▶️  Bot RESUMED via dashboard")
+async def resume_bot(symbol: str = "XAUUSD"):
+    state = get_symbol_state(symbol)
+    state["trading"] = True
+    control_url = state.get("control_url")
+    if control_url:
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                await client.post(f"{control_url}/control/resume")
+            print(f"▶️ Forwarded resume command to {symbol} bot at {control_url}/control/resume")
+        except Exception as e:
+            print(f"⚠️ Failed to forward resume to {symbol} bot: {e}")
+    else:
+        # Fallback to local
+        for fallback_url in ("http://localhost:5000/control/resume", "http://localhost:8000/bot/resume"):
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    await client.post(fallback_url)
+                print(f"▶️ Forwarded resume command to fallback: {fallback_url}")
+                break
+            except Exception: pass
+    print(f"▶️  Bot {symbol} RESUMED via dashboard")
     return {"status": "ACTIVE"}
 
 @app.get('/bot/logs')
@@ -581,7 +687,7 @@ def is_trader_running():
 # /health — unchanged
 # ═══════════════════════════════════════════════════════════════════════════
 @app.get("/health")
-async def health_check():
+async def health_check(symbol: str = None):
     now = datetime.now()
     if last_webhook_timestamp is None:
         age = 99999
@@ -594,8 +700,13 @@ async def health_check():
             mt5_status = "warning"
         else:
             mt5_status = "down"
-    chart_len = len(bot_state.get("chart_data", []) or [])
-    se = bot_state.get("signal_engine", {})
+            
+    if not symbol:
+        symbol = list(bot_states.keys())[0] if bot_states else "XAUUSD"
+        
+    state = bot_states.get(symbol, {})
+    chart_len = len(state.get("chart_data", []) or [])
+    se = state.get("signal_engine", {})
     trader_active = is_trader_running() or (age < 90)
     strategy_active = (se.get("action") is not None) and (mt5_status != "down")
     return {
@@ -608,21 +719,28 @@ async def health_check():
         "data_feed_candles":   chart_len,
         "vps_uptime_seconds":  int(_time.time() - _SERVER_START_TIME),
         "webhook_age_seconds": round(age),
-        "last_price":          bot_state.get("price", 0.0),
-        "open_positions":      len(bot_state.get("trades", []) or []),
-        "bot_paused":          bot_paused,
+        "last_price":          state.get("price", 0.0),
+        "open_positions":      len(state.get("trades", []) or []),
+        "bot_paused":          not state.get("trading", True),
         "server_time":         now.isoformat(),
+        "symbol":              symbol
     }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# /api/state — unchanged
+# /api/state
 # ═══════════════════════════════════════════════════════════════════════════
 @app.get("/api/state")
-async def api_state():
-    if not bot_state:
+async def api_state(symbol: str = None):
+    if not bot_states:
         return {"status": "no_data", "message": "No webhook received yet"}
     try:
-        safe = json.loads(json.dumps(bot_state, default=str).replace("NaN", "null"))
+        if symbol:
+            state = bot_states.get(symbol)
+            if not state:
+                return {"status": "no_data", "message": f"No state for symbol {symbol}"}
+            safe = json.loads(json.dumps(state, default=str).replace("NaN", "null"))
+        else:
+            safe = json.loads(json.dumps(bot_states, default=str).replace("NaN", "null"))
         safe["_source"]        = "http_snapshot"
         safe["_snapshot_time"] = datetime.now().isoformat()
         return safe
@@ -641,11 +759,11 @@ async def websocket_endpoint(websocket: WebSocket):
         client_info = f"{websocket.client}" if hasattr(websocket, "client") else "unknown"
         print("🔌 WS CONNECTED:", client_info)
 
-        if bot_state:
+        if bot_states:
             try:
-                safe_json = json.dumps(bot_state, default=str).replace("NaN", "null")
+                safe_json = json.dumps(bot_states, default=str).replace("NaN", "null")
                 await websocket.send_text(safe_json)
-                print(f"📤 Initial state sent: Equity=${bot_state.get('equity',0)} Chart={len(bot_state.get('chart_data',[]))}c")
+                print(f"📤 Initial states sent: {len(bot_states)} symbols")
             except Exception:
                 pass
 
@@ -655,26 +773,38 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     data = json.loads(msg)
                     action = data.get("action")
+                    symbol = data.get("symbol")
+                    if not symbol:
+                        symbol = "XAUUSD"
 
                     if action == "toggle_bot":
-                        global bot_paused
-                        bot_paused = (data.get("status", "ON") == "OFF")
-                        print(f"🎛️  Bot {'PAUSED' if bot_paused else 'RESUMED'} via WS")
+                        status = data.get("status", "ON")
+                        state = get_symbol_state(symbol)
+                        state["trading"] = (status == "ON")
+                        print(f"🎛️  Bot {symbol} {'RESUMED' if state['trading'] else 'PAUSED'} via WS")
+                        control_url = state.get("control_url")
+                        if control_url:
+                            try:
+                                async with httpx.AsyncClient(timeout=2.0) as client:
+                                    path = "/bot/resume" if status == "ON" else "/bot/pause"
+                                    await client.post(f"{control_url}{path}")
+                                print(f"✅ Forwarded {action} to {symbol} bot at {control_url}")
+                            except Exception as e:
+                                print(f"⚠️ Could not forward {action} to {symbol} bot: {e}")
 
                     elif action == "change_tf":
                         new_tf = data.get("tf", "M15")
-                        print(f"📊 TF change requested: {new_tf}")
-                        # Store in bot_state and broadcast
-                        bot_state["current_timeframe"] = new_tf
-                        # Optionally forward to trader (if endpoint exists)
-                        try:
-                            async with httpx.AsyncClient(timeout=2.0) as client:
-                                await client.post("http://localhost:8000/set_timeframe", json={"timeframe": new_tf})
-                            print(f"✅ Forwarded timeframe {new_tf} to trader")
-                        except Exception as e:
-                            print(f"⚠️ Could not forward timeframe to trader: {e}")
-                        # Broadcast updated state (will be sent by broadcast_loop)
-                        # Force immediate broadcast? broadcast_loop runs every 3s, good enough.
+                        print(f"📊 TF change requested for {symbol}: {new_tf}")
+                        state = get_symbol_state(symbol)
+                        state["current_timeframe"] = new_tf
+                        control_url = state.get("control_url")
+                        if control_url:
+                            try:
+                                async with httpx.AsyncClient(timeout=2.0) as client:
+                                    await client.post(f"{control_url}/set_timeframe", json={"timeframe": new_tf})
+                                print(f"✅ Forwarded timeframe {new_tf} to {symbol} bot at {control_url}")
+                            except Exception as e:
+                                print(f"⚠️ Could not forward timeframe to {symbol} bot: {e}")
 
                     elif action == "ping":
                         await websocket.send_text(

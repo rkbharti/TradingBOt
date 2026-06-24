@@ -182,6 +182,11 @@ function DS() {
         _heartbeatInterval: null,
         _healthInterval: null,
 
+        // --- Multi-symbol states ---
+        bot_states: {},
+        active_symbol: '',
+        _lastChartDataHash: null,
+
         // --- Bot control ---
         bot_status: true,
         current_tf: 'M15',
@@ -370,64 +375,20 @@ function DS() {
                         return;
                     }
 
-                    // ---- Account & risk ----
-                    if (data.equity !== undefined) this.equity = data.equity;
-                    if (data.balance !== undefined) this.balance = data.balance;
-                    if (data.pnl_today !== undefined) this.pnl_today = data.pnl_today;
-                    if (data.pnl_week !== undefined) this.pnl_week = data.pnl_week;
-                    if (data.pnl_total !== undefined) this.pnl_total = data.pnl_total;
-                    if (data.price !== undefined) this.current_price = data.price;
-                    if (data.session !== undefined) this.session = data.session;
-                    if (data.market_structure !== undefined) this.structure = data.market_structure;
-                    if (data.d1_bias !== undefined) this.d1_bias = data.d1_bias;
-                    if (data.h4_bias !== undefined) this.h4_bias = data.h4_bias;
-                    if (data.account_login !== undefined) this.account_login = data.account_login;
-                    if (data.account_server !== undefined) this.account_server = data.account_server;
-                    if (data.account_name !== undefined) this.account_name = data.account_name;
-                    if (data.trading !== undefined) this.bot_status = data.trading;
-
-                    // ---- Trades ----
-                    if (data.trades !== undefined) this.trades = data.trades;
-                    if (data.closed_trades !== undefined) this.closed_trades = data.closed_trades;
-
-                    // ---- News ----
-                    if (data.news_items !== undefined) this.news_items = data.news_items;
-                    if (data.news_time !== undefined) this.news.time = data.news_time;
-
-                    // ---- Signal engine (merge, do not lose fields) ----
-                    if (data.signal_engine !== undefined) {
-                        this.signal_engine = {
-                            ...this.signal_engine,
-                            ...data.signal_engine,
-                            // ensure nested gates are merged
-                            gates: { ...this.signal_engine.gates, ...(data.signal_engine.gates || {}) }
-                        };
-                        // if confidence is provided as confidence_score, map it
-                        if (data.signal_engine.confidence_score !== undefined && this.signal_engine.confidence === undefined) {
-                            this.signal_engine.confidence = data.signal_engine.confidence_score;
+                    // Store/merge all states
+                    this.bot_states = { ...this.bot_states, ...data };
+                    
+                    const symbols = Object.keys(this.bot_states);
+                    if (symbols.length > 0) {
+                        if (!this.active_symbol || !this.bot_states[this.active_symbol]) {
+                            this.active_symbol = symbols.includes('XAUUSD') ? 'XAUUSD' : symbols[0];
                         }
-                    }
-
-                    // ---- Chart data & overlays ----
-                    if (data.chart_data && Array.isArray(data.chart_data) && data.chart_data.length) {
-                        this.chart_data_raw = data.chart_data;
-                        this._renderChart(data.chart_data);
-                    }
-                    if (data.poi_overlays !== undefined) {
-                        this.poi_overlays = data.poi_overlays;
-                        this._drawChartOverlays();
-                    }
-                    if (data.chart_objects !== undefined) {
-                        this.chart_objects = data.chart_objects;
-                        this._drawChartOverlays();
+                        this.syncActiveState();
                     }
 
                     // update timestamp
                     const tsEl = document.getElementById('last-update-ts');
                     if (tsEl) tsEl.innerText = new Date().toLocaleTimeString('en-IN', { hour12: false });
-
-                    // calculate daily %
-                    if (this.balance > 0) this.pnl_today_pct = (this.pnl_today / this.balance) * 100;
                 } catch (e) {
                     console.error('[WS] message parse error:', e);
                 }
@@ -451,6 +412,81 @@ function DS() {
             this._wsRetryCount++;
             console.log(`[WS] reconnecting in ${delay}ms (attempt ${this._wsRetryCount})`);
             setTimeout(() => this._connectWebSocket(), delay);
+        },
+
+        selectSymbol(symbol) {
+            if (symbol === this.active_symbol) return;
+            this.active_symbol = symbol;
+            _lastOverlaysHash = null;
+            this._lastChartDataHash = null;
+            this.syncActiveState();
+        },
+
+        syncActiveState() {
+            if (!this.active_symbol || !this.bot_states[this.active_symbol]) return;
+            const state = this.bot_states[this.active_symbol];
+
+            // Account & risk
+            if (state.equity !== undefined) this.equity = state.equity;
+            if (state.balance !== undefined) this.balance = state.balance;
+            if (state.pnl_today !== undefined) this.pnl_today = state.pnl_today;
+            if (state.pnl_week !== undefined) this.pnl_week = state.pnl_week;
+            if (state.pnl_total !== undefined) this.pnl_total = state.pnl_total;
+            if (state.price !== undefined) this.current_price = state.price;
+            if (state.session !== undefined) this.session = state.session;
+            if (state.market_structure !== undefined) this.structure = state.market_structure;
+            if (state.d1_bias !== undefined) this.d1_bias = state.d1_bias;
+            if (state.h4_bias !== undefined) this.h4_bias = state.h4_bias;
+            if (state.account_login !== undefined) this.account_login = state.account_login;
+            if (state.account_server !== undefined) this.account_server = state.account_server;
+            if (state.account_name !== undefined) this.account_name = state.account_name;
+            if (state.trading !== undefined) this.bot_status = state.trading;
+
+            // Trades & news
+            if (state.trades !== undefined) this.trades = state.trades;
+            if (state.closed_trades !== undefined) this.closed_trades = state.closed_trades;
+            if (state.news_items !== undefined) this.news_items = state.news_items;
+            if (state.news_time !== undefined) this.news.time = state.news_time;
+
+            // Signal engine (merge)
+            if (state.signal_engine !== undefined) {
+                this.signal_engine = {
+                    ...this.signal_engine,
+                    ...state.signal_engine,
+                    gates: { ...this.signal_engine.gates, ...(state.signal_engine.gates || {}) }
+                };
+                if (state.signal_engine.confidence_score !== undefined && this.signal_engine.confidence === undefined) {
+                    this.signal_engine.confidence = state.signal_engine.confidence_score;
+                }
+            }
+
+            // Health (webhook age, trader alive, etc.)
+            if (state.webhook_age_seconds !== undefined) {
+                this._health.webhook_age_seconds = state.webhook_age_seconds;
+                this._health.trader_alive = state.webhook_age_seconds < 90;
+                this._health.websocket_active = this.ws_connected;
+            }
+
+            // Chart data & overlays
+            if (state.chart_data && Array.isArray(state.chart_data) && state.chart_data.length) {
+                const lastIdx = state.chart_data.length - 1;
+                const currentHash = `${state.chart_data.length}-${state.chart_data[lastIdx].time}-${state.chart_data[lastIdx].close}`;
+                if (currentHash !== this._lastChartDataHash) {
+                    this._lastChartDataHash = currentHash;
+                    this.chart_data_raw = state.chart_data;
+                    this._renderChart(state.chart_data);
+                }
+            }
+            if (state.poi_overlays !== undefined) {
+                this.poi_overlays = state.poi_overlays;
+            }
+            if (state.chart_objects !== undefined) {
+                this.chart_objects = state.chart_objects;
+            }
+            this._drawChartOverlays();
+
+            // calculate daily %
+            if (this.balance > 0) this.pnl_today_pct = (this.pnl_today / this.balance) * 100;
         },
 
         // ------------------------------------------------------------------
@@ -494,18 +530,19 @@ function DS() {
         // ------------------------------------------------------------------
         toggleBot(statusState) {
             this.bot_status = statusState;
+            const sym = this.active_symbol || 'XAUUSD';
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify({ action: 'toggle_bot', status: statusState ? 'ON' : 'OFF' }));
+                this.ws.send(JSON.stringify({ action: 'toggle_bot', status: statusState ? 'ON' : 'OFF', symbol: sym }));
             }
-            fetch(statusState ? '/bot/resume' : '/bot/pause', { method: 'POST' }).catch(e => console.error(e));
+            fetch(`${statusState ? '/bot/resume' : '/bot/pause'}?symbol=${encodeURIComponent(sym)}`, { method: 'POST' }).catch(e => console.error(e));
         },
 
         changeTimeframe(tf) {
             this.current_tf = tf;
+            const sym = this.active_symbol || 'XAUUSD';
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify({ action: 'change_tf', tf }));
+                this.ws.send(JSON.stringify({ action: 'change_tf', tf, symbol: sym }));
             }
-            // optional: force chart data refresh (backend will send new chart_data)
         },
 
         // ------------------------------------------------------------------

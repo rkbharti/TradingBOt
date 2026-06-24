@@ -121,6 +121,18 @@
     </header>
 
     <main class="dashboard-container">
+      <!-- Symbol Tab Bar -->
+      <div class="symbol-tab-bar" x-show="Object.keys(bot_states).length > 0" style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px;">
+        <template x-for="sym in Object.keys(bot_states)">
+          <button 
+            class="symbol-tab-btn" 
+            :class="active_symbol === sym ? 'active' : ''" 
+            @click="selectSymbol(sym)"
+            x-text="sym">
+          </button>
+        </template>
+      </div>
+
       <section class="top-row-grid">
         <!-- Account Overview -->
         <div class="terminal-panel">
@@ -444,7 +456,7 @@
       <div class="terminal-panel">
         <div class="chart-controls-bar">
           <div class="chart-meta-left">
-            <span class="chart-symbol mono">XAUUSD</span>
+            <span class="chart-symbol mono" x-text="active_symbol || 'XAUUSD'">XAUUSD</span>
             <span
               class="badge"
               x-text="'$' + (current_price ? Number(current_price).toFixed(2) : '--')"

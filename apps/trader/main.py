@@ -102,8 +102,9 @@ def control_resume():
 def start_control_server():
     """Run Flask control server in background thread"""
     try:
-        print("🌐 Starting bot control server on port 5000...")
-        control_app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False, threaded=True)
+        port = int(os.getenv("CONTROL_PORT", 5000))
+        print(f"🌐 Starting bot control server on port {port}...")
+        control_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
     except Exception as e:
         print(f"❌ Control server error: {e}")
 
@@ -230,6 +231,20 @@ def send_to_dashboard(
     Safe: catches all exceptions, returns False on failure.
     Replaces NaN tokens before posting.
     """
+    # Inject active symbol and control URL dynamically
+    global bot_instance_ref
+    symbol = "XAUUSD"
+    if bot_instance_ref and hasattr(bot_instance_ref, "symbol"):
+        symbol = bot_instance_ref.symbol
+    elif os.getenv("SYMBOL"):
+        symbol = os.getenv("SYMBOL")
+        
+    bot_data["symbol"] = symbol
+    control_url = os.getenv("CONTROL_URL")
+    if not control_url:
+        control_url = f"http://{os.getenv('BOT_CONTROL_IP', 'localhost')}:{os.getenv('CONTROL_PORT', 5000)}"
+    bot_data["control_url"] = control_url
+
     poi_overlays = []
     try:
         ltf_pois = analysis.get("ltf_pois") or {}
