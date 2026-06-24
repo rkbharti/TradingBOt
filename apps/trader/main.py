@@ -1634,8 +1634,8 @@ class XAUUSDTradingBot:
                     self._session_date = today
                     self.save_session_state()
 
-            # Determine reset hour
-            reset_hour = 8 if tz_str == "Asia/Kolkata" else 0
+            # Determine reset hour (configurable via DAILY_RESET_HOUR, defaults to 8 for IST and 0 for others)
+            reset_hour = int(os.getenv("DAILY_RESET_HOUR", "8" if tz_str == "Asia/Kolkata" else "0"))
 
             # Only reset if it's genuinely a new calendar day AND past reset_hour
             if self._session_date != today and now_tz.hour >= reset_hour:
