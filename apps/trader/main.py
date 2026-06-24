@@ -393,8 +393,34 @@ class XAUUSDTradingBot:
         self.news_events_formatted: list = []
         self.news_time_str: str        = "--"
 
-        # ── Cycle summary collector (populated during analyze_once) ───────────
-        self._cycle_data: dict         = {}
+    def update_news_data(self) -> None:
+        """Fetch and format economic news events."""
+        news_events_formatted = []
+        news_time_str = "--"
+        try:
+            if hasattr(self.signal_engine, "news_filter") and self.signal_engine.news_filter:
+                events = self.signal_engine.news_filter._get_events(datetime.now(timezone.utc))
+                for e in events:
+                    e_time = self.signal_engine.news_filter._parse_event_time(e.get("time", ""))
+                    time_lbl = e_time.strftime("%H:%M UTC") if e_time else "--:--"
+                    news_events_formatted.append({
+                        "time": time_lbl,
+                        "impact": str(e.get("impact", "HIGH")).upper(),
+                        "title": str(e.get("event", "Unknown Event"))
+                    })
+                upcoming = []
+                for e in events:
+                    e_time = self.signal_engine.news_filter._parse_event_time(e.get("time", ""))
+                    if e_time and e_time > datetime.now(timezone.utc):
+                        upcoming.append(e_time)
+                if upcoming:
+                    next_time = min(upcoming)
+                    news_time_str = next_time.strftime("%H:%M UTC")
+        except Exception as ne_err:
+            print(f"⚠️ Failed to extract news events: {ne_err}")
+
+        self.news_events_formatted = news_events_formatted
+        self.news_time_str = news_time_str
 
     # ── Cycle summary printer ─────────────────────────────────────────────────
     def _print_cycle_summary(self) -> None:
@@ -544,33 +570,7 @@ class XAUUSDTradingBot:
 
         print("\n" + "\n".join(lines))
 
-        # Get news events from news_filter if configured
-        news_events_formatted = []
-        news_time_str = "--"
-        try:
-            if hasattr(self.signal_engine, "news_filter") and self.signal_engine.news_filter:
-                events = self.signal_engine.news_filter._get_events(datetime.now(timezone.utc))
-                for e in events:
-                    e_time = self.signal_engine.news_filter._parse_event_time(e.get("time", ""))
-                    time_lbl = e_time.strftime("%H:%M UTC") if e_time else "--:--"
-                    news_events_formatted.append({
-                        "time": time_lbl,
-                        "impact": str(e.get("impact", "HIGH")).upper(),
-                        "title": str(e.get("event", "Unknown Event"))
-                    })
-                upcoming = []
-                for e in events:
-                    e_time = self.signal_engine.news_filter._parse_event_time(e.get("time", ""))
-                    if e_time and e_time > datetime.now(timezone.utc):
-                        upcoming.append(e_time)
-                if upcoming:
-                    next_time = min(upcoming)
-                    news_time_str = next_time.strftime("%H:%M UTC")
-        except Exception as ne_err:
-            print(f"⚠️ Failed to extract news events: {ne_err}")
-
-        self.news_events_formatted = news_events_formatted
-        self.news_time_str = news_time_str
+        self.update_news_data()
 
         # ── Compact JSON snapshot for WebSocket / log aggregator and dashboard ─
         snapshot = {
@@ -1852,6 +1852,9 @@ class XAUUSDTradingBot:
 
         previous_bias = self.htf_memory.get("htf_bias", "NEUTRAL")
         self._cycle_data["prev_bias"] = previous_bias
+
+        # Update news data for heartbeat updates during inactive periods
+        self.update_news_data()
 
         # ── Weekend / market closed ───────────────────────────────────────────
         if not is_active:
