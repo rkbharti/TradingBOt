@@ -616,8 +616,8 @@ class XAUUSDTradingBot:
                 "bot":    [p for p in self.open_positions if p.get("source") != "MANUAL"],
                 "manual": self.manual_positions,
             },
-            "news_items": news_events_formatted,
-            "news_time": news_time_str,
+            "news_items": self.news_events_formatted,
+            "news_time": self.news_time_str,
         }
         try:
             json_str = json.dumps(snapshot, default=str)
