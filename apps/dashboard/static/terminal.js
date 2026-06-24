@@ -3,7 +3,7 @@
    ============================================================ */
 
 // Safe localStorage wrapper to prevent private browsing crashes on mobile
-const safeStorage = {
+const safeStorage = window.safeStorage || {
     getItem(key) {
         try {
             return localStorage.getItem(key);
@@ -363,7 +363,7 @@ function DS() {
                 fetch('/health')
                     .then(r => r.json())
                     .then(h => {
-                        this._health = { ...this._health, ...h };
+                        this._health = Object.assign({}, this._health, h);
                         // Also derive trader_alive from webhook age if needed
                         if (h.webhook_age_seconds !== undefined && h.webhook_age_seconds < 90) {
                             this._health.trader_alive = true;
@@ -418,11 +418,11 @@ function DS() {
                     }
 
                     // Store/merge all states
-                    this.bot_states = { ...this.bot_states, ...data };
+                    this.bot_states = Object.assign({}, this.bot_states, data);
                     
                     const symbols = Object.keys(this.bot_states);
                     if (symbols.length > 0) {
-                        const savedSymbol = localStorage.getItem('gos_active_symbol');
+                        const savedSymbol = safeStorage.getItem('gos_active_symbol');
                         if (savedSymbol && this.bot_states[savedSymbol]) {
                             this.active_symbol = savedSymbol;
                         } else if (!this.active_symbol || !this.bot_states[this.active_symbol]) {
@@ -496,11 +496,9 @@ function DS() {
 
             // Signal engine (merge)
             if (state.signal_engine !== undefined) {
-                this.signal_engine = {
-                    ...this.signal_engine,
-                    ...state.signal_engine,
-                    gates: { ...this.signal_engine.gates, ...(state.signal_engine.gates || {}) }
-                };
+                this.signal_engine = Object.assign({}, this.signal_engine, state.signal_engine, {
+                    gates: Object.assign({}, this.signal_engine.gates, state.signal_engine.gates || {})
+                });
                 if (state.signal_engine.confidence_score !== undefined && this.signal_engine.confidence === undefined) {
                     this.signal_engine.confidence = state.signal_engine.confidence_score;
                 }
