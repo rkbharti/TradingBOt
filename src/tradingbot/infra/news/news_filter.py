@@ -11,6 +11,7 @@ BLOCK_CURRENCIES = {"USD", "US"}
 BLOCK_IMPACT = "high"
 BLACKOUT_MINUTES = 15
 CACHE_TTL_SECONDS = 3600
+STRICT_MODE = os.getenv("NEWS_BLOCK_STRICT_MODE", "false").lower() == "true"
 
 HARD_BLOCK_KEYWORDS = {
     "fomc",
@@ -100,8 +101,7 @@ class NewsFilter:
             window_end = event_time + blackout_delta
 
             if window_start <= now <= window_end:
-                strict_mode = os.getenv("NEWS_BLOCK_STRICT_MODE", "false").lower() == "true"
-                if tier == "hard" or strict_mode:
+                if tier == "hard" or STRICT_MODE:
                     block_type = "HARD" if tier == "hard" else "SOFT"
                     reason = (
                         f"{block_type}_NEWS_BLACKOUT: {name} ({country}) "

@@ -330,7 +330,7 @@ class SignalEngine:
                     "reason": news_reason or "NO_ACTIVE_NEWS_BLACKOUT",
                 }
             else:
-                step7b = {"passed": True, "reason": "NEWS_FILTER_DISABLED"}
+                step7b = {"passed": False, "reason": "NEWS_FILTER_DISABLED — fail-safe block"}
             gates["step_7b_news_filter"] = step7b
             if not step7b["passed"]:
                 return _reject(gates, step7b["reason"], direction=direction)
@@ -396,7 +396,7 @@ class SignalEngine:
                 "reason": news_reason or "NO_HIGH_IMPACT_NEWS",
             }
         else:
-            step7b = {"passed": True, "reason": "NEWS_FILTER_DISABLED"}
+            step7b = {"passed": False, "reason": "NEWS_FILTER_DISABLED — fail-safe block"}
         gates["step_7b_news_filter"] = step7b
         if not step7b["passed"]:
             return _reject(gates, step7b["reason"], direction=direction)

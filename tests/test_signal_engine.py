@@ -1,6 +1,16 @@
 import pandas as pd
 from tradingbot.strategy.smc.signal_engine import SignalEngine
+from unittest.mock import MagicMock
 
+# Monkeypatch SignalEngine.__init__ to supply a dummy active news filter by default in tests
+_original_init = SignalEngine.__init__
+def _patched_init(self, *args, **kwargs):
+    _original_init(self, *args, **kwargs)
+    mock_nf = MagicMock()
+    mock_nf.is_news_blackout.return_value = (False, "NO_ACTIVE_NEWS_BLACKOUT")
+    self.news_filter = mock_nf
+
+SignalEngine.__init__ = _patched_init
 
 # =========================
 # DATA HELPERS

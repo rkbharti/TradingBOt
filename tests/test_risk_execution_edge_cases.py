@@ -1808,7 +1808,7 @@ class TestClosedTradesTracker:
         import os
         from apps.dashboard.main import ClosedTradesTracker
         
-        tracker = ClosedTradesTracker()
+        tracker = ClosedTradesTracker("XAUUSD")
         tracker.filename = os.path.join(tmp_path, "closed_trades_history.json")
         tracker.trades = []
         
@@ -1829,7 +1829,7 @@ class TestClosedTradesTracker:
         assert tracker.get_all()[2]["id"] == "1003"
         
         # Test loading from disk
-        new_tracker = ClosedTradesTracker()
+        new_tracker = ClosedTradesTracker("XAUUSD")
         new_tracker.filename = tracker.filename
         new_tracker.load_trades()
         assert len(new_tracker.get_all()) == 3
@@ -1839,7 +1839,7 @@ class TestClosedTradesTracker:
         import os
         from apps.dashboard.main import ClosedTradesTracker
         
-        tracker = ClosedTradesTracker()
+        tracker = ClosedTradesTracker("XAUUSD")
         tracker.filename = os.path.join(tmp_path, "closed_trades_history.json")
         tracker.trades = []
         
