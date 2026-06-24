@@ -697,10 +697,21 @@ async def webhook(payload: dict = Body(...)):
     try:
         symbol = payload.get("symbol")
         if not symbol:
+            bot_inst_data = payload.get("bot_instance") or payload.get("bot")
+            if isinstance(bot_inst_data, dict):
+                symbol = bot_inst_data.get("symbol")
+        if not symbol:
             symbol = "XAUUSD"
+            
         state = get_symbol_state(symbol)
-        if "control_url" in payload:
-            state["control_url"] = payload["control_url"]
+        
+        control_url = payload.get("control_url")
+        if not control_url:
+            bot_inst_data = payload.get("bot_instance") or payload.get("bot")
+            if isinstance(bot_inst_data, dict):
+                control_url = bot_inst_data.get("control_url")
+        if control_url:
+            state["control_url"] = control_url
             
         bot_inst, analysis = normalize_webhook_payload(payload)
         update_bot_state_v2(symbol, bot_inst, analysis)
