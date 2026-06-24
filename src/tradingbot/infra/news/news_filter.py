@@ -1,4 +1,5 @@
 import logging
+import os
 import requests
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -99,9 +100,11 @@ class NewsFilter:
             window_end = event_time + blackout_delta
 
             if window_start <= now <= window_end:
-                if tier == "hard":
+                strict_mode = os.getenv("NEWS_BLOCK_STRICT_MODE", "false").lower() == "true"
+                if tier == "hard" or strict_mode:
+                    block_type = "HARD" if tier == "hard" else "SOFT"
                     reason = (
-                        f"HARD_NEWS_BLACKOUT: {name} ({country}) "
+                        f"{block_type}_NEWS_BLACKOUT: {name} ({country}) "
                         f"@ {event_time.strftime('%H:%M')} UTC "
                         f"± {self.blackout_minutes}min"
                     )

@@ -321,7 +321,10 @@ class SignalEngine:
                 
             if self.news_filter is not None:
                 symbol = getattr(self, "symbol", "XAUUSD")
-                blocked, news_reason = self.news_filter.is_news_blackout(now_utc, symbol=symbol)
+                try:
+                    blocked, news_reason = self.news_filter.is_news_blackout(now_utc, symbol=symbol)
+                except Exception as e:
+                    blocked, news_reason = True, f"NEWS_FILTER_ERROR: {e}"
                 step7b = {
                     "passed": not blocked,
                     "reason": news_reason or "NO_ACTIVE_NEWS_BLACKOUT",
@@ -384,7 +387,10 @@ class SignalEngine:
         # ─── Step 7.5: News Filter ───────────────────────────────────
         if self.news_filter is not None:
             symbol = getattr(self, "symbol", "XAUUSD")
-            blocked, news_reason = self.news_filter.is_news_blackout(now_utc, symbol=symbol)
+            try:
+                blocked, news_reason = self.news_filter.is_news_blackout(now_utc, symbol=symbol)
+            except Exception as e:
+                blocked, news_reason = True, f"NEWS_FILTER_ERROR: {e}"
             step7b = {
                 "passed": not blocked,
                 "reason": news_reason or "NO_HIGH_IMPACT_NEWS",
