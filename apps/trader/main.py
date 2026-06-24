@@ -588,7 +588,13 @@ class XAUUSDTradingBot:
         self.update_news_data()
 
         # ── Compact JSON snapshot for WebSocket / log aggregator and dashboard ─
+        control_url = os.getenv("CONTROL_URL")
+        if not control_url:
+            control_url = f"http://{os.getenv('BOT_CONTROL_IP', 'localhost')}:{os.getenv('CONTROL_PORT', 5000)}"
+            
         snapshot = {
+            "symbol":      self.symbol,
+            "control_url": control_url,
             "type":       "cycle_update",
             "timestamp":  d.get("timestamp"),
             "session":    d.get("session"),
