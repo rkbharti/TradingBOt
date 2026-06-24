@@ -1910,6 +1910,12 @@ class XAUUSDTradingBot:
                     "current_session": session_norm,
                     "news_items": self.news_events_formatted,
                     "news_time": self.news_time_str,
+                    "account": {
+                        "login": getattr(acct, "login", None) if acct else None,
+                        "server": getattr(acct, "server", None) if acct else None,
+                        "balance": balance,
+                        "equity": equity,
+                    }
                 },
                 {
                     "market_structure": {"current_trend": "MARKET CLOSED"},
