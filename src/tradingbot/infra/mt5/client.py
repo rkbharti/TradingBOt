@@ -6,6 +6,7 @@ import logging
 logger = logging.getLogger("tradingbot.mt5")
 import MetaTrader5 as mt5
 import json
+import time
 
 # Fallback constants for symbol filling modes since they are missing from the MetaTrader5 python library
 SYMBOL_FILLING_FOK = getattr(mt5, "SYMBOL_FILLING_FOK", 1)
@@ -34,6 +35,12 @@ class MT5Connection:
         self.timeframe = getattr(mt5, timeframe_str)
 
         self.timezone = pytz.timezone("Asia/Kolkata")
+        self.last_latencies = {
+            "account_info": 0.0,
+            "current_price": 0.0,
+            "historical_data": 0.0,
+            "positions_get": 0.0,
+        }
 
     # -------------------------------------------------
     # CONFIG
@@ -90,7 +97,10 @@ class MT5Connection:
     # -------------------------------------------------
 
     def get_account_info(self):
-        return mt5.account_info()
+        start = time.perf_counter()
+        res = mt5.account_info()
+        self.last_latencies["account_info"] = (time.perf_counter() - start) * 1000.0
+        return res
 
     def get_symbol_info(self, symbol: str = None):
         """
@@ -109,7 +119,9 @@ class MT5Connection:
             return None
 
     def get_current_price(self):
+        start = time.perf_counter()
         tick = mt5.symbol_info_tick(self.symbol)
+        self.last_latencies["current_price"] = (time.perf_counter() - start) * 1000.0
         if not tick:
             return None
         return {
@@ -119,20 +131,39 @@ class MT5Connection:
         }
 
     def get_historical_data(self, bars: int = 300):
-        return mt5.copy_rates_from_pos(
+        start = time.perf_counter()
+        res = mt5.copy_rates_from_pos(
             self.symbol, self.timeframe, 1, bars
         )
+        self.last_latencies["historical_data"] = (time.perf_counter() - start) * 1000.0
+        return res
 
     # -------------------------------------------------
     # 🔥 CRITICAL LIFECYCLE WRAPPERS
     # -------------------------------------------------
+
+    def get_broker_ping(self) -> float:
+        """
+        Retrieves the last network latency to the broker server in milliseconds.
+        """
+        try:
+            info = mt5.terminal_info()
+            if info is not None:
+                ping_us = getattr(info, "ping_last", 0)
+                return float(ping_us) / 1000.0
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to get broker ping: {e}")
+        return 0.0
 
     def positions_get(self, symbol: str = None, ticket: int = None):
         """
         REQUIRED by sync_closed_positions() and OrderExecutor.sync_open_positions().
         """
         try:
-            return mt5.positions_get(symbol=symbol, ticket=ticket)
+            start = time.perf_counter()
+            res = mt5.positions_get(symbol=symbol, ticket=ticket)
+            self.last_latencies["positions_get"] = (time.perf_counter() - start) * 1000.0
+            return res
         except Exception as e:
             logger.error(f"❌ positions_get error: {e}")
             return None
@@ -143,7 +174,9 @@ class MT5Connection:
         Returns normalized open positions for the configured symbol.
         """
         try:
+            start = time.perf_counter()
             positions = mt5.positions_get(symbol=self.symbol)
+            self.last_latencies["positions_get"] = (time.perf_counter() - start) * 1000.0
             if not positions:
                 return []
 

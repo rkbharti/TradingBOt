@@ -280,10 +280,21 @@ def normalize_webhook_payload(payload: dict) -> tuple:
             if "balance" not in bot_inst:
                 bot_inst["balance"] = account.get("balance", 0.0)
         # --- end of fix ---
+
+        # --- Normalize price if it is a dictionary ---
+        price_val = bot_inst.get("last_price", 0.0)
+        if isinstance(price_val, dict):
+            bot_inst["last_price"] = price_val.get("bid", price_val.get("ask", 0.0))
+
         return bot_inst, analysis
 
     if "bot" in payload and "analysis" in payload:
-        return payload["bot"], payload["analysis"]
+        bot_inst = payload["bot"]
+        analysis = payload["analysis"]
+        price_val = bot_inst.get("last_price", 0.0)
+        if isinstance(price_val, dict):
+            bot_inst["last_price"] = price_val.get("bid", price_val.get("ask", 0.0))
+        return bot_inst, analysis
 
     bot_inst = {}
     analysis = {}
@@ -298,7 +309,13 @@ def normalize_webhook_payload(payload: dict) -> tuple:
         risk = payload.get("risk", {})
         if isinstance(risk, dict):
             bot_inst["risk"] = risk
-        bot_inst["last_price"]      = payload.get("price", 0.0)
+        
+        price_val = payload.get("price", 0.0)
+        if isinstance(price_val, dict):
+            bot_inst["last_price"] = price_val.get("bid", price_val.get("ask", 0.0))
+        else:
+            bot_inst["last_price"] = price_val
+
         bot_inst["current_session"] = payload.get("session", "ASIAN")
         bot_inst["open_positions"]  = payload.get("positions", [])
         bot_inst["closed_trades"]   = payload.get("closed_trades", [])
@@ -451,7 +468,7 @@ def update_bot_state_v2(bot_instance, analysis_data):
             "pnl_week":         round(pnl_tracker.get_weekly() + open_pnl, 2),
             "pnl_total":        round(pnl_tracker.get_total() + open_pnl, 2),
             "open_pnl":         round(open_pnl, 2),
-            "price":            float(get_val(bot_instance, "last_price", 0.0) or 0.0),
+            "price":            current_price,
             "market_structure": market_struct.get("current_trend", "NEUTRAL"),
             "session":          get_val(bot_instance, "current_session", "ASIAN"),
             "trades":           formatted_trades,

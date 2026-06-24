@@ -319,7 +319,18 @@ class SignalEngine:
             if not step7["passed"]:
                 return _reject(gates, step7["reason"], direction=direction)
                 
-            gates["step_7b_news_filter"] = {"passed": True, "reason": "NEWS_FILTER_DISABLED"}
+            if self.news_filter is not None:
+                symbol = getattr(self, "symbol", "XAUUSD")
+                blocked, news_reason = self.news_filter.is_news_blackout(now_utc, symbol=symbol)
+                step7b = {
+                    "passed": not blocked,
+                    "reason": news_reason or "NO_ACTIVE_NEWS_BLACKOUT",
+                }
+            else:
+                step7b = {"passed": True, "reason": "NEWS_FILTER_DISABLED"}
+            gates["step_7b_news_filter"] = step7b
+            if not step7b["passed"]:
+                return _reject(gates, step7b["reason"], direction=direction)
             
             step8 = {"passed": True, "reason": "AGGRESSIVE_SWEEP_BYPASS", "sl": agg_sl, "tp": agg_tp}
             gates["step_8_risk_reward"] = step8

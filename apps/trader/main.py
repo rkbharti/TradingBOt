@@ -314,6 +314,9 @@ class XAUUSDTradingBot:
         from config.settings import FINNHUB_API_KEY
 
         self.signal_engine_config = SignalEngineConfig()
+        # Make aggressive sweeps configurable via .env (defaults to True)
+        self.signal_engine_config.allow_aggressive_sweeps = os.getenv("ALLOW_AGGRESSIVE_SWEEPS", "True").lower() == "true"
+
         self.signal_engine = SignalEngine(self.signal_engine_config)
         self.signal_engine.symbol = self.symbol
         self.signal_engine.news_filter = NewsFilter(api_key=FINNHUB_API_KEY)
@@ -326,6 +329,7 @@ class XAUUSDTradingBot:
         max_trades = int(os.getenv("MAX_TRADES_PER_DAY", "2"))
         max_consecutive_losses = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "2"))
         min_trade_gap = int(os.getenv("MIN_TRADE_GAP_MINUTES", "90"))
+        self.max_spread_pips = float(os.getenv("MAX_SPREAD_PIPS", "4.5"))
 
         self.challenge_policy = ChallengePolicy(
             daily_loss_limit_pct=daily_loss_limit,
@@ -425,6 +429,18 @@ class XAUUSDTradingBot:
         title = f"  {self.symbol}  │  {ts}  │  {sess}  │  {mode}"
         lines.append(f"╔{'═' * W}╗")
         lines.append(f"║{title:<{W}}║")
+
+        # ── Latency ───────────────────────────────────────────────────────────
+        lines.append(divider())
+        lines.append(f"║{'  ⚡ LATENCY & NETWORK':<{W}}║")
+        ping_val = d.get("broker_ping_ms", 0.0)
+        lats = d.get("mt5_api_latencies", {})
+        ping_str = f"{ping_val:.1f} ms" if ping_val > 0 else "N/A"
+        hist_str = f"{lats.get('historical_data', 0.0):.1f} ms" if lats.get('historical_data') else "—"
+        price_str = f"{lats.get('current_price', 0.0):.1f} ms" if lats.get('current_price') else "—"
+        pos_str = f"{lats.get('positions_get', 0.0):.1f} ms" if lats.get('positions_get') else "—"
+        lines.append(row("Broker Ping:", ping_str))
+        lines.append(row("API Latency:", f"Rates: {hist_str} | Price: {price_str} | Positions: {pos_str}"))
 
         # ── Account ───────────────────────────────────────────────────────────
         lines.append(divider())
@@ -562,6 +578,10 @@ class XAUUSDTradingBot:
             "timestamp":  d.get("timestamp"),
             "session":    d.get("session"),
             "dry_run":    self.dry_run,
+            "latency": {
+                "broker_ping_ms": d.get("broker_ping_ms", 0.0),
+                "mt5_api_latencies": d.get("mt5_api_latencies", {}),
+            },
             "account":    d.get("account", {}),
             "risk": {
                 "daily_pnl_pct":       d.get("daily_pnl_pct", 0.0),
@@ -1821,9 +1841,13 @@ class XAUUSDTradingBot:
         self.current_session = session_norm
 
         # ── Initialise cycle_data collector ───────────────────────────────────
+        ping_ms = self.mt5.get_broker_ping() if hasattr(self.mt5, "get_broker_ping") else 0.0
+        last_lats = dict(self.mt5.last_latencies) if hasattr(self.mt5, "last_latencies") else {}
         self._cycle_data = {
             "timestamp":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "session":    session_norm,
+            "broker_ping_ms": ping_ms,
+            "mt5_api_latencies": last_lats,
         }
 
         previous_bias = self.htf_memory.get("htf_bias", "NEUTRAL")
@@ -1867,6 +1891,8 @@ class XAUUSDTradingBot:
                 "structure_state": {"current_trend": "MARKET CLOSED"},
                 "bias": "NEUTRAL",
                 "reason": f"Market session '{session_norm}' not active",
+                "broker_ping_ms": self._cycle_data.get("broker_ping_ms", 0.0),
+                "mt5_api_latencies": self._cycle_data.get("mt5_api_latencies", {}),
             }
             self.trade_log.append(log_record)
             self.save_trade_log()
@@ -2026,6 +2052,8 @@ class XAUUSDTradingBot:
             "gates": result.gates,
             "bias": current_bias,
             "session": session_norm,
+            "broker_ping_ms": self._cycle_data.get("broker_ping_ms", 0.0),
+            "mt5_api_latencies": self._cycle_data.get("mt5_api_latencies", {}),
         }
         self.trade_log.append(log_record)
         self.save_trade_log()
@@ -2183,6 +2211,7 @@ class XAUUSDTradingBot:
                 trades_today=self._trades_today,
                 consecutive_losses=self._consecutive_losses,
                 last_trade_time=self._last_trade_time,
+                max_spread_pips=self.max_spread_pips,
             )
 
         except Exception as e:

@@ -28,6 +28,7 @@ ENV/
 !.env.example
 config.json
 !config.example.json
+*.pem
 
 # =========================
 # Logs and runtime state
