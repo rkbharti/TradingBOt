@@ -201,7 +201,7 @@ def is_trading_session():
     if 2.0  <= t < 5.0:       return True,  "LONDON_KZ"
     if 7.0  <= t < 12.0:      return True,  "NY_KZ"
     if 12.0 <= t < 14.0:      return False, "SESSION_DEAD_ZONE"
-    if 14.0 <= t < 20.0:      return True,  "CBDR_ANALYSIS_ONLY"
+    if 14.0 <= t < 20.0:      return False, "CBDR_ANALYSIS_ONLY"
     return False, "OFF_KILLZONE"
 
 

@@ -5,7 +5,7 @@
 - **Mean Threshold (MT) Breach:** When scanning candle bodies, if any body close goes past the 50% midpoint of the OB, invalidate the POI.
 - **Near-Miss POIs:** Allow candidate M15 POIs that are within `1.5 * ATR` near-miss buffer of the HTF POI to align as valid.
 - **TP structural Extremes:** Trend-following Take Profit targets must query H4 Intermediate-Term Highs (ITH) for Bullish setups and Intermediate-Term Lows (ITL) for Bearish setups.
-- **Killzones:** Strictly use New York Local Time (America/New_York DST-aware) for London (02:00 - 05:00 NY), New York (07:00 - 12:00 NY), and Asian session checks. Hard block the Asian session and the 00:00 - 02:00 NY Dead Zone.
+- **Killzones:** Strictly use New York Local Time (America/New_York DST-aware) for London (02:00 - 05:00 NY), New York (07:00 - 12:00 NY), and Asian session checks. Hard block 00:00-02:00 NY Dead Zone only. Asian KZ (20:00-00:00 NY) is a valid entry window.
 
 ## 2. Risk Safeguards
 - **Daily Floor Trailing:** Recalculated at Midnight UTC as `max(previous_day_highest_balance, previous_day_highest_equity) * 0.95`.
