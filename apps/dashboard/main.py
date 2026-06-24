@@ -237,6 +237,10 @@ class DailyPnLTracker:
     def get_total(self):
         return float(self.total_realized)
 
+# Initialize default symbol states on startup so tabs are visible immediately
+get_symbol_state("XAUUSD")
+get_symbol_state("BTCUSD")
+
 # ═══════════════════════════════════════════════════════════════════════════
 # broadcast_loop — sends bot_states to all WebSocket clients
 # ═══════════════════════════════════════════════════════════════════════════
