@@ -184,7 +184,7 @@ function DS() {
 
         // --- Multi-symbol states ---
         bot_states: {},
-        active_symbol: '',
+        active_symbol: localStorage.getItem('gos_active_symbol') || '',
         _lastChartDataHash: null,
 
         // --- Bot control ---
@@ -380,7 +380,10 @@ function DS() {
                     
                     const symbols = Object.keys(this.bot_states);
                     if (symbols.length > 0) {
-                        if (!this.active_symbol || !this.bot_states[this.active_symbol]) {
+                        const savedSymbol = localStorage.getItem('gos_active_symbol');
+                        if (savedSymbol && this.bot_states[savedSymbol]) {
+                            this.active_symbol = savedSymbol;
+                        } else if (!this.active_symbol || !this.bot_states[this.active_symbol]) {
                             this.active_symbol = symbols.includes('XAUUSD') ? 'XAUUSD' : symbols[0];
                         }
                         this.syncActiveState();
@@ -417,6 +420,7 @@ function DS() {
         selectSymbol(symbol) {
             if (symbol === this.active_symbol) return;
             this.active_symbol = symbol;
+            localStorage.setItem('gos_active_symbol', symbol);
             _lastOverlaysHash = null;
             this._lastChartDataHash = null;
             this.syncActiveState();
