@@ -18,6 +18,7 @@ class MultiTimeframeFractal:
     def __init__(self, symbol="XAUUSD"):
         self.symbol = symbol
         self.timeframes = {
+            'M1': mt5.TIMEFRAME_M1,
             'M5': mt5.TIMEFRAME_M5,
             'M15': mt5.TIMEFRAME_M15,
             'H1': mt5.TIMEFRAME_H1,

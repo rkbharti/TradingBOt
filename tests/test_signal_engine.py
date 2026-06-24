@@ -287,15 +287,15 @@ def test_no_trade_rr_fail():
     assert result.action == "NO_TRADE"
     assert result.reason == "RR_BELOW_MINIMUM"
 
-def test_killzone_blocks_asian_session():
+def test_killzone_allows_asian_session():
     from datetime import datetime, timezone
     engine = SignalEngine()
     df = generate_candles()
     asian_time = datetime(2025, 1, 15, 1, 30, 0, tzinfo=timezone.utc)
     result = engine._step_killzone(asian_time, df)
-    assert result["passed"] is False
+    assert result["passed"] is True
     assert result["session"] == "ASIAN"
-    assert result["reason"] == "ASIAN_SESSION_BLOCKED"
+    assert result["reason"] == "ASIAN_SESSION_ACTIVE"
 
 
 def test_killzone_allows_london_session():

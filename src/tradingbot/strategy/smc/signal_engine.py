@@ -225,6 +225,8 @@ class SignalEngine:
         d1_df: pd.DataFrame,
         now_utc: Optional[datetime] = None,
         w1_df: Optional[pd.DataFrame] = None,  # ✅ Added
+        asian_session_pois: Optional[list] = None,
+        m1: Optional[Any] = None,
     ) -> SignalResult:
 
         # Store yesterday's high and low for PDH/PDL targets
@@ -247,6 +249,278 @@ class SignalEngine:
             return self._no_trade(gates, reason, direction=direction)
 
         gates = self._init_gates()
+
+        # Check if we are in the ASIAN killzone session first
+        ts = self._resolve_now_utc(now_utc, m5_df)
+        import pytz
+        ny_tz = pytz.timezone("America/New_York")
+        ts_ny = ts.astimezone(ny_tz)
+        t = ts_ny.hour + ts_ny.minute / 60.0
+
+        is_asian = (20.0 <= t < 24.0)
+
+        if is_asian:
+            gates["step_7_killzone"] = {
+                "passed": True,
+                "reason": "ASIAN_SESSION_ACTIVE",
+                "session": "ASIAN",
+                "killzone_active": True
+            }
+
+            # Check if we have pre-session POIs
+            if not asian_session_pois or len(asian_session_pois) == 0:
+                gates["step_4_valid_poi"] = {"passed": False, "reason": "ASIAN_NO_PRESESSION_POI"}
+                return _reject(gates, "ASIAN_NO_PRESESSION_POI")
+
+            # Check if current price is tapping any pre-session POI
+            current_price = float(m5_df["close"].iloc[-1])
+            tapped_poi = None
+            for poi in asian_session_pois:
+                if poi['low'] <= current_price <= poi['high']:
+                    tapped_poi = poi
+                    break
+            if tapped_poi is None:
+                gates["step_4_valid_poi"] = {"passed": False, "reason": "ASIAN_PRICE_NOT_AT_POI"}
+                return _reject(gates, "ASIAN_PRICE_NOT_AT_POI")
+
+            gates["step_4_valid_poi"] = {
+                "passed": True,
+                "reason": f"ASIAN_POI_TAPPED_{tapped_poi['type']}",
+                "poi": tapped_poi
+            }
+
+            # Extract M1 DataFrame
+            m1_df = m1.get("df") if isinstance(m1, dict) else m1
+            if m1_df is None or len(m1_df) < 15:
+                gates["step_3_choch_mss_body_close"] = {"passed": False, "reason": "ASIAN_M1_DATA_UNAVAILABLE"}
+                return _reject(gates, "ASIAN_M1_DATA_UNAVAILABLE")
+
+            direction = "BULLISH" if tapped_poi["direction"] == "bull" else "BEARISH"
+
+            # Drop to M1 and wait for CHoCH/MSS + displacement (fresh FVG)
+            w_m1 = 3
+            m1_highs, m1_lows = self._find_m5_choch_pivots(m1_df, w_m1)
+
+            choch_found = False
+            break_idx = None
+            last_ph_idx = None
+            last_pl_idx = None
+            fvg_entry = None
+
+            if direction == "BULLISH":
+                # Look back over last 20 candles of M1 backwards to find the freshest setup first
+                for i in range(len(m1_df) - 1, len(m1_df) - 21, -1):
+                    if i <= 0 or i >= len(m1_df):
+                        continue
+                    phs = [idx for idx in m1_highs if idx < i]
+                    if not phs:
+                        continue
+                    last_ph_idx = phs[-1]
+                    level = float(m1_df["high"].iat[last_ph_idx])
+                    close_now = float(m1_df["close"].iat[i])
+                    if close_now > level:
+                        # Check for FVG displacement
+                        for f in range(i - 1, last_ph_idx - 1, -1):
+                            if f + 2 < len(m1_df):
+                                f_low = float(m1_df["high"].iat[f])
+                                f_high = float(m1_df["low"].iat[f+2])
+                                if f_high > f_low:
+                                    choch_found = True
+                                    break_idx = i
+                                    fvg_entry = f_high
+                                    break
+                    if choch_found:
+                        break
+            else: # BEARISH
+                for i in range(len(m1_df) - 1, len(m1_df) - 21, -1):
+                    if i <= 0 or i >= len(m1_df):
+                        continue
+                    pls = [idx for idx in m1_lows if idx < i]
+                    if not pls:
+                        continue
+                    last_pl_idx = pls[-1]
+                    level = float(m1_df["low"].iat[last_pl_idx])
+                    close_now = float(m1_df["close"].iat[i])
+                    if close_now < level:
+                        # Check for FVG displacement
+                        for f in range(i - 1, last_pl_idx - 1, -1):
+                            if f + 2 < len(m1_df):
+                                f_high = float(m1_df["low"].iat[f])
+                                f_low = float(m1_df["high"].iat[f+2])
+                                if f_high > f_low:
+                                    choch_found = True
+                                    break_idx = i
+                                    fvg_entry = f_low
+                                    break
+                    if choch_found:
+                        break
+
+            if not choch_found:
+                gates["step_3_choch_mss_body_close"] = {"passed": False, "reason": "NO_CHOCH"}
+                return _reject(gates, "NO_CHOCH", direction=direction)
+
+            gates["step_3_choch_mss_body_close"] = {
+                "passed": True,
+                "reason": f"VALID_{direction}_CHOCH",
+                "m1_candle_index": break_idx,
+                "entry_price": fvg_entry
+            }
+            gates["step_5_ob_fvg_confluence"] = {"passed": True, "reason": "M1_CONFLUENCE_PASSED"}
+            gates["step_6_dealing_range"] = {"passed": True, "reason": "ASIAN_KZ_BYPASS"}
+
+            # Check news filter (Step 7b)
+            if self.news_filter is not None:
+                symbol = getattr(self, "symbol", "XAUUSD")
+                try:
+                    blocked, news_reason = self.news_filter.is_news_blackout(now_utc, symbol=symbol)
+                except Exception as ne:
+                    blocked, news_reason = True, f"NEWS_FILTER_ERROR: {ne}"
+                step7b = {
+                    "passed": not blocked,
+                    "reason": news_reason or "NO_HIGH_IMPACT_NEWS",
+                }
+            else:
+                step7b = {"passed": False, "reason": "NEWS_FILTER_DISABLED — fail-safe block"}
+
+            gates["step_7b_news_filter"] = step7b
+            if not step7b["passed"]:
+                return _reject(gates, step7b["reason"], direction=direction)
+
+            # Stop Loss calculation
+            atr = self._calc_atr(m5_df, len(m5_df) - 1, self.config.atr_period)
+            atr_val = atr if atr is not None else 1.0
+            atr_mult = 0.8 if tapped_poi['type'] == 'LIQUIDITY' else 0.3
+            sl_buf = atr_val * atr_mult
+
+            if direction == "BULLISH":
+                m1_window_low = float(m1_df["low"].iloc[last_ph_idx:break_idx+1].min())
+                extreme_low = min(float(tapped_poi['low']), m1_window_low)
+                sl = extreme_low - sl_buf
+            else:
+                m1_window_high = float(m1_df["high"].iloc[last_pl_idx:break_idx+1].max())
+                extreme_high = max(float(tapped_poi['high']), m1_window_high)
+                sl = extreme_high + sl_buf
+
+            # Enforce minimum SL distance constraint on Gold
+            min_dist = float(self.config.min_sl_distance_pips) * 0.1
+            if abs(fvg_entry - sl) < min_dist:
+                if direction == "BULLISH":
+                    sl = fvg_entry - min_dist
+                else:
+                    sl = fvg_entry + min_dist
+
+            # Take Profit calculation based on HTF Daily bias
+            step1 = self._step_htf_bias(d1_df, h4_df, w1_df)
+            gates["step_1_htf_bias"] = step1
+            htf_bias = step1.get("direction")
+            is_with_bias = (direction == htf_bias)
+
+            def find_m15_targets(m15_df: pd.DataFrame, entry_price: float, direction: str):
+                obs_found = []
+                fvgs_found = []
+                swings_found = []
+                start_idx = max(0, len(m15_df) - 150)
+
+                for k in range(start_idx, len(m15_df) - 2):
+                    # Bullish FVG
+                    if float(m15_df["low"].iat[k+2]) > float(m15_df["high"].iat[k]):
+                        fvgs_found.append({
+                            "type": "FVG", "direction": "bull",
+                            "low": float(m15_df["high"].iat[k]), "high": float(m15_df["low"].iat[k+2])
+                        })
+                        for x in range(k, max(-1, k - 3), -1):
+                            if float(m15_df["close"].iat[x]) < float(m15_df["open"].iat[x]):
+                                obs_found.append({
+                                    "type": "OB", "direction": "bull",
+                                    "low": float(m15_df["low"].iat[x]), "high": float(m15_df["high"].iat[x])
+                                })
+                                break
+                    # Bearish FVG
+                    if float(m15_df["high"].iat[k+2]) < float(m15_df["low"].iat[k]):
+                        fvgs_found.append({
+                            "type": "FVG", "direction": "bear",
+                            "low": float(m15_df["high"].iat[k+2]), "high": float(m15_df["low"].iat[k])
+                        })
+                        for x in range(k, max(-1, k - 3), -1):
+                            if float(m15_df["close"].iat[x]) > float(m15_df["open"].iat[x]):
+                                obs_found.append({
+                                    "type": "OB", "direction": "bear",
+                                    "low": float(m15_df["low"].iat[x]), "high": float(m15_df["high"].iat[x])
+                                })
+                                break
+
+                for k in range(start_idx + 2, len(m15_df) - 2):
+                    h_val = float(m15_df["high"].iat[k])
+                    l_val = float(m15_df["low"].iat[k])
+                    if h_val > float(m15_df["high"].iat[k-1]) and h_val > float(m15_df["high"].iat[k+1]) and h_val > float(m15_df["high"].iat[k-2]) and h_val > float(m15_df["high"].iat[k+2]):
+                        swings_found.append({"type": "high", "price": h_val})
+                    if l_val < float(m15_df["low"].iat[k-1]) and l_val < float(m15_df["low"].iat[k+1]) and l_val < float(m15_df["low"].iat[k-2]) and l_val < float(m15_df["low"].iat[k+2]):
+                        swings_found.append({"type": "low", "price": l_val})
+                return obs_found, fvgs_found, swings_found
+
+            obs_list, fvgs_list, swings_list = find_m15_targets(m15_df, fvg_entry, direction)
+
+            tp = None
+            if direction == "BULLISH":
+                bear_obs = [ob["low"] for ob in obs_list if ob["direction"] == "bear" and ob["low"] > fvg_entry]
+                swing_highs = [s["price"] for s in swings_list if s["type"] == "high" and s["price"] > fvg_entry]
+                bear_fvgs = [f["low"] for f in fvgs_list if f["direction"] == "bear" and f["low"] > fvg_entry]
+
+                if is_with_bias:
+                    candidates = bear_obs + swing_highs
+                    if candidates:
+                        tp = min(candidates)
+                else:
+                    candidates = bear_obs + bear_fvgs + swing_highs
+                    if candidates:
+                        tp = min(candidates)
+                if tp is None:
+                    tp = fvg_entry + 3.0 * (fvg_entry - sl)
+            else: # BEARISH
+                bull_obs = [ob["high"] for ob in obs_list if ob["direction"] == "bull" and ob["high"] < fvg_entry]
+                swing_lows = [s["price"] for s in swings_list if s["type"] == "low" and s["price"] < fvg_entry]
+                bull_fvgs = [f["high"] for f in fvgs_list if f["direction"] == "bull" and f["high"] < fvg_entry]
+
+                if is_with_bias:
+                    candidates = bull_obs + swing_lows
+                    if candidates:
+                        tp = max(candidates)
+                else:
+                    candidates = bull_obs + bull_fvgs + swing_lows
+                    if candidates:
+                        tp = max(candidates)
+                if tp is None:
+                    tp = fvg_entry - 3.0 * (sl - fvg_entry)
+
+            # Enforce Risk Reward Ratio check
+            risk = abs(fvg_entry - sl)
+            reward = abs(tp - fvg_entry)
+            rr = reward / risk if risk > 0 else 0
+
+            gates["step_8_risk_reward"] = {
+                "passed": rr >= self.config.rr_min,
+                "reason": "RISK_REWARD_OK" if rr >= self.config.rr_min else "ASIAN_RR_TOO_LOW",
+                "risk": risk,
+                "reward": reward,
+                "rr": rr,
+                "sl": sl,
+                "tp": tp
+            }
+
+            if rr < self.config.rr_min:
+                return _reject(gates, "ASIAN_RR_TOO_LOW", direction=direction)
+
+            return SignalResult(
+                action="ENTER",
+                direction=direction,
+                entry_price=self._r(fvg_entry),
+                sl_price=self._r(sl),
+                tp_price=self._r(tp),
+                gates=gates,
+                reason="ALL_GATES_PASSED_ASIAN_KZ",
+                confidence_score=85,
+                entry_module="ASIAN_KZ",
+            )
 
         cfg = self.config
         if len(m5_df) < cfg.min_m5_candles:
@@ -2070,15 +2344,14 @@ class SignalEngine:
                 "killzone_active": False,
             }
 
-        # 🔴 XAUUSD: Asian session hard-blocked.
-        # Broker spreads spike, liquidity is fake, sweeps are traps.
+        # 🔴 XAUUSD: Asian session is now an active trading window.
         if session == "ASIAN":
             return {
-                "passed": False,
-                "reason": "ASIAN_SESSION_BLOCKED",
+                "passed": True,
+                "reason": "ASIAN_SESSION_ACTIVE",
                 "timestamp_utc": ts.isoformat(),
                 "session": "ASIAN",
-                "killzone_active": False,
+                "killzone_active": True,
             }
 
         active = session is not None

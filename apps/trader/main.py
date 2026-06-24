@@ -391,6 +391,10 @@ class XAUUSDTradingBot:
         self.daily_highest_balance: float = account_size
         self.daily_highest_equity: float = account_size
         self.daily_halted: bool = False
+        
+        # Asian session setup state variables
+        self.asian_session_pois: list = []
+        self.last_presession_reset_date: Optional[date] = None
 
         # ── State ─────────────────────────────────────────────────────────────
         self.running                   = False
@@ -1360,6 +1364,13 @@ class XAUUSDTradingBot:
                 self.daily_highest_balance = float(saved.get("daily_highest_balance", account_size))
                 self.daily_highest_equity = float(saved.get("daily_highest_equity", account_size))
                 
+                # Deserialization of Asian session state
+                self.asian_session_pois = saved.get("asian_session_pois", [])
+                reset_date_str = saved.get("last_presession_reset_date", "")
+                if reset_date_str:
+                    from datetime import date
+                    self.last_presession_reset_date = date.fromisoformat(reset_date_str)
+                
                 # Sync ChallengePolicy with loaded state
                 self.challenge_policy.daily_floor = max(self.previous_day_highest_balance, self.previous_day_highest_equity) * 0.95
                 self.challenge_policy.max_overall_floor = max(self.all_time_highest_balance, self.all_time_highest_equity) * 0.93
@@ -1384,11 +1395,134 @@ class XAUUSDTradingBot:
                 "previous_day_highest_equity": self.previous_day_highest_equity,
                 "daily_highest_balance": self.daily_highest_balance,
                 "daily_highest_equity": self.daily_highest_equity,
+                "asian_session_pois": self.asian_session_pois,
+                "last_presession_reset_date": self.last_presession_reset_date.isoformat() if self.last_presession_reset_date else None,
                 "updated_at": datetime.now().isoformat()
             }
             STATE_FILE.write_text(json.dumps(state_data, indent=4), encoding="utf-8")
         except Exception as save_err:
             print(f"⚠️ Could not persist session state: {save_err}")
+
+    def scan_presession_pois(self, m5_df: pd.DataFrame, m15_df: pd.DataFrame, ny_time: datetime) -> None:
+        """
+        Scan for Order Blocks (OB) and Fair Value Gaps (FVG) formed in the pre-session window (15:30-20:00 NY).
+        If none, mark Swing Highs/Lows as Liquidity Pools.
+        """
+        # 1. Reset check at 15:30 NY time daily
+        import pytz
+        ny_tz = pytz.timezone("America/New_York")
+        utc_tz = pytz.utc
+        
+        t_val = ny_time.hour + ny_time.minute / 60.0
+        current_date = ny_time.date()
+        
+        # If we enter the pre-session window and haven't reset today yet, reset.
+        if t_val >= 15.5:
+            if self.last_presession_reset_date is None or self.last_presession_reset_date != current_date:
+                self.asian_session_pois = []
+                self.last_presession_reset_date = current_date
+                self.save_session_state()
+                print(f"🧹 Reset and cleared asian_session_pois for {current_date} pre-session window.")
+        
+        # 2. Only scan when NY time is between 15:30 and 20:00
+        if 15.5 <= t_val < 20.0:
+            valid_indices = []
+            for idx in range(len(m5_df)):
+                c_time_utc = m5_df["time"].iat[idx]
+                c_time_ny = utc_tz.localize(c_time_utc).astimezone(ny_tz)
+                if c_time_ny.date() == current_date:
+                    c_t = c_time_ny.hour + c_time_ny.minute / 60.0
+                    if 15.5 <= c_t <= 20.0:
+                        valid_indices.append(idx)
+            
+            if not valid_indices:
+                return
+                
+            pois = []
+            for j in valid_indices:
+                if j + 2 >= len(m5_df) or j + 2 not in valid_indices:
+                    continue
+                
+                # Check for Bullish FVG (displacement)
+                if float(m5_df["low"].iat[j+2]) > float(m5_df["high"].iat[j]):
+                    pois.append({
+                        "type": "FVG",
+                        "high": float(m5_df["low"].iat[j+2]),
+                        "low": float(m5_df["high"].iat[j]),
+                        "direction": "bull",
+                        "timestamp": m5_df["time"].iat[j].isoformat()
+                    })
+                    # Bullish OB: last bearish candle at or before j
+                    for k in range(j, max(-1, j - 5), -1):
+                        if float(m5_df["close"].iat[k]) < float(m5_df["open"].iat[k]):
+                            pois.append({
+                                "type": "OB",
+                                "high": float(m5_df["high"].iat[k]),
+                                "low": float(m5_df["low"].iat[k]),
+                                "direction": "bull",
+                                "timestamp": m5_df["time"].iat[k].isoformat()
+                            })
+                            break
+                            
+                # Check for Bearish FVG (displacement)
+                if float(m5_df["high"].iat[j+2]) < float(m5_df["low"].iat[j]):
+                    pois.append({
+                        "type": "FVG",
+                        "high": float(m5_df["low"].iat[j]),
+                        "low": float(m5_df["high"].iat[j+2]),
+                        "direction": "bear",
+                        "timestamp": m5_df["time"].iat[j].isoformat()
+                    })
+                    # Bearish OB: last bullish candle at or before j
+                    for k in range(j, max(-1, j - 5), -1):
+                        if float(m5_df["close"].iat[k]) > float(m5_df["open"].iat[k]):
+                            pois.append({
+                                "type": "OB",
+                                "high": float(m5_df["high"].iat[k]),
+                                "low": float(m5_df["low"].iat[k]),
+                                "direction": "bear",
+                                "timestamp": m5_df["time"].iat[k].isoformat()
+                            })
+                            break
+            
+            # If no OB or FVG is formed, check for clean Swing Highs and Swing Lows as Liquidity Pools
+            if not pois:
+                for k in valid_indices:
+                    if k - 2 not in valid_indices or k + 2 not in valid_indices:
+                        continue
+                    # clean swing high (liquidity pool above for bearish setup)
+                    is_swing_high = all(float(m5_df["high"].iat[k]) >= float(m5_df["high"].iat[x]) for x in [k-2, k-1, k+1, k+2])
+                    if is_swing_high:
+                        pois.append({
+                            "type": "LIQUIDITY",
+                            "high": float(m5_df["high"].iat[k]),
+                            "low": float(m5_df["low"].iat[k]),
+                            "direction": "bear",
+                            "timestamp": m5_df["time"].iat[k].isoformat()
+                        })
+                    # clean swing low (liquidity pool below for bullish setup)
+                    is_swing_low = all(float(m5_df["low"].iat[k]) <= float(m5_df["low"].iat[x]) for x in [k-2, k-1, k+1, k+2])
+                    if is_swing_low:
+                        pois.append({
+                            "type": "LIQUIDITY",
+                            "high": float(m5_df["high"].iat[k]),
+                            "low": float(m5_df["low"].iat[k]),
+                            "direction": "bull",
+                            "timestamp": m5_df["time"].iat[k].isoformat()
+                        })
+            
+            # De-deduplicate
+            seen_pois = set()
+            unique_pois = []
+            for p in pois:
+                key = (p["type"], p["direction"], p["timestamp"])
+                if key not in seen_pois:
+                    seen_pois.add(key)
+                    unique_pois.append(p)
+            
+            if unique_pois:
+                self.asian_session_pois = unique_pois
+                self.save_session_state()
 
     def resolve_symbol(self) -> str:
         """Resolve the active trading symbol on the current broker."""
@@ -1979,6 +2113,7 @@ class XAUUSDTradingBot:
             print(f"⚠️ Candle sync check failed: {_ve}")
 
         # ── Fetch all timeframe DataFrames ────────────────────────────────────
+        m1_raw = self.mtf.fetch_data("M1")
         m5_raw = self.mtf.fetch_data("M5")
         m15_raw = self.mtf.fetch_data("M15")
         h4_raw = self.mtf.fetch_data("H4")
@@ -1990,6 +2125,13 @@ class XAUUSDTradingBot:
         d1_df = d1_raw.get("df") if isinstance(d1_raw, dict) else d1_raw
 
         latest = m5_df.iloc[-1] if m5_df is not None and len(m5_df) > 0 else None
+
+        # Run pre-session POI scanner on every tick
+        import pytz
+        ny_tz = pytz.timezone("America/New_York")
+        now_ny = datetime.now(timezone.utc).astimezone(ny_tz)
+        if m5_df is not None and m15_df is not None:
+            self.scan_presession_pois(m5_df, m15_df, now_ny)
 
         if any(df is None or len(df) == 0 for df in [m5_df, m15_df, h4_df, d1_df]):
             print("❌ One or more timeframe DataFrames unavailable — skipping cycle")
@@ -2003,6 +2145,8 @@ class XAUUSDTradingBot:
                 h4_df=h4_df,
                 d1_df=d1_df,
                 now_utc=datetime.now(timezone.utc),
+                asian_session_pois=self.asian_session_pois,
+                m1=m1_raw,
             )
         except Exception as e:
             print(f"❌ SignalEngine error: {e}")
@@ -2389,6 +2533,7 @@ class XAUUSDTradingBot:
         print("\n[GATE 3] Multi-Timeframe DataFrames")
         try:
             mtf_map = {
+                "M1": self.mtf.fetch_data("M1", debug=False),
                 "M5": self.mtf.fetch_data("M5", debug=False),
                 "M15": self.mtf.fetch_data("M15", debug=False),
                 "H4": self.mtf.fetch_data("H4", debug=False),
@@ -2422,6 +2567,14 @@ class XAUUSDTradingBot:
                     valid.append(name)
                     print(f"  ✅ {name} | closed={closed_str} | visible={visible_str} | fresh")
 
+            # Print Asian Session POIs status
+            print(f"\n[ASIAN SETUP] Pre-session POIs ({len(self.asian_session_pois)} stored)")
+            if self.asian_session_pois:
+                for idx, poi in enumerate(self.asian_session_pois):
+                    print(f"  POI #{idx+1}: Type={poi['type']} | Zone=[{poi['low']:.2f} - {poi['high']:.2f}] | Dir={poi['direction']} | Time={poi['timestamp']}")
+            else:
+                print("  No pre-session POIs currently stored. (Scanner runs 15:30-20:00 NY Time)")
+
             # Inactive session: stale is expected, but true fetch failures still matter
             if not is_active:
                 if missing:
@@ -2454,12 +2607,18 @@ class XAUUSDTradingBot:
         print("\n[GATES 4-11] Signal Engine — 8-Gate Sequential Check")
         print("-" * 65)
         try:
+            try:
+                m1_raw = self.mtf.fetch_data("M1", debug=False)
+            except Exception:
+                m1_raw = None
             result = self.signal_engine.evaluate(
                 m5_df=m5_df,
                 m15_df=m15_df,
                 h4_df=h4_df,
                 d1_df=d1_df,
                 now_utc=datetime.now(timezone.utc),
+                asian_session_pois=self.asian_session_pois,
+                m1=m1_raw,
             )
 
             for gate_name, gate_data in result.gates.items():
