@@ -63,6 +63,27 @@ Implements strict drawdown rules required by the Atlas Funded challenge program:
 
 ---
 
+## 🛠️ Advanced Strategy Extensions & Backtesting
+
+This system implements advanced Smart Money Concept strategies and a high-performance backtesting framework:
+
+### 1. 🌏 Asian Killzone Session & Pre-Session POI Scanner
+* **Pre-Session Scanner (15:30 - 20:00 NY):** Automatically scans M5/M15 timeframes for key Points of Interest (Order Blocks & Fair Value Gaps). If no OB/FVG is found, it marks swing extremes as Liquidity Pools.
+* **Asian Killzone (20:00 - 00:00 NY):** Activates monitoring on the 1-minute (M1) timeframe once price taps any pre-session POI. It executes trades only upon M1 CHoCH (Change of Character) and displacement (fresh FVG) confirmations.
+* **Lockdown Dead Zone:** Hard blocks entries from 00:00 to 02:00 NY (Dead Zone).
+
+### 2. ⚡ High-Performance Unified Backtester (`apps/backtest/run_backtest.py`)
+* **1-Year M1 Resampling:** Loads full M1 candle history and aggregates it dynamically into M5, M15, H4, and D1 timeframes.
+* **Vectorized Slicing:** Optimized using binary search (`bisect_right`) and integer indexing, bringing slicing execution down to milliseconds.
+* **Historical Compliance:** Simulates the exact live pre-session scanning, entry gates, and challenge policy drawdown floors to verify historical compliance.
+
+### 3. 🎯 Advanced Stop Loss & Take Profit Rules
+* **ATR Stop Loss Cushion:** Places SL at the POI boundary with a `0.3x ATR` buffer for normal setups, and a `0.8x ATR` buffer for sweeps.
+* **Gold Spread Protection:** Enforces a minimum SL distance of **35 pips (3.5 points)** on Gold/Silver to prevent early spread-spike knockouts.
+* **Intermediate-Term TP Targets:** Bullish setups target H4 Intermediate-Term Highs (ITH) and Bearish setups target H4 Intermediate-Term Lows (ITL) to capture structural highs/lows.
+
+---
+
 ## 📂 Project Structure
 
 ```text
@@ -74,6 +95,8 @@ c:/Python_Project/tradingbot/TradingBOt/
 ├── config/
 │   ├── .env                            # Active environment credentials and variables
 │   └── settings.py                     # Config parser
+├── docs/                               # System documentation & historical reports
+│   └── archive/                        # Archived development and fix reports
 ├── logs/                               # Session state & audit logs
 │   ├── decisions/
 │   │   └── audit_{symbol}.jsonl        # Sequence audit logs of every analysis cycle
