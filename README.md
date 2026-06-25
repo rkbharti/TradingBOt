@@ -220,6 +220,43 @@ Drawdown Floors:
 
 ---
 
+## 🌐 Running Different Symbols & Dashboard Integration
+
+The bot supports running multiple instances in parallel for different symbols (e.g., Gold `XAUUSD`, Silver `XAGUSD`, Bitcoin `BTCUSD`) from the same codebase.
+
+### 1. How to run for a specific symbol
+You can override the default symbol by setting the `SYMBOL` environment variable in your terminal before starting the bot:
+
+**For Silver (XAGUSD):**
+```powershell
+$env:SYMBOL="XAGUSD"; python apps/trader/main.py
+```
+
+**For Gold (XAUUSD):**
+```powershell
+$env:SYMBOL="XAUUSD"; python apps/trader/main.py
+```
+
+**For Bitcoin (BTCUSD):**
+```powershell
+$env:SYMBOL="BTCUSD"; python apps/trader/main.py
+```
+
+### 2. Multi-Symbol Isolation
+When running parallel instances, the bot prevents file conflicts by automatically segregating logs and session states using the symbol name in the filename:
+* **Session State:** `logs/session_state_{symbol}.json` (e.g., `session_state_XAGUSD.json`)
+* **Decision Audit Log:** `logs/decisions/audit_{symbol}.jsonl` (e.g., `audit_XAGUSD.jsonl`)
+
+### 3. Dashboard Webhook Integration
+On every analysis cycle, the bot sends a JSON snapshot containing:
+* The active symbol resolved from the environment.
+* The current account equity, balance, and trailing drawdown floors.
+* The parsed high-timeframe structural bias and unmitigated POI zones.
+
+The remote dashboard dynamically parses the payload and groups/filters the charts and stats clearly based on the **`symbol`** attribute, allowing you to monitor Gold, Silver, and Bitcoin instances side-by-side without interference.
+
+---
+
 ## 🧪 Running Tests
 The bot includes a robust unit testing suite verifying strategy extensions, News filters, trailing floors, and drawdown policies. Run tests via pytest:
 ```powershell
