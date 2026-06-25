@@ -2014,6 +2014,22 @@ class XAUUSDTradingBot:
         # ── Weekend / market closed ───────────────────────────────────────────
         if not is_active:
             print(f"⏸️ Market session '{session_norm}' not active — heartbeat only")
+            
+            # Run pre-session POI scanner during CBDR_ANALYSIS_ONLY (14:00-20:00 NY)
+            if session_norm == "CBDR_ANALYSIS_ONLY":
+                try:
+                    m5_raw = self.mtf.fetch_data("M5")
+                    m15_raw = self.mtf.fetch_data("M15")
+                    m5_df = m5_raw.get("df") if isinstance(m5_raw, dict) else m5_raw
+                    m15_df = m15_raw.get("df") if isinstance(m15_raw, dict) else m15_raw
+                    if m5_df is not None and m15_df is not None:
+                        import pytz
+                        ny_tz = pytz.timezone("America/New_York")
+                        now_ny = datetime.now(timezone.utc).astimezone(ny_tz)
+                        self.scan_presession_pois(m5_df, m15_df, now_ny)
+                except Exception as scan_err:
+                    print(f"⚠️ Pre-session scanner failed in heartbeat: {scan_err}")
+            
             self.detect_and_manage_manual_trades({
                 "market_structure": {"current_trend": previous_bias},
                 "current_zone": "UNKNOWN",

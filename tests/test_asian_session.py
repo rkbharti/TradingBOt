@@ -160,6 +160,11 @@ def test_asian_kz_valid_tap_and_m1_choch():
     engine._calc_atr = MagicMock(return_value=1.0)
     engine._step_htf_bias = MagicMock(return_value={"passed": True, "direction": "BULLISH"})
     
+    # Mock news filter to pass
+    mock_nf = MagicMock()
+    mock_nf.is_news_blackout.return_value = (False, "NO_HIGH_IMPACT_NEWS")
+    engine.news_filter = mock_nf
+    
     # 21:00 NY Time
     now_utc = make_utc_time(hour_ny=21, minute_ny=0)
     

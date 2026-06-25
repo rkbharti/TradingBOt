@@ -1,6 +1,14 @@
 import sys
 import pathlib
 
+# Reconfigure stdout/stderr encoding on Windows to prevent UnicodeEncodeError on terminal emoji prints
+if sys.platform.startswith("win"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Ensure 'src' is on the path so 'tradingbot' package is importable
 # regardless of how the script is invoked (python -m, direct, IDE, etc.)
 _src_path = str(pathlib.Path(__file__).resolve().parents[2] / "src")
@@ -69,28 +77,153 @@ def load_data(path: Path) -> pd.DataFrame:
 
 
 def create_timeframes(df: pd.DataFrame):
-    df_m5 = df.copy()
+    df_m1 = df.copy()
+    if "time" not in df_m1.columns:
+        df_m1["time"] = df_m1.index
+
+    df_m5 = (
+        df_m1.resample("5min")
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+        .dropna()
+    )
+    df_m5["time"] = df_m5.index
+
     df_m15 = (
-        df_m5.resample("15min")
+        df_m1.resample("15min")
         .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
         .dropna()
     )
+    df_m15["time"] = df_m15.index
+
     df_h4 = (
-        df_m5.resample("4h")
+        df_m1.resample("4h")
         .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
         .dropna()
     )
+    df_h4["time"] = df_h4.index
+
     df_d1 = (
-        df_m5.resample("1D")
+        df_m1.resample("1D")
         .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
         .dropna()
     )
+    df_d1["time"] = df_d1.index
+
     df_w1 = (
-        df_m5.resample("1W")
+        df_m1.resample("1W")
         .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
         .dropna()
     )
+    df_w1["time"] = df_w1.index
+
     return df_d1, df_h4, df_m15, df_m5, df_w1
+
+
+def scan_presession_pois_sim(m5_df: pd.DataFrame, ny_time) -> list:
+    import pytz
+    ny_tz = pytz.timezone("America/New_York")
+    utc_tz = pytz.utc
+    
+    t_val = ny_time.hour + ny_time.minute / 60.0
+    current_date = ny_time.date()
+    
+    valid_indices = []
+    for idx in range(len(m5_df)):
+        c_time_utc = m5_df["time"].iat[idx]
+        if getattr(c_time_utc, "tzinfo", None) is not None:
+            c_time_ny = c_time_utc.astimezone(ny_tz)
+        else:
+            c_time_ny = utc_tz.localize(c_time_utc).astimezone(ny_tz)
+            
+        if c_time_ny.date() == current_date:
+            c_t = c_time_ny.hour + c_time_ny.minute / 60.0
+            if 15.5 <= c_t <= 20.0:
+                valid_indices.append(idx)
+                
+    if not valid_indices:
+        return []
+        
+    pois = []
+    for j in valid_indices:
+        if j + 2 >= len(m5_df) or j + 2 not in valid_indices:
+            continue
+            
+        # Check for Bullish FVG (displacement)
+        if float(m5_df["low"].iat[j+2]) > float(m5_df["high"].iat[j]):
+            pois.append({
+                "type": "FVG",
+                "high": float(m5_df["low"].iat[j+2]),
+                "low": float(m5_df["high"].iat[j]),
+                "direction": "bull",
+                "timestamp": m5_df["time"].iat[j].isoformat()
+            })
+            # Bullish OB: last bearish candle at or before j
+            for k in range(j, max(-1, j - 5), -1):
+                if float(m5_df["close"].iat[k]) < float(m5_df["open"].iat[k]):
+                    pois.append({
+                        "type": "OB",
+                        "high": float(m5_df["high"].iat[k]),
+                        "low": float(m5_df["low"].iat[k]),
+                        "direction": "bull",
+                        "timestamp": m5_df["time"].iat[k].isoformat()
+                    })
+                    break
+                    
+        # Check for Bearish FVG (displacement)
+        if float(m5_df["high"].iat[j+2]) < float(m5_df["low"].iat[j]):
+            pois.append({
+                "type": "FVG",
+                "high": float(m5_df["low"].iat[j]),
+                "low": float(m5_df["high"].iat[j+2]),
+                "direction": "bear",
+                "timestamp": m5_df["time"].iat[j].isoformat()
+            })
+            # Bearish OB: last bullish candle at or before j
+            for k in range(j, max(-1, j - 5), -1):
+                if float(m5_df["close"].iat[k]) > float(m5_df["open"].iat[k]):
+                    pois.append({
+                        "type": "OB",
+                        "high": float(m5_df["high"].iat[k]),
+                        "low": float(m5_df["low"].iat[k]),
+                        "direction": "bear",
+                        "timestamp": m5_df["time"].iat[k].isoformat()
+                    })
+                    break
+                    
+    # If no OB or FVG is formed, check for clean Swing Highs and Swing Lows as Liquidity Pools
+    if not pois:
+        for k in valid_indices:
+            if k - 2 not in valid_indices or k + 2 not in valid_indices:
+                continue
+            is_swing_high = all(float(m5_df["high"].iat[k]) >= float(m5_df["high"].iat[x]) for x in [k-2, k-1, k+1, k+2])
+            if is_swing_high:
+                pois.append({
+                    "type": "LIQUIDITY",
+                    "high": float(m5_df["high"].iat[k]),
+                    "low": float(m5_df["low"].iat[k]),
+                    "direction": "bear",
+                    "timestamp": m5_df["time"].iat[k].isoformat()
+                })
+            is_swing_low = all(float(m5_df["low"].iat[k]) <= float(m5_df["low"].iat[x]) for x in [k-2, k-1, k+1, k+2])
+            if is_swing_low:
+                pois.append({
+                    "type": "LIQUIDITY",
+                    "high": float(m5_df["high"].iat[k]),
+                    "low": float(m5_df["low"].iat[k]),
+                    "direction": "bull",
+                    "timestamp": m5_df["time"].iat[k].isoformat()
+                })
+                
+    # De-deduplicate
+    seen_pois = set()
+    unique_pois = []
+    for p in pois:
+        key = (p["type"], p["direction"], p["timestamp"])
+        if key not in seen_pois:
+            seen_pois.add(key)
+            unique_pois.append(p)
+            
+    return unique_pois
 
 
 # ─────────────────────────────────────────────────────────────
@@ -275,8 +408,13 @@ def _print_diagnostic_report(engine, trade_log, data_year):
 
 
 # ─────────────────────────────────────────────────────────────
+class DummyNewsFilter:
+    def is_news_blackout(self, now_utc, symbol=None):
+        return False, "BACKTEST_NO_NEWS"
+
 def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None):
     engine       = SignalEngine()
+    engine.news_filter = DummyNewsFilter()
     capital      = INITIAL_CAPITAL
     peak_capital = INITIAL_CAPITAL
     max_dd       = 0.0
@@ -299,6 +437,7 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
 
     df_d1, df_h4, df_m15, df_m5, df_w1 = create_timeframes(df)
 
+    m1_index  = list(df.index)
     m15_index = list(df_m15.index)
     h4_index  = list(df_h4.index)
     d1_index  = list(df_d1.index)
@@ -341,6 +480,8 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
 
     cfg               = engine.config
     first_iter_logged = False
+    asian_session_pois = []
+    last_presession_reset_date = None
 
     for i in range(eval_start_idx, len(df_m5)):
         current_time = df_m5.index[i]
@@ -379,6 +520,32 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
         d1  = df_d1.iloc[max(0, d1_end_idx  - 300)  : d1_end_idx]
         w1  = df_w1.iloc[max(0, w1_end_idx  - 100)  : w1_end_idx]
 
+        # ── ASIAN pre-session POI scanning ──
+        import pytz
+        ny_tz = pytz.timezone("America/New_York")
+        current_time_ny = current_time.replace(tzinfo=pytz.utc).astimezone(ny_tz)
+        t_val = current_time_ny.hour + current_time_ny.minute / 60.0
+        current_date = current_time_ny.date()
+
+        # 1. Reset check at 15:30 NY time daily
+        if t_val >= 15.5:
+            if last_presession_reset_date is None or last_presession_reset_date != current_date:
+                asian_session_pois = []
+                last_presession_reset_date = current_date
+
+        # 2. Scanner simulation (15:30 to 20:00 NY)
+        if 15.5 <= t_val < 20.0:
+            pois = scan_presession_pois_sim(m5, current_time_ny)
+            if pois:
+                asian_session_pois = pois
+
+        # ── Get M1 slice up to current_time (inclusive), keeping last 120 bars
+        pos = bisect_right(m1_index, current_time)
+        m1_slice = df.iloc[max(0, pos - 120) : pos]
+        if not m1_slice.empty and "time" not in m1_slice.columns:
+            m1_slice = m1_slice.copy()
+            m1_slice["time"] = m1_slice.index
+
         if not first_iter_logged:
             print(f"[SLICE CHECK] m5={len(m5)} m15={len(m15)} "
                   f"h4={len(h4)} d1={len(d1)} w1={len(w1)} @ {current_time.date()}")
@@ -387,6 +554,7 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
         result = engine.evaluate(
             m5_df=m5, m15_df=m15, h4_df=h4,
             d1_df=d1, w1_df=w1, now_utc=current_time,
+            asian_session_pois=asian_session_pois, m1=m1_slice
         )
 
         # ── ENTRY ────────────────────────────────────────────
@@ -414,20 +582,32 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
                 if abs(entry - last_entry_price) < min_dist:
                     continue
 
+            # Resolve entry module to distinguish session
+            entry_module = getattr(result, "entry_module", "GENERIC")
+            entry_time_ny = current_time.replace(tzinfo=pytz.utc).astimezone(ny_tz)
+            t_entry = entry_time_ny.hour + entry_time_ny.minute / 60.0
+            
+            if entry_module == "ASIAN_KZ":
+                resolved_module = "ASIAN_KZ"
+            elif 2.0 <= t_entry < 5.0:
+                resolved_module = "LONDON_KZ"
+            elif 7.0 <= t_entry < 12.0:
+                resolved_module = "NY_KZ"
+            else:
+                resolved_module = f"OFF_KZ_{entry_module}"
+
             risk             = capital * RISK_PER_TRADE
             last_entry_price = entry
             last_entry_dir   = direction
-            # FIX #10: Log entry_module from signal result
-            entry_module     = getattr(result, "entry_module", "GENERIC")
             active_trade     = {
                 "entry": entry, "sl": sl, "tp": tp,
                 "direction": direction, "risk": risk, "rr": rr,
                 "date": today_str, "open_time": str(current_time),
-                "entry_module": entry_module,
+                "entry_module": resolved_module,
             }
             logger.log_trade_open(str(current_time), direction, entry, sl, tp, risk)
             print(f"\n[ENTRY] {current_time}")
-            print(f"  {direction} @ {entry} | SL: {sl} | TP: {tp} | RR: {round(rr,2)} | Module: {entry_module}")
+            print(f"  {direction} @ {entry} | SL: {sl} | TP: {tp} | RR: {round(rr,2)} | Module: {resolved_module}")
 
         # ── EXIT ─────────────────────────────────────────────
         if active_trade is not None:
