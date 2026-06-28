@@ -531,6 +531,15 @@ function DS() {
                     this.chart_data_raw = state.chart_data;
                     this._renderChart(state.chart_data);
                 }
+            } else {
+                if (this._lastChartDataHash !== null) {
+                    this._lastChartDataHash = null;
+                    this.chart_data_raw = [];
+                    if (typeof _series !== 'undefined' && _series) {
+                        try { _series.setData([]); } catch(e) { console.warn("Failed to clear chart", e); }
+                    }
+                    _clearOverlays();
+                }
             }
             if (state.poi_overlays !== undefined) {
                 this.poi_overlays = state.poi_overlays;

@@ -2217,12 +2217,21 @@ class XAUUSDTradingBot:
             except Exception:
                 pass
 
+            chart_payload = []
+            try:
+                hist_data = self.mt5_get_historical(bars=300)
+                if hist_data is not None:
+                    import pandas as pd
+                    chart_payload = pd.DataFrame(hist_data).to_dict(orient="records")
+            except Exception as e:
+                print(f"⚠️ Failed to fetch inactive chart data for dashboard: {e}")
+
             dashboard_ok = send_to_dashboard(
                 {
                     "equity": equity, "balance": balance, "last_price": 0,
                     "open_positions": self.open_positions,
                     "manual_positions": self.manual_positions,
-                    "closed_trades": self.closed_trades, "chart_data": [],  # ← Gap 1 fix
+                    "closed_trades": self.closed_trades, "chart_data": chart_payload,
                     "current_session": session_norm,
                     "news_items": self.news_events_formatted,
                     "news_time": self.news_time_str,
@@ -2691,7 +2700,7 @@ class XAUUSDTradingBot:
                     "open_positions":   self.open_positions,       # ← now contains new position
                     "manual_positions": self.manual_positions,
                     "closed_trades":    [],
-                    "chart_data":       [],                        # omit heavy chart data on this call
+                    "chart_data": market_data.tail(300).to_dict(orient="records") if market_data is not None and len(market_data) > 0 else [],                        # omit heavy chart data on this call
                     "current_session":  self.current_session,
                     "news_items":       self.news_events_formatted,
                     "news_time":        self.news_time_str,
