@@ -538,15 +538,17 @@ function DS() {
             if (state.chart_objects !== undefined) {
                 this.chart_objects = state.chart_objects;
             }
-            this._drawChartOverlays();
+            
+            if (state.smc_map) {
+                _clearOverlays();
+                this.lastSMCMap = state.smc_map;
+                this.renderSMCMap(state.smc_map);
+            } else {
+                this._drawChartOverlays();
+            }
 
             // calculate daily %
             if (this.balance > 0) this.pnl_today_pct = (this.pnl_today / this.balance) * 100;
-
-            if (state.smc_map) {
-                this.lastSMCMap = state.smc_map;
-                this.renderSMCMap(state.smc_map);
-            }
         },
 
         // ------------------------------------------------------------------
