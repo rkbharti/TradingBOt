@@ -190,11 +190,19 @@ def is_trading_session():
     symbol = os.getenv("SYMBOL", "XAUUSD").upper()
     now_utc = datetime.now(pytz.utc)
     is_crypto = "BTC" in symbol or "ETH" in symbol or "CRYPTO" in symbol
-    if not is_crypto and now_utc.weekday() >= 5:
-        return False, "WEEKEND_MARKET_CLOSED"
 
     ny_tz  = pytz.timezone("America/New_York")
     now_ny = now_utc.astimezone(ny_tz)
+    
+    # Forex market closes Friday 17:00 NY time and opens Sunday 17:00 NY time
+    if not is_crypto:
+        if now_ny.weekday() == 4 and now_ny.hour >= 17:  # Friday after 5 PM NY
+            return False, "WEEKEND_MARKET_CLOSED"
+        if now_ny.weekday() == 5:                        # All of Saturday NY
+            return False, "WEEKEND_MARKET_CLOSED"
+        if now_ny.weekday() == 6 and now_ny.hour < 17:   # Sunday before 5 PM NY
+            return False, "WEEKEND_MARKET_CLOSED"
+
     t = now_ny.hour + now_ny.minute / 60.0
 
     if t >= 20.0:              return True,  "ASIAN_KZ"
