@@ -396,6 +396,24 @@ class XAUUSDTradingBot:
         self.asian_session_pois: list = []
         self.last_presession_reset_date: Optional[date] = None
 
+        # ✅ Fix 5: CBDR Standard Deviation tracking (2:00 PM – 8:00 PM NY)
+        # Creator: project CBDR box 1–4 SDs above/below to find daily H/L
+        self.cbdr_high: Optional[float] = None
+        self.cbdr_low:  Optional[float] = None
+        self.cbdr_size: Optional[float] = None
+        self.cbdr_levels: Optional[dict] = None   # SD1–4 projected levels
+        self.cbdr_date:   Optional[date] = None   # date CBDR was last measured
+
+        # ✅ Fix 7: Asian range tracking (8:00 PM – 12:00 AM NY)
+        # Creator: when Asian range H/L is swept at CBDR SD1/SD2 = highest-confidence reversal
+        self.asian_range_high: Optional[float] = None
+        self.asian_range_low:  Optional[float] = None
+        self.asian_range_date: Optional[date]  = None
+
+        # ✅ Fix 6: Market structure reset date (separate from prop-firm drawdown reset)
+        # Creator: market structure resets at 3:30 PM – 8:00 PM NY rollover, NOT at broker midnight
+        self.market_struct_reset_date: Optional[date] = None
+
         # ── State ─────────────────────────────────────────────────────────────
         self.running                   = False
         self.paused                    = False
@@ -643,7 +661,14 @@ class XAUUSDTradingBot:
             },
             "news_items": self.news_events_formatted,
             "news_time": self.news_time_str,
+            # ✅ Fix 5/7: CBDR SD levels and Asian range for dashboard chart overlay
+            "cbdr": self.cbdr_levels if self.cbdr_levels else {},
+            "asian_range": {
+                "high": self.asian_range_high,
+                "low":  self.asian_range_low,
+            } if self.asian_range_high is not None else {},
         }
+
         try:
             json_str = json.dumps(snapshot, default=str)
             print("__CYCLE_JSON__:" + json_str)
@@ -1374,7 +1399,19 @@ class XAUUSDTradingBot:
                 # Sync ChallengePolicy with loaded state
                 self.challenge_policy.daily_floor = max(self.previous_day_highest_balance, self.previous_day_highest_equity) * 0.95
                 self.challenge_policy.max_overall_floor = max(self.all_time_highest_balance, self.all_time_highest_equity) * 0.93
-                
+
+                # ✅ Fix 5/7: Load CBDR and Asian range state
+                self.cbdr_levels = saved.get("cbdr_levels", None)
+                self.cbdr_high   = saved.get("cbdr_high", None)
+                self.cbdr_low    = saved.get("cbdr_low", None)
+                self.cbdr_size   = saved.get("cbdr_size", None)
+                cbdr_date_str    = saved.get("cbdr_date", "")
+                self.cbdr_date   = date.fromisoformat(cbdr_date_str) if cbdr_date_str else None
+                self.asian_range_high = saved.get("asian_range_high", None)
+                self.asian_range_low  = saved.get("asian_range_low", None)
+                ar_date_str           = saved.get("asian_range_date", "")
+                self.asian_range_date = date.fromisoformat(ar_date_str) if ar_date_str else None
+
                 print(f"📂 Restored session state from disk. Date: {self._session_date}")
                 print(f"   Peaks: All-Time Bal Peak=${self.all_time_highest_balance:.2f}, Daily Bal Peak=${self.daily_highest_balance:.2f}")
             except Exception as load_err:
@@ -1397,6 +1434,15 @@ class XAUUSDTradingBot:
                 "daily_highest_equity": self.daily_highest_equity,
                 "asian_session_pois": self.asian_session_pois,
                 "last_presession_reset_date": self.last_presession_reset_date.isoformat() if self.last_presession_reset_date else None,
+                # ✅ Fix 5/7: Persist CBDR and Asian range data across restarts
+                "cbdr_levels":      self.cbdr_levels,
+                "cbdr_high":        self.cbdr_high,
+                "cbdr_low":         self.cbdr_low,
+                "cbdr_size":        self.cbdr_size,
+                "cbdr_date":        self.cbdr_date.isoformat() if self.cbdr_date else None,
+                "asian_range_high": self.asian_range_high,
+                "asian_range_low":  self.asian_range_low,
+                "asian_range_date": self.asian_range_date.isoformat() if self.asian_range_date else None,
                 "updated_at": datetime.now().isoformat()
             }
             STATE_FILE.write_text(json.dumps(state_data, indent=4), encoding="utf-8")
@@ -1412,10 +1458,14 @@ class XAUUSDTradingBot:
         import pytz
         ny_tz = pytz.timezone("America/New_York")
         utc_tz = pytz.utc
-        
+
         t_val = ny_time.hour + ny_time.minute / 60.0
         current_date = ny_time.date()
-        
+
+        # ✅ Fix 6: Market structure reset at 15:30 NY (separate from prop-firm drawdown reset)
+        if t_val >= 15.5:
+            self._reset_market_structure_state(ny_time)
+
         # If we enter the pre-session window and haven't reset today yet, reset.
         if t_val >= 15.5:
             if self.last_presession_reset_date is None or self.last_presession_reset_date != current_date:
@@ -1423,7 +1473,50 @@ class XAUUSDTradingBot:
                 self.last_presession_reset_date = current_date
                 self.save_session_state()
                 print(f"🧹 Reset and cleared asian_session_pois for {current_date} pre-session window.")
-        
+
+        # ✅ Fix 5: CBDR Box Recording (14:00 – 20:00 NY)
+        # Creator: Mark absolute H/L of 14:00-20:00 NY range. Project 1-4 SDs above/below.
+        # Daily High/Low typically forms at SD1 or SD2 before reversal.
+        if 14.0 <= t_val < 20.0 and m5_df is not None and len(m5_df) > 0:
+            latest_high = float(m5_df["high"].iloc[-1])
+            latest_low  = float(m5_df["low"].iloc[-1])
+            if self.cbdr_date != current_date:
+                # New CBDR day - start fresh
+                self.cbdr_high = latest_high
+                self.cbdr_low  = latest_low
+                self.cbdr_date = current_date
+            else:
+                self.cbdr_high = max(self.cbdr_high or latest_high, latest_high)
+                self.cbdr_low  = min(self.cbdr_low  or latest_low,  latest_low)
+            # Compute box size and project SDs 1-4
+            self.cbdr_size = self.cbdr_high - self.cbdr_low
+            if self.cbdr_size and self.cbdr_size > 0:
+                self.cbdr_levels = {
+                    "box_high":   self.cbdr_high,
+                    "box_low":    self.cbdr_low,
+                    "sd1_above":  self.cbdr_high + self.cbdr_size * 1,
+                    "sd2_above":  self.cbdr_high + self.cbdr_size * 2,
+                    "sd3_above":  self.cbdr_high + self.cbdr_size * 3,
+                    "sd4_above":  self.cbdr_high + self.cbdr_size * 4,
+                    "sd1_below":  self.cbdr_low  - self.cbdr_size * 1,
+                    "sd2_below":  self.cbdr_low  - self.cbdr_size * 2,
+                    "sd3_below":  self.cbdr_low  - self.cbdr_size * 3,
+                    "sd4_below":  self.cbdr_low  - self.cbdr_size * 4,
+                }
+
+        # ✅ Fix 7: Asian Range Tracking (20:00 – 24:00 NY)
+        # Creator: when London/NY sweeps the Asian range H/L at CBDR SD1/SD2 = daily H/L confirmed
+        if 20.0 <= t_val < 24.0 and m5_df is not None and len(m5_df) > 0:
+            latest_high = float(m5_df["high"].iloc[-1])
+            latest_low  = float(m5_df["low"].iloc[-1])
+            if self.asian_range_date != current_date:
+                self.asian_range_high = latest_high
+                self.asian_range_low  = latest_low
+                self.asian_range_date = current_date
+            else:
+                self.asian_range_high = max(self.asian_range_high or latest_high, latest_high)
+                self.asian_range_low  = min(self.asian_range_low  or latest_low,  latest_low)
+
         # 2. Only scan when NY time is between 15:30 and 20:00
         if 15.5 <= t_val < 20.0:
             valid_indices = []
@@ -1524,7 +1617,47 @@ class XAUUSDTradingBot:
                 self.asian_session_pois = unique_pois
                 self.save_session_state()
 
+    def _reset_market_structure_state(self, ny_time: "datetime") -> None:
+        """
+        \u2705 Fix 6: Market Structure Reset (runs at 15:30 NY daily).
+
+        Creator: The daily market structure cycle resets during the NY rollover window
+        (3:30 PM \u2013 8:00 PM NY). This is when the market 'closes and starts again.'
+        This reset is SEPARATE from the prop-firm drawdown reset (which runs at
+        Europe/Nicosia midnight and manages equity floors).
+
+        Resets:
+        - asian_session_pois (stale pre-session blocks)
+        - CBDR box (fresh measurement for the new cycle)
+        - Asian range bounds (fresh range for the new KZ)
+        - last_presession_reset_date (trigger re-scan immediately)
+        Does NOT reset:
+        - daily_highest_balance / equity (prop-firm floors)
+        - challenge_policy counters (prop-firm rules)
+        """
+        current_date = ny_time.date()
+        if self.market_struct_reset_date == current_date:
+            return  # Already reset today
+        self.market_struct_reset_date = current_date
+
+        print(f"\u267b\ufe0f [STRUCT RESET] Market structure reset for {current_date} (NY 15:30 rollover)")
+
+        # Reset structural state for the new daily cycle
+        self.asian_session_pois = []
+        self.cbdr_high     = None
+        self.cbdr_low      = None
+        self.cbdr_size     = None
+        self.cbdr_levels   = None
+        self.cbdr_date     = None
+        self.asian_range_high = None
+        self.asian_range_low  = None
+        self.asian_range_date = None
+        # Reset presession reset date so scanner fires again this cycle
+        self.last_presession_reset_date = None
+        self.save_session_state()
+
     def resolve_symbol(self) -> str:
+
         """Resolve the active trading symbol on the current broker."""
         import MetaTrader5 as mt
         target_symbol = os.getenv("SYMBOL", "XAUUSD").upper()
@@ -2129,16 +2262,19 @@ class XAUUSDTradingBot:
             print(f"⚠️ Candle sync check failed: {_ve}")
 
         # ── Fetch all timeframe DataFrames ────────────────────────────────────
-        m1_raw = self.mtf.fetch_data("M1")
-        m5_raw = self.mtf.fetch_data("M5")
+        m1_raw  = self.mtf.fetch_data("M1")
+        m5_raw  = self.mtf.fetch_data("M5")
         m15_raw = self.mtf.fetch_data("M15")
-        h4_raw = self.mtf.fetch_data("H4")
-        d1_raw = self.mtf.fetch_data("D1")
+        # ✅ Fix 1: Fetch H1 as primary structure mapping layer (creator: IDM/BOS/CHoCH on 1H)
+        h1_raw  = self.mtf.fetch_data("H1")
+        h4_raw  = self.mtf.fetch_data("H4")
+        d1_raw  = self.mtf.fetch_data("D1")
 
-        m5_df = m5_raw.get("df") if isinstance(m5_raw, dict) else m5_raw
+        m5_df  = m5_raw.get("df")  if isinstance(m5_raw,  dict) else m5_raw
         m15_df = m15_raw.get("df") if isinstance(m15_raw, dict) else m15_raw
-        h4_df = h4_raw.get("df") if isinstance(h4_raw, dict) else h4_raw
-        d1_df = d1_raw.get("df") if isinstance(d1_raw, dict) else d1_raw
+        h1_df  = h1_raw.get("df")  if isinstance(h1_raw,  dict) else h1_raw   # ✅ Fix 1
+        h4_df  = h4_raw.get("df")  if isinstance(h4_raw,  dict) else h4_raw
+        d1_df  = d1_raw.get("df")  if isinstance(d1_raw,  dict) else d1_raw
 
         latest = m5_df.iloc[-1] if m5_df is not None and len(m5_df) > 0 else None
 
@@ -2154,15 +2290,25 @@ class XAUUSDTradingBot:
             return
 
         # ── CANONICAL SIGNAL ENGINE ───────────────────────────────────────────
+        # ✅ Fix 5/7: Build CBDR and Asian range dicts from tracked state
+        cbdr_levels_ctx = self.cbdr_levels if self.cbdr_levels else None
+        asian_range_ctx = (
+            {"high": self.asian_range_high, "low": self.asian_range_low}
+            if self.asian_range_high is not None and self.asian_range_low is not None
+            else None
+        )
         try:
             result = self.signal_engine.evaluate(
                 m5_df=m5_df,
                 m15_df=m15_df,
+                h1_df=h1_df,         # ✅ Fix 1: H1 primary structure layer
                 h4_df=h4_df,
                 d1_df=d1_df,
                 now_utc=datetime.now(timezone.utc),
                 asian_session_pois=self.asian_session_pois,
                 m1=m1_raw,
+                cbdr_levels=cbdr_levels_ctx,  # ✅ Fix 5: CBDR SD projections
+                asian_range=asian_range_ctx,  # ✅ Fix 7: Asian range bounds
             )
         except Exception as e:
             print(f"❌ SignalEngine error: {e}")

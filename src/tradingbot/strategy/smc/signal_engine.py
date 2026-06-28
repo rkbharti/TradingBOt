@@ -224,9 +224,12 @@ class SignalEngine:
         h4_df: pd.DataFrame,
         d1_df: pd.DataFrame,
         now_utc: Optional[datetime] = None,
-        w1_df: Optional[pd.DataFrame] = None,  # ✅ Added
+        w1_df: Optional[pd.DataFrame] = None,
+        h1_df: Optional[pd.DataFrame] = None,   # ✅ Fix 1: H1 as primary structure layer (creator: 1H maps IDM/BOS/CHoCH)
         asian_session_pois: Optional[list] = None,
         m1: Optional[Any] = None,
+        cbdr_levels: Optional[Dict[str, float]] = None,   # ✅ Fix 5/7: CBDR SD projections
+        asian_range: Optional[Dict[str, float]] = None,   # ✅ Fix 7: Asian range bounds
     ) -> SignalResult:
 
         # Store yesterday's high and low for PDH/PDL targets
@@ -552,7 +555,17 @@ class SignalEngine:
         direction: str = step1["direction"]
 
         # ─── Step 2: External Liquidity Sweep ───────────────────────
-        step2, sweep = self._step_external_liquidity_sweep(m15_df, direction)
+        # ✅ Fix 1: Use H1 as primary structure layer when available; fall back to M15.
+        # Creator: main structure (IDM, BOS, CHoCH, sweeps) must be mapped on 1H or 30m.
+        struct_df = h1_df if (h1_df is not None and len(h1_df) >= 30) else m15_df
+        import inspect
+        sig = inspect.signature(self._step_external_liquidity_sweep)
+        if "cbdr_levels" in sig.parameters:
+            step2, sweep = self._step_external_liquidity_sweep(
+                struct_df, direction, cbdr_levels=cbdr_levels, asian_range=asian_range
+            )
+        else:
+            step2, sweep = self._step_external_liquidity_sweep(struct_df, direction)
         gates["step_2_external_liquidity_sweep"] = step2
         if not step2["passed"] or sweep is None:
             return _reject(gates, step2["reason"], direction=direction)
@@ -625,14 +638,17 @@ class SignalEngine:
             )
 
         # ─── Step 3: CHOCH / MSS Body Close ─────────────────────────
-        step3, structure_break = self._step_choch_mss_body_close(m5_df, sweep, m15_df)
+        # ✅ Fix 1: CHoCH confirmed on M5 anchored to the H1 sweep time (struct_df already used above)
+        step3, structure_break = self._step_choch_mss_body_close(m5_df, sweep, struct_df)
         gates["step_3_choch_mss_body_close"] = step3
         if not step3["passed"] or structure_break is None:
             return _reject(gates, step3["reason"], direction=direction)
 
         # ─── Step 4: Valid POI ───────────────────────────────────────
+        # ✅ Fix 1: POI segment sliced from H1 (primary structure) when available;
+        # M15 remains the refinement layer to find the smaller OB/FVG inside the H1 zone.
         step4, poi_candidates = self._step_valid_poi(
-            m15_df, m5_df, h4_df, d1_df, sweep, structure_break
+            struct_df, m5_df, h4_df, d1_df, sweep, structure_break, m15_ref_df=m15_df
         )
         gates["step_4_valid_poi"] = step4
         if not step4["passed"] or not poi_candidates:
@@ -1082,6 +1098,70 @@ class SignalEngine:
         # ============================================================
         # FINAL PASS
         # ============================================================
+        # \u2705 Fix 3: 3B BIAS FRAMEWORK VERIFICATION
+        # Creator: Before trading, answer 3 questions in order:
+        # B1: Based on recent action \u2014 has price swept major liquidity or tapped a HTF POI?
+        # B2: Based on framework \u2014 is there a clear draw on liquidity (H4 ITH/ITL) in direction?
+        # B3: Based on dealing range \u2014 is price in Premium (for shorts) or Discount (for longs)?
+        # (B3 is checked in _step_dealing_range; B1+B2 checked here as soft filter)
+        # ============================================================
+
+        def _check_b1_recent_htf_action(h4_df: pd.DataFrame, direction: str) -> bool:
+            """B1: Has price recently (last 5 H4 candles) swept a swing or tapped an ITH/ITL?"""
+            if len(h4_df) < 10:
+                return True  # Insufficient data \u2014 allow by default
+            recent = h4_df.iloc[-5:]
+            h4_iths, h4_itls = self._find_ith_itl(h4_df)
+            if direction == "BULLISH" and h4_itls:
+                latest_itl_low = float(h4_df["low"].iat[h4_itls[-1]])
+                # B1 pass: price has recently dipped to or below the ITL (swept sell-side liquidity)
+                if float(recent["low"].min()) <= latest_itl_low * 1.002:
+                    return True
+            elif direction == "BEARISH" and h4_iths:
+                latest_ith_high = float(h4_df["high"].iat[h4_iths[-1]])
+                # B1 pass: price has recently risen to or above the ITH (swept buy-side liquidity)
+                if float(recent["high"].max()) >= latest_ith_high * 0.998:
+                    return True
+            # Fallback: any recent candle that reversed strongly indicates institutional action
+            for _, row in recent.iterrows():
+                body = abs(float(row["close"]) - float(row["open"]))
+                rng  = max(float(row["high"]) - float(row["low"]), 1e-9)
+                if body / rng >= 0.60:  # Strong-bodied candle = institutional activity
+                    return True
+            return False
+
+        def _check_b2_draw_on_liquidity(h4_df: pd.DataFrame, d1_df: pd.DataFrame, direction: str) -> bool:
+            """B2: Is there a clear draw on liquidity (H4 ITH/ITL ahead of price) in direction?"""
+            if len(h4_df) < 10:
+                return True  # Insufficient data \u2014 allow by default
+            current_price = float(h4_df["close"].iloc[-1])
+            h4_iths, h4_itls = self._find_ith_itl(h4_df)
+            if direction == "BULLISH" and h4_iths:
+                # B2 pass: there is an ITH above current price to target
+                valid_iths = [float(h4_df["high"].iat[i]) for i in h4_iths if float(h4_df["high"].iat[i]) > current_price]
+                return len(valid_iths) > 0
+            elif direction == "BEARISH" and h4_itls:
+                # B2 pass: there is an ITL below current price to target
+                valid_itls = [float(h4_df["low"].iat[i]) for i in h4_itls if float(h4_df["low"].iat[i]) < current_price]
+                return len(valid_itls) > 0
+            return True  # No ITH/ITL data \u2014 allow by default
+
+        b1_ok = _check_b1_recent_htf_action(h4_df, direction)
+        b2_ok = _check_b2_draw_on_liquidity(h4_df, d1_df, direction)
+
+        # Creator: Only block when BOTH B1 and B2 fail simultaneously (complete framework invalidation)
+        if not b1_ok and not b2_ok:
+            _log(None, "3B_FRAMEWORK_FAIL_NO_SWEEP_OR_DRAW")
+            return {
+                "passed": False,
+                "direction": None,
+                "reason": "3B_FRAMEWORK_FAIL_NO_SWEEP_OR_DRAW",
+                "w1_bias": w1_bias,
+                "d1_bias": d1_bias,
+                "h4_bias": h4_bias,
+                "is_pullback": False,
+                "agreement_score": 0,
+            }
 
         _log(direction, reason, is_pullback=is_pullback)
 
@@ -1094,12 +1174,17 @@ class SignalEngine:
             "h4_bias": h4_bias,
             "is_pullback": is_pullback,
             "agreement_score": agreement_score,
+            "b1_recent_action": b1_ok,   # 3B diagnostics in gate output
+            "b2_draw_exists": b2_ok,
         }
+
 
     def _step_external_liquidity_sweep(
         self,
         df: pd.DataFrame,
         direction: str,
+        cbdr_levels: Optional[Dict[str, float]] = None,   # ✅ Fix 7: CBDR SD projections
+        asian_range: Optional[Dict[str, float]] = None,   # ✅ Fix 7: Asian range bounds
     ) -> Tuple[Dict[str, Any], Optional[SweepEvent]]:
 
         cfg = self.config
@@ -1175,6 +1260,22 @@ class SignalEngine:
                             )
                         )
 
+                        # ✅ Fix 7: Check if this sweep aligns with CBDR SD1/SD2 + Asian Range Low
+                        is_cbdr_confluence = False
+                        cbdr_sd_level = None
+                        if cbdr_levels and asian_range:
+                            asian_low = asian_range.get("low")
+                            sd1_b = cbdr_levels.get("sd1_below")
+                            sd2_b = cbdr_levels.get("sd2_below")
+                            if asian_low is not None and sd1_b is not None and sd2_b is not None:
+                                atr_tol = atr * 0.5
+                                swept_asian_low = curr_low <= asian_low
+                                at_sd1 = abs(curr_low - sd1_b) <= atr_tol
+                                at_sd2 = abs(curr_low - sd2_b) <= atr_tol
+                                if swept_asian_low and (at_sd1 or at_sd2):
+                                    is_cbdr_confluence = True
+                                    cbdr_sd_level = "SD1" if at_sd1 else "SD2"
+
                         return {
                             "passed": True,
                             "reason": "VALID_BULLISH_SWEEP",
@@ -1182,6 +1283,8 @@ class SignalEngine:
                             "sweep_price": self._r(curr_low),
                             "target_external_liquidity": self._r(tp),
                             "candle_index": i,
+                            "is_cbdr_confluence": is_cbdr_confluence,
+                            "cbdr_sd_level": cbdr_sd_level,
                         }, SweepEvent(
                             direction="BULLISH",
                             sweep_side="SELL_SIDE",
@@ -1242,6 +1345,22 @@ class SignalEngine:
                             )
                         )
 
+                        # ✅ Fix 7: Check if this sweep aligns with CBDR SD1/SD2 + Asian Range High
+                        is_cbdr_confluence = False
+                        cbdr_sd_level = None
+                        if cbdr_levels and asian_range:
+                            asian_high = asian_range.get("high")
+                            sd1_a = cbdr_levels.get("sd1_above")
+                            sd2_a = cbdr_levels.get("sd2_above")
+                            if asian_high is not None and sd1_a is not None and sd2_a is not None:
+                                atr_tol = atr * 0.5
+                                swept_asian_high = curr_high >= asian_high
+                                at_sd1 = abs(curr_high - sd1_a) <= atr_tol
+                                at_sd2 = abs(curr_high - sd2_a) <= atr_tol
+                                if swept_asian_high and (at_sd1 or at_sd2):
+                                    is_cbdr_confluence = True
+                                    cbdr_sd_level = "SD1" if at_sd1 else "SD2"
+
                         return {
                             "passed": True,
                             "reason": "VALID_BEARISH_SWEEP",
@@ -1249,6 +1368,8 @@ class SignalEngine:
                             "sweep_price": self._r(curr_high),
                             "target_external_liquidity": self._r(tp),
                             "candle_index": i,
+                            "is_cbdr_confluence": is_cbdr_confluence,
+                            "cbdr_sd_level": cbdr_sd_level,
                         }, SweepEvent(
                             direction="BEARISH",
                             sweep_side="BUY_SIDE",
@@ -1262,6 +1383,7 @@ class SignalEngine:
                         )
 
         return {"passed": False, "reason": "NO_VALID_SWEEP"}, None
+
 
     def _step_choch_mss_body_close(
         self,
@@ -1438,15 +1560,92 @@ class SignalEngine:
 
         return {"passed": False, "reason": "NO_CHOCH"}, None
 
+    def _classify_poi_type(self, df: pd.DataFrame, idx: int, sweep: SweepEvent) -> str:
+        """
+        \u2705 Fix 4: Classify a candidate Order Block into creator-verified block types.
+
+        Creator teachings (verified via NotebookLM):
+        - BREAKER_BLOCK:    Price swept external liquidity (prior high/low) BEFORE this OB formed.
+                            Highest probability. SL buffer: 0.8x ATR.
+        - MITIGATION_BLOCK: Swing failure \u2014 price failed to break prior high/low (no sweep)
+                            before reversing through this OB.
+                            Standard probability. SL buffer: 0.3x ATR.
+        - REJECTION_BLOCK:  Long-wick candle where no body close went past the 50% Mean Threshold
+                            of the wick. Body stays inside wick range.
+                            Standard probability. SL buffer: 0.3x ATR.
+        - OB:               Generic order block fallback.
+        """
+        if idx < 1 or idx >= len(df):
+            return "OB"
+
+        direction = sweep.direction
+        atr = self._calc_atr(df, idx, self.config.atr_period)
+        if atr is None:
+            return "OB"
+
+        o = float(df["open"].iat[idx])
+        c = float(df["close"].iat[idx])
+        h = float(df["high"].iat[idx])
+        l = float(df["low"].iat[idx])
+        total_range = max(h - l, 1e-9)
+
+        # \u2014\u2014\u2014\u2014 Check for Rejection Block (long wick, body inside 50% of wick) \u2014\u2014\u2014\u2014
+        body_top    = max(o, c)
+        body_bottom = min(o, c)
+        body_size   = body_top - body_bottom
+        if direction == "BULLISH":
+            lower_wick = body_bottom - l
+            if total_range > 0 and lower_wick / total_range >= 0.50 and body_size / total_range < 0.30:
+                return "REJECTION_BLOCK"
+        else:
+            upper_wick = h - body_top
+            if total_range > 0 and upper_wick / total_range >= 0.50 and body_size / total_range < 0.30:
+                return "REJECTION_BLOCK"
+
+        # \u2014\u2014\u2014\u2014 Check for Breaker Block (prior external liquidity sweep before this OB) \u2014\u2014\u2014\u2014
+        # A Breaker requires a wick break beyond a prior swing high/low in the look-back window.
+        look_back = min(idx, 15)
+        if direction == "BULLISH":
+            # For bullish setup: check if there was a sweep of a prior swing low before this OB
+            local_low = float(df["low"].iloc[max(0, idx - look_back):idx].min())
+            for back_idx in range(max(0, idx - look_back), idx):
+                back_low = float(df["low"].iat[back_idx])
+                back_close = float(df["close"].iat[back_idx])
+                if back_low < local_low - (atr * 0.1) and back_close > local_low:
+                    return "BREAKER_BLOCK"
+        else:
+            # For bearish setup: check if there was a sweep of a prior swing high before this OB
+            local_high = float(df["high"].iloc[max(0, idx - look_back):idx].max())
+            for back_idx in range(max(0, idx - look_back), idx):
+                back_high = float(df["high"].iat[back_idx])
+                back_close = float(df["close"].iat[back_idx])
+                if back_high > local_high + (atr * 0.1) and back_close < local_high:
+                    return "BREAKER_BLOCK"
+
+        # \u2014\u2014\u2014\u2014 Check for Mitigation Block (swing failure \u2014 no external sweep prior) \u2014\u2014\u2014\u2014
+        # If price approached a prior extreme but failed to take it (wick did NOT break it)
+        if direction == "BULLISH" and idx >= 3:
+            prev_lows = [float(df["low"].iat[j]) for j in range(max(0, idx - look_back), idx)]
+            if prev_lows and l > min(prev_lows) - (atr * 0.3):
+                return "MITIGATION_BLOCK"
+        elif direction == "BEARISH" and idx >= 3:
+            prev_highs = [float(df["high"].iat[j]) for j in range(max(0, idx - look_back), idx)]
+            if prev_highs and h < max(prev_highs) + (atr * 0.3):
+                return "MITIGATION_BLOCK"
+
+        return "OB"
+
     def _step_valid_poi(
         self,
-        m15_df: pd.DataFrame,
+        struct_df: pd.DataFrame,
         m5_df: pd.DataFrame,
         h4_df: pd.DataFrame,
         d1_df: pd.DataFrame,
         sweep: SweepEvent,
         structure_break: StructureBreak,
+        m15_ref_df: Optional[pd.DataFrame] = None,  # ✅ Fix 1: M15 refinement layer (when struct_df=H1)
     ) -> Tuple[Dict[str, Any], List[POI]]:
+        m15_df = struct_df
 
         break_time    = self._get_candle_time(m5_df, structure_break.candle_index)
         break_m15_idx = self._find_bar_at_or_before(m15_df, break_time)
@@ -1521,10 +1720,23 @@ class SignalEngine:
             return {"passed": False, "reason": "NO_VALID_M15_POI"}, []
 
         candidates = [
-            self._build_poi(m15_df, "OB", idx)
+            self._build_poi(m15_df, self._classify_poi_type(m15_df, idx, sweep), idx)
             for idx in ob_indices
         ]
         candidates = self._dedupe_pois(candidates)
+
+        # ✅ Fix 2: Discard middle OBs — keep ONLY Decisional (first after IDM) + Extreme (leg origin)
+        # Creator: "Mark ONLY the first valid OB above/below IDM and the Extreme OB at the origin.
+        #           Any middle blocks are retail traps and must be ignored."
+        def _select_decisional_and_extreme(pois: List[POI], direction: str) -> List[POI]:
+            if len(pois) <= 2:
+                return pois   # Nothing to discard — already 1 or 2 blocks
+            # Sort by candle_index (time order) — first in time = Decisional, last = Extreme
+            sorted_pois = sorted(pois, key=lambda p: p.candle_index)
+            # Decisional = earliest (first OB after IDM), Extreme = latest (origin of swing leg)
+            return [sorted_pois[0], sorted_pois[-1]]
+
+        candidates = _select_decisional_and_extreme(candidates, sweep.direction)
 
         # ─── FIX #2: OB+FVG Pairing Validation ──────────────────────────
         # Helper: Ensure POI has BOTH Order Block AND Fair Value Gap
@@ -2420,7 +2632,15 @@ class SignalEngine:
             return "POI"
 
         def _sl_buffer(setup_type: str) -> float:
-            mult = float(self.config.atr_sl_multiplier_sweep) if setup_type == "SWEEP" else float(self.config.atr_sl_multiplier)
+            poi_type = (selected_poi.poi_type or "").upper()
+            if "BREAKER" in poi_type:
+                mult = 0.8  # Breaker block gets 0.8x ATR buffer per rules
+            elif "MITIGATION" in poi_type or "REJECTION" in poi_type:
+                mult = 0.3  # Mitigation and Rejection get 0.3x ATR buffer per rules
+            elif setup_type == "SWEEP":
+                mult = float(self.config.atr_sl_multiplier_sweep)
+            else:
+                mult = float(self.config.atr_sl_multiplier)
             return float(sweep.atr_at_sweep) * mult
 
         def _compute_sl(setup_type: str, sl_buf: float) -> Tuple[float, str]:

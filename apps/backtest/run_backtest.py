@@ -95,6 +95,13 @@ def create_timeframes(df: pd.DataFrame):
     )
     df_m15["time"] = df_m15.index
 
+    df_h1 = (
+        df_m1.resample("1h")
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+        .dropna()
+    )
+    df_h1["time"] = df_h1.index
+
     df_h4 = (
         df_m1.resample("4h")
         .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
@@ -116,7 +123,7 @@ def create_timeframes(df: pd.DataFrame):
     )
     df_w1["time"] = df_w1.index
 
-    return df_d1, df_h4, df_m15, df_m5, df_w1
+    return df_d1, df_h4, df_h1, df_m15, df_m5, df_w1  # ✅ Fix 1: Added H1
 
 
 def scan_presession_pois_sim(m5_df: pd.DataFrame, ny_time) -> list:
@@ -435,10 +442,11 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
     run_id = str(uuid.uuid4())[:8]
     logger.start_run(run_id)
 
-    df_d1, df_h4, df_m15, df_m5, df_w1 = create_timeframes(df)
+    df_d1, df_h4, df_h1, df_m15, df_m5, df_w1 = create_timeframes(df)  # ✅ Fix 1: Added H1
 
     m1_index  = list(df.index)
     m15_index = list(df_m15.index)
+    h1_index  = list(df_h1.index)  # ✅ Fix 1: H1 index for bisect
     h4_index  = list(df_h4.index)
     d1_index  = list(df_d1.index)
     w1_index  = list(df_w1.index)
@@ -494,6 +502,7 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
 
         # Define completion-time check intervals
         m15_interval = pd.Timedelta(minutes=15)
+        h1_interval  = pd.Timedelta(hours=1)    # ✅ Fix 1
         h4_interval  = pd.Timedelta(hours=4)
         d1_interval  = pd.Timedelta(days=1)
         w1_interval  = pd.Timedelta(days=7)
@@ -501,6 +510,7 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
         # Use bisect_right to find the first candle starting after (current_time - interval).
         # This includes only candles that have fully completed at or before current_time.
         m15_end_idx = bisect_right(m15_index, current_time - m15_interval)
+        h1_end_idx  = bisect_right(h1_index,  current_time - h1_interval)   # ✅ Fix 1
         h4_end_idx  = bisect_right(h4_index,  current_time - h4_interval)
         d1_end_idx  = bisect_right(d1_index,  current_time - d1_interval)
         w1_end_idx  = bisect_right(w1_index,  current_time - w1_interval)
@@ -516,6 +526,7 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
         # ✅ Slices aligned with creator's 500-bar max_bars_back, using completed end index
         m5  = df_m5.iloc[max(0, i       - 500) : i + 1]
         m15 = df_m15.iloc[max(0, m15_end_idx - 200) : m15_end_idx]
+        h1  = df_h1.iloc[max(0, h1_end_idx  - 200) : h1_end_idx]   # ✅ Fix 1: H1 slice (200 H1 bars = ~8 days)
         h4  = df_h4.iloc[max(0, h4_end_idx  - 300)  : h4_end_idx]
         d1  = df_d1.iloc[max(0, d1_end_idx  - 300)  : d1_end_idx]
         w1  = df_w1.iloc[max(0, w1_end_idx  - 100)  : w1_end_idx]
@@ -552,8 +563,8 @@ def run_backtest(df: pd.DataFrame, data_label: str = "", start_date: str = None)
             first_iter_logged = True
 
         result = engine.evaluate(
-            m5_df=m5, m15_df=m15, h4_df=h4,
-            d1_df=d1, w1_df=w1, now_utc=current_time,
+            m5_df=m5, m15_df=m15, h1_df=h1,   # ✅ Fix 1: Pass H1 to evaluate
+            h4_df=h4, d1_df=d1, w1_df=w1, now_utc=current_time,
             asian_session_pois=asian_session_pois, m1=m1_slice
         )
 
