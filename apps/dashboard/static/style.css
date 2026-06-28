@@ -279,7 +279,7 @@ body::before {
 }
 .timeframe-selector { display: flex; gap: 5px; flex-wrap: wrap; }
 .chart-container-shell {
-  height: 380px;
+  min-height: 60vh;
   background: var(--paper);
   border-top: 1px solid var(--border-strong);
   position: relative;
@@ -488,4 +488,32 @@ body::before {
   color: #00ff88;
   border-color: #00ff88;
   box-shadow: 0 0 6px rgba(0,255,136,0.3);
+}
+
+/* Layout Sizing Adjustments (Fix 2) */
+.top-row-grid .terminal-panel {
+  max-height: 160px;
+  overflow: hidden;
+}
+.top-row-grid .panel-header {
+  padding: 6px 12px;
+}
+.top-row-grid .panel-body {
+  padding: 8px 12px;
+}
+.top-row-grid .data-row, .top-row-grid .status-indicator-row {
+  padding: 3px 0;
+}
+.top-row-grid .data-label, .top-row-grid .data-value, .top-row-grid .status-indicator-row span {
+  font-size: 10px;
+}
+.top-row-grid .narrative-box {
+  margin-top: 4px;
+  padding: 4px 8px;
+  font-size: 10px;
+}
+.bottom-row-grid .panel-body {
+  max-height: 18vh;
+  overflow-y: auto;
+  padding: 8px 12px;
 }

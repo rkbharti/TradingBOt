@@ -539,7 +539,7 @@ function DS() {
                 this.chart_objects = state.chart_objects;
             }
             
-            if (state.smc_map) {
+            if (state.smc_map && Object.keys(state.smc_map).length > 0) {
                 _clearOverlays();
                 this.lastSMCMap = state.smc_map;
                 this.renderSMCMap(state.smc_map);
@@ -556,16 +556,30 @@ function DS() {
         // ------------------------------------------------------------------
         _renderChart(rawData) {
             if (!_series || !Array.isArray(rawData) || rawData.length === 0) return;
+            console.log('CANDLE SAMPLE:', rawData.slice(0, 3));
             try {
                 const mapped = rawData
                     .filter(c => c && c.time != null)
-                    .map(c => ({
-                        time: typeof c.time === 'number' ? c.time : Math.floor(new Date(c.time).getTime() / 1000),
-                        open: parseFloat(c.open || c.o || 0),
-                        high: parseFloat(c.high || c.h || 0),
-                        low: parseFloat(c.low || c.l || 0),
-                        close: parseFloat(c.close || c.c || 0),
-                    }))
+                    .map(c => {
+                        let t = c.time;
+                        if (typeof t === 'string') {
+                            if (/^\d+$/.test(t)) {
+                                t = parseInt(t);
+                            } else {
+                                t = Math.floor(new Date(t).getTime() / 1000);
+                            }
+                        }
+                        if (typeof t === 'number' && t > 5000000000) {
+                            t = Math.floor(t / 1000);
+                        }
+                        return {
+                            time: t,
+                            open: parseFloat(c.open || c.o || 0),
+                            high: parseFloat(c.high || c.h || 0),
+                            low: parseFloat(c.low || c.l || 0),
+                            close: parseFloat(c.close || c.c || 0),
+                        };
+                    })
                     .filter(c => c.open > 0)
                     .sort((a,b) => a.time - b.time);
                 if (mapped.length) {
@@ -713,7 +727,7 @@ function DS() {
                         color: '#FFD700',
                         lineStyle: lineStyle.Dashed,
                         lineWidth: 1,
-                        axisLabelVisible: true,
+                        axisLabelVisible: false,
                         title: 'IDM (Inducement)',
                     });
                 }
@@ -723,7 +737,7 @@ function DS() {
                         color: '#00ff88',
                         lineStyle: lineStyle.Solid,
                         lineWidth: 2,
-                        axisLabelVisible: true,
+                        axisLabelVisible: false,
                         title: m.choch_label,     // "BOS" or "CHoCH"
                     });
                 }
@@ -754,7 +768,7 @@ function DS() {
                         color: 'rgba(168,85,247,0.6)',
                         lineStyle: lineStyle.Dotted,
                         lineWidth: 1,
-                        axisLabelVisible: true,
+                        axisLabelVisible: false,
                         title: 'Decisional OB Top',
                     });
                 }
@@ -770,7 +784,7 @@ function DS() {
                         color: 'rgba(106,13,173,0.7)',
                         lineStyle: lineStyle.Dotted,
                         lineWidth: 1,
-                        axisLabelVisible: true,
+                        axisLabelVisible: false,
                         title: 'Extreme OB Top',
                     });
                 }
@@ -803,7 +817,7 @@ function DS() {
                         color: '#00ff88',
                         lineStyle: lineStyle.Solid,
                         lineWidth: 2,
-                        axisLabelVisible: true,
+                        axisLabelVisible: false,
                         title: 'LTF CHoCH (MSS)',
                     });
                 }
