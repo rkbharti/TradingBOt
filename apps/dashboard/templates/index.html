@@ -156,6 +156,30 @@
             OFF
           </button>
         </div>
+        <!-- SMC Toggles -->
+        <div class="control-panel" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+          <span class="meta-label">SMC Overlay</span>
+          <button
+            @click="showHTFBias = !showHTFBias; renderSMCMap(lastSMCMap)"
+            x-bind:class="showHTFBias ? 'smc-btn active' : 'smc-btn'"
+          >HTF BIAS</button>
+          <button
+            @click="showStructure = !showStructure; renderSMCMap(lastSMCMap)"
+            x-bind:class="showStructure ? 'smc-btn active' : 'smc-btn'"
+          >STRUCTURE</button>
+          <button
+            @click="showPOIs = !showPOIs; renderSMCMap(lastSMCMap)"
+            x-bind:class="showPOIs ? 'smc-btn active' : 'smc-btn'"
+          >POIs</button>
+          <button
+            @click="showLTFTrigger = !showLTFTrigger; renderSMCMap(lastSMCMap)"
+            x-bind:class="showLTFTrigger ? 'smc-btn active' : 'smc-btn'"
+          >LTF TRIGGER</button>
+          <button
+            @click="showRRTool = !showRRTool; renderSMCMap(lastSMCMap)"
+            x-bind:class="showRRTool ? 'smc-btn active' : 'smc-btn'"
+          >R/R TOOL</button>
+        </div>
         <div class="meta-item">
           <span class="meta-label">SERVER</span>
           <span class="meta-val mono"

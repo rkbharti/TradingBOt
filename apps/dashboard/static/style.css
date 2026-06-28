@@ -472,4 +472,20 @@ body::before {
 }
 .log-info {
   color: var(--ink-light);
+}
+
+.smc-btn {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  padding: 3px 8px;
+  background: #0a0a0a;
+  color: #555;
+  border: 1px solid #333;
+  cursor: pointer;
+  letter-spacing: 0.5px;
+}
+.smc-btn.active {
+  color: #00ff88;
+  border-color: #00ff88;
+  box-shadow: 0 0 6px rgba(0,255,136,0.3);
 }

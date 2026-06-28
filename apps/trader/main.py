@@ -268,6 +268,8 @@ def send_to_dashboard(
     try:
         analysis_with_overlays = {**analysis, "chart_overlays": {"poi_zones": poi_overlays}}
         payload = {"bot_instance": bot_data, "analysis_data": analysis_with_overlays}
+        if bot_instance_ref and hasattr(bot_instance_ref, "last_smc_map"):
+            payload["smc_map"] = bot_instance_ref.last_smc_map
 
         try:
             json_payload = json.dumps(payload, default=str)
@@ -675,6 +677,13 @@ class XAUUSDTradingBot:
             # ── Send to dashboard VPS ──
             import requests
             try:
+                try:
+                    import json
+                    payload_dict = json.loads(json_str)
+                    payload_dict["smc_map"] = self.last_smc_map if hasattr(self, "last_smc_map") else {}
+                    json_str = json.dumps(payload_dict, default=str)
+                except Exception as js_err:
+                    print(f"Error re-serializing in Place B: {js_err}")
                 r = requests.post(
                     "http://68.233.99.145:8001/webhook",
                     data=json_str,
@@ -2314,6 +2323,77 @@ class XAUUSDTradingBot:
             print(f"❌ SignalEngine error: {e}")
             import traceback; traceback.print_exc()
             return
+
+        # ── Build smc_map dict ────────────────────────────────────────────────
+        se = self.signal_engine
+        sweep = getattr(se, "sweep", None)
+        selected_poi = getattr(se, "selected_poi", None)
+        extreme_poi = getattr(se, "extreme_poi", None)
+        selected_fvg = getattr(se, "selected_fvg", None)
+        choch_label = getattr(se, "choch_label", None)
+        idm_result = getattr(se, "idm_result", None)
+
+        signal_stage = 1
+        if result.gates:
+            for i in range(2, 9):
+                key = f"step_{i}_"
+                found_key = next((k for k in result.gates.keys() if k.startswith(key)), None)
+                if found_key and result.gates[found_key].get("passed"):
+                    signal_stage = i
+                else:
+                    break
+
+        idm_price = idm_result.get("idm_level") if isinstance(idm_result, dict) else None
+        choch_price = getattr(se.structure_break, "level", None) if getattr(se, "structure_break", None) else None
+
+        decisional_ob_top = selected_poi.high if selected_poi else None
+        decisional_ob_bottom = selected_poi.low if selected_poi else None
+        decisional_ob_time = None
+        if selected_poi and m15_df is not None:
+            try:
+                decisional_ob_time = int(se._get_candle_time(m15_df, selected_poi.candle_index).timestamp())
+            except Exception:
+                pass
+
+        extreme_ob_top = extreme_poi.high if extreme_poi else None
+        extreme_ob_bottom = extreme_poi.low if extreme_poi else None
+        extreme_ob_time = None
+        if extreme_poi and m15_df is not None:
+            try:
+                extreme_ob_time = int(se._get_candle_time(m15_df, extreme_poi.candle_index).timestamp())
+            except Exception:
+                pass
+
+        mean_threshold = None
+        if extreme_poi:
+            mean_threshold = round((extreme_poi.high + extreme_poi.low) / 2.0, 2)
+
+        fvg_top = selected_fvg.high if selected_fvg else None
+        fvg_bottom = selected_fvg.low if selected_fvg else None
+
+        smc_map = {
+            "htf_bias":            getattr(se, "htf_trend_direction", "NEUTRAL"),
+            "sweep_price":         sweep.sweep_price if sweep else None,
+            "sweep_time":          int(se._get_candle_time(m15_df, sweep.candle_index).timestamp()) if (sweep and m15_df is not None) else None,
+            "sweep_direction":     sweep.direction if sweep else None,
+            "choch_label":         choch_label,
+            "choch_price":         choch_price,
+            "idm_price":           idm_price,
+            "decisional_ob_top":   decisional_ob_top,
+            "decisional_ob_bottom":decisional_ob_bottom,
+            "decisional_ob_time":  decisional_ob_time,
+            "extreme_ob_top":      extreme_ob_top,
+            "extreme_ob_bottom":   extreme_ob_bottom,
+            "extreme_ob_time":     extreme_ob_time,
+            "mean_threshold":      mean_threshold,
+            "fvg_top":             fvg_top,
+            "fvg_bottom":          fvg_bottom,
+            "entry_price":         result.entry_price,
+            "sl_price":            result.sl_price,
+            "tp_price":            result.tp_price,
+            "signal_stage":        signal_stage,
+        }
+        self.last_smc_map = smc_map
 
         current_bias = result.direction or previous_bias or "NEUTRAL"
 

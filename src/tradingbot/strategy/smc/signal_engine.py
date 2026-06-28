@@ -244,6 +244,13 @@ class SignalEngine:
         self.pdh_swept = False
         self.htf_trend_direction = "BULLISH"
 
+        self.sweep = None
+        self.selected_poi = None
+        self.extreme_poi = None
+        self.selected_fvg = None
+        self.choch_label = None
+        self.idm_result = None
+
         if not hasattr(self, 'rejection_counts'):
             self.rejection_counts = {}
 
@@ -566,6 +573,7 @@ class SignalEngine:
             )
         else:
             step2, sweep = self._step_external_liquidity_sweep(struct_df, direction)
+        self.sweep = sweep
         gates["step_2_external_liquidity_sweep"] = step2
         if not step2["passed"] or sweep is None:
             return _reject(gates, step2["reason"], direction=direction)
@@ -658,6 +666,8 @@ class SignalEngine:
         step5, selected_poi, selected_fvg, entry_price = self._step_ob_fvg_confluence(
             m5_df, m15_df, direction, sweep, structure_break, poi_candidates
         )
+        self.selected_poi = selected_poi
+        self.selected_fvg = selected_fvg
         gates["step_5_ob_fvg_confluence"] = step5
         if not step5["passed"] or selected_poi is None or selected_fvg is None or entry_price is None:
             return _reject(gates, step5["reason"], direction=direction)
@@ -730,6 +740,8 @@ class SignalEngine:
             bos_candle_idx=structure_break.candle_index,
             lookback=60,
         )
+        self.idm_result = idm_result
+        self.choch_label = structure_break.choch_label if structure_break else None
         gates["step_3_choch_mss_body_close"]["idm_detected"] = idm_result is not None
         gates["step_3_choch_mss_body_close"]["idm_swept"]    = (
             idm_result.get("is_swept", False) if idm_result else False
@@ -2225,6 +2237,7 @@ class SignalEngine:
                         f"{timeframe_name}_HTF_EXTREME_OB",
                         int(extreme_idx),
                     )
+                    self.extreme_poi = extreme_poi
                     htf_pois.append(extreme_poi)
                     debug_counts["pois_added"] += 1
                 else:

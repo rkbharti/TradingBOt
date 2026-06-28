@@ -192,6 +192,17 @@ function _initChart(themeMode = 'dark') {
 // ------------------------------------------------------------------
 function DS() {
     return {
+        // --- SMC Visual Mapping Overlay Properties ---
+        smcPriceLines: [],        // holds all createPriceLine handles for cleanup
+        smcSeriesRefs: [],        // holds all addAreaSeries/addLineSeries refs for cleanup
+        smcMarkers: [],           // holds SMC-specific markers
+        lastSMCMap: {},           // holds the last SMC map data
+        showHTFBias: true,
+        showStructure: true,
+        showPOIs: true,
+        showLTFTrigger: true,
+        showRRTool: true,
+
         // --- WebSocket & connection ---
         ws: null,
         ws_connected: false,
@@ -531,6 +542,11 @@ function DS() {
 
             // calculate daily %
             if (this.balance > 0) this.pnl_today_pct = (this.pnl_today / this.balance) * 100;
+
+            if (state.smc_map) {
+                this.lastSMCMap = state.smc_map;
+                this.renderSMCMap(state.smc_map);
+            }
         },
 
         // ------------------------------------------------------------------
@@ -616,6 +632,274 @@ function DS() {
                 }));
             } catch(e) { return []; }
         },
+        clearSMCOverlays() {
+            // Remove all price lines
+            this.smcPriceLines.forEach(pl => {
+                try { _series.removePriceLine(pl); } catch(e) {}
+            });
+            this.smcPriceLines = [];
+            // Remove all area/line series used for boxes
+            this.smcSeriesRefs.forEach(s => {
+                try { _chart.removeSeries(s); } catch(e) {}
+            });
+            this.smcSeriesRefs = [];
+            // Clear SMC markers (merge-safe: keep bot markers, remove smc ones)
+            this.smcMarkers = [];
+            this._refreshMarkers();
+        },
+
+        _refreshMarkers() {
+            // Merge bot markers + smc markers and call setMarkers ONCE
+            const allMarkers = [...(this.botMarkers || []), ...this.smcMarkers]
+                .sort((a, b) => a.time - b.time);
+            try { _series.setMarkers(allMarkers); } catch(e) {}
+        },
+
+        _addPriceLine(opts) {
+            const pl = _series.createPriceLine(opts);
+            this.smcPriceLines.push(pl);
+            return pl;
+        },
+
+        _addBoxSeries(timeStart, timeEnd, boxTop, boxBottom, fillColor, borderColor) {
+            const s = _chart.addAreaSeries({
+                lineColor: borderColor || 'transparent',
+                topColor: fillColor,
+                bottomColor: fillColor.replace(/[\d.]+\)$/, '0.05)'),
+                lineWidth: 1,
+                priceScaleId: 'right',
+                lastValueVisible: false,
+                priceLineVisible: false,
+                crosshairMarkerVisible: false,
+            });
+            s.setData([
+                { time: timeStart, value: boxTop },
+                { time: timeEnd,   value: boxTop },
+            ]);
+            s.applyOptions({ baseValue: { type: 'price', price: boxBottom } });
+            this.smcSeriesRefs.push(s);
+            return s;
+        },
+
+        renderSMCMap(m) {
+            if (!m || Object.keys(m).length === 0) return;
+            this.clearSMCOverlays();
+
+            const lineStyle = { Solid: 0, Dotted: 1, Dashed: 2, LargeDashed: 3 };
+
+            // ── LAYER 1: HTF BIAS LINES ──────────────────────────────────
+            if (this.showHTFBias) {
+                // HTF bias label line at sweep target
+                if (m.sweep_direction) {
+                    const biasColor = m.htf_bias === 'BULLISH' ? '#00ff88' : '#ff4444';
+                    this._addPriceLine({
+                        price: m.sweep_price,
+                        color: biasColor,
+                        lineStyle: lineStyle.Dashed,
+                        lineWidth: 1,
+                        axisLabelVisible: true,
+                        title: `HTF ${m.htf_bias || ''}`,
+                    });
+                }
+            }
+
+            // ── LAYER 2: STRUCTURE LINES ─────────────────────────────────
+            if (this.showStructure) {
+                if (m.idm_price) {
+                    this._addPriceLine({
+                        price: m.idm_price,
+                        color: '#FFD700',
+                        lineStyle: lineStyle.Dashed,
+                        lineWidth: 1,
+                        axisLabelVisible: true,
+                        title: 'IDM (Inducement)',
+                    });
+                }
+                if (m.choch_price && m.choch_label) {
+                    this._addPriceLine({
+                        price: m.choch_price,
+                        color: '#00ff88',
+                        lineStyle: lineStyle.Solid,
+                        lineWidth: 2,
+                        axisLabelVisible: true,
+                        title: m.choch_label,     // "BOS" or "CHoCH"
+                    });
+                }
+                if (m.sweep_price && m.sweep_time) {
+                    this.smcMarkers.push({
+                        time: m.sweep_time,
+                        position: m.htf_bias === 'BULLISH' ? 'belowBar' : 'aboveBar',
+                        color: '#ff4444',
+                        shape: 'arrowDown',
+                        text: 'Sweep',
+                    });
+                    this._refreshMarkers();
+                }
+            }
+
+            // ── LAYER 3: POI BOXES ───────────────────────────────────────
+            if (this.showPOIs) {
+                const nowUnix = Math.floor(Date.now() / 1000);
+
+                if (m.decisional_ob_top && m.decisional_ob_bottom && m.decisional_ob_time) {
+                    this._addBoxSeries(
+                        m.decisional_ob_time, nowUnix,
+                        m.decisional_ob_top, m.decisional_ob_bottom,
+                        'rgba(168, 85, 247, 0.25)', 'rgba(168, 85, 247, 0.8)'
+                    );
+                    this._addPriceLine({
+                        price: m.decisional_ob_top,
+                        color: 'rgba(168,85,247,0.6)',
+                        lineStyle: lineStyle.Dotted,
+                        lineWidth: 1,
+                        axisLabelVisible: true,
+                        title: 'Decisional OB Top',
+                    });
+                }
+
+                if (m.extreme_ob_top && m.extreme_ob_bottom && m.extreme_ob_time) {
+                    this._addBoxSeries(
+                        m.extreme_ob_time, nowUnix,
+                        m.extreme_ob_top, m.extreme_ob_bottom,
+                        'rgba(106, 13, 173, 0.3)', 'rgba(106,13,173,0.9)'
+                    );
+                    this._addPriceLine({
+                        price: m.extreme_ob_top,
+                        color: 'rgba(106,13,173,0.7)',
+                        lineStyle: lineStyle.Dotted,
+                        lineWidth: 1,
+                        axisLabelVisible: true,
+                        title: 'Extreme OB Top',
+                    });
+                }
+
+                if (m.fvg_top && m.fvg_bottom && m.decisional_ob_time) {
+                    this._addBoxSeries(
+                        m.decisional_ob_time, nowUnix,
+                        m.fvg_top, m.fvg_bottom,
+                        'rgba(30, 144, 255, 0.2)', 'rgba(30,144,255,0.7)'
+                    );
+                }
+
+                if (m.mean_threshold) {
+                    this._addPriceLine({
+                        price: m.mean_threshold,
+                        color: '#FFA500',
+                        lineStyle: lineStyle.Dashed,
+                        lineWidth: 1,
+                        axisLabelVisible: true,
+                        title: 'MT (50% Extreme OB)',
+                    });
+                }
+            }
+
+            // ── LAYER 4: LTF TRIGGER (gate 6+) ──────────────────────────
+            if (this.showLTFTrigger && m.signal_stage >= 6) {
+                if (m.choch_price) {
+                    this._addPriceLine({
+                        price: m.choch_price,
+                        color: '#00ff88',
+                        lineStyle: lineStyle.Solid,
+                        lineWidth: 2,
+                        axisLabelVisible: true,
+                        title: 'LTF CHoCH (MSS)',
+                    });
+                }
+            }
+
+            // ── LAYER 5: R/R TOOL ────────────────────────────────────────
+            if (this.showRRTool && m.entry_price) {
+                this._addPriceLine({
+                    price: m.entry_price,
+                    color: '#FFD700',
+                    lineStyle: lineStyle.Solid,
+                    lineWidth: 2,
+                    axisLabelVisible: true,
+                    title: `ENTRY ${m.entry_price}`,
+                });
+                if (m.sl_price) {
+                    this._addPriceLine({
+                        price: m.sl_price,
+                        color: '#ff4444',
+                        lineStyle: lineStyle.Solid,
+                        lineWidth: 2,
+                        axisLabelVisible: true,
+                        title: `SL ${m.sl_price}`,
+                    });
+                }
+                if (m.tp_price) {
+                    this._addPriceLine({
+                        price: m.tp_price,
+                        color: '#00ff88',
+                        lineStyle: lineStyle.Solid,
+                        lineWidth: 2,
+                        axisLabelVisible: true,
+                        title: `TP ${m.tp_price}`,
+                    });
+                }
+
+                // R/R fill zones using AreaSeries
+                const nowUnix = Math.floor(Date.now() / 1000);
+                const refTime = m.sweep_time || (nowUnix - 3600);
+                if (m.tp_price) {
+                    this._addBoxSeries(
+                        refTime, nowUnix,
+                        m.tp_price, m.entry_price,
+                        'rgba(0, 255, 136, 0.08)', 'transparent'
+                    );
+                }
+                if (m.sl_price) {
+                    this._addBoxSeries(
+                        refTime, nowUnix,
+                        m.entry_price, m.sl_price,
+                        'rgba(255, 68, 68, 0.08)', 'transparent'
+                    );
+                }
+            }
+
+            // ── LAYER 6: TRADE PLAN SUMMARY BOX ─────────────────────────
+            this._renderTradeSummary(m);
+        },
+
+        _renderTradeSummary(m) {
+            let el = document.getElementById('smc-summary-box');
+            if (el) {
+                if (!this.showRRTool) {
+                    el.style.display = 'none';
+                    return;
+                } else {
+                    el.style.display = 'block';
+                }
+            } else if (!this.showRRTool) {
+                return;
+            }
+            if (!el) {
+                el = document.createElement('div');
+                el.id = 'smc-summary-box';
+                el.style.cssText = `
+                    position:absolute; top:12px; left:12px; z-index:50;
+                    background:#0a0a0a; border:1px solid #00ff88;
+                    padding:10px 14px; font-family:'Courier Prime',monospace;
+                    font-size:11px; color:#00ff88; pointer-events:none;
+                    line-height:1.8;
+                `;
+                document.getElementById('chart-container').appendChild(el);
+            }
+            const rr = m.entry_price && m.sl_price && m.tp_price
+                ? Math.abs((m.tp_price - m.entry_price) / (m.entry_price - m.sl_price)).toFixed(2)
+                : '—';
+            el.innerHTML = `
+                <div style="color:#ffffff;font-weight:bold;margin-bottom:4px">TRADE PLAN</div>
+                <div>Bias&nbsp;&nbsp;: <span style="color:${m.htf_bias==='BULLISH'?'#00ff88':'#ff4444'}">${m.htf_bias||'—'}</span></div>
+                <div>Setup&nbsp;: ${m.htf_bias==='BULLISH'?'Buy':'Sell'}</div>
+                <div>Entry&nbsp;: ${m.entry_price||'—'}</div>
+                <div>SL&nbsp;&nbsp;&nbsp;: ${m.sl_price||'—'}</div>
+                <div>TP&nbsp;&nbsp;&nbsp;: ${m.tp_price||'—'}</div>
+                <div>Stage&nbsp;: Gate ${m.signal_stage||'—'}/8</div>
+                <div>RRR&nbsp;&nbsp;: 1:${rr}</div>
+            `;
+        },
+
         getFilteredNews() {
             if (this.news_filter === 'ALL') return this.news_items;
             return this.news_items.filter(item => item.impact === this.news_filter);

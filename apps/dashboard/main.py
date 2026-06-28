@@ -719,6 +719,10 @@ async def webhook(payload: dict = Body(...)):
             
         bot_inst, analysis = normalize_webhook_payload(payload)
         update_bot_state_v2(symbol, bot_inst, analysis)
+        
+        # ✅ Store smc_map in in-memory state dictionary
+        state["smc_map"] = payload.get("smc_map", {})
+        
         return {"status": "ok"}
     except Exception as e:
         print(f"❌ Webhook error: {e}")
@@ -867,8 +871,12 @@ async def api_state(symbol: str = None):
             if not state:
                 return {"status": "no_data", "message": f"No state for symbol {symbol}"}
             safe = json.loads(json.dumps(state, default=str).replace("NaN", "null"))
+            safe["smc_map"] = state.get("smc_map", {})
         else:
             safe = json.loads(json.dumps(bot_states, default=str).replace("NaN", "null"))
+            for k, v in safe.items():
+                orig_state = bot_states.get(k, {})
+                v["smc_map"] = orig_state.get("smc_map", {})
         safe["_source"]        = "http_snapshot"
         safe["_snapshot_time"] = datetime.now().isoformat()
         return safe
