@@ -649,17 +649,22 @@ function DS() {
             } catch(e) { return []; }
         },
         clearSMCOverlays() {
-            // Remove all price lines
-            this.smcPriceLines.forEach(pl => {
+            if (!window._smcPriceLines) window._smcPriceLines = [];
+            if (!window._smcSeriesRefs) window._smcSeriesRefs = [];
+
+            // Remove all price lines using raw handles
+            window._smcPriceLines.forEach(pl => {
                 try { _series.removePriceLine(pl); } catch(e) {}
             });
-            this.smcPriceLines = [];
-            // Remove all area/line series used for boxes
-            this.smcSeriesRefs.forEach(s => {
+            window._smcPriceLines = [];
+
+            // Remove all area/line series used for boxes using raw handles
+            window._smcSeriesRefs.forEach(s => {
                 try { _chart.removeSeries(s); } catch(e) {}
             });
-            this.smcSeriesRefs = [];
-            // Clear SMC markers (merge-safe: keep bot markers, remove smc ones)
+            window._smcSeriesRefs = [];
+
+            // Clear SMC markers
             this.smcMarkers = [];
             this._refreshMarkers();
         },
@@ -673,7 +678,8 @@ function DS() {
 
         _addPriceLine(opts) {
             const pl = _series.createPriceLine(opts);
-            this.smcPriceLines.push(pl);
+            if (!window._smcPriceLines) window._smcPriceLines = [];
+            window._smcPriceLines.push(pl);
             return pl;
         },
 
@@ -693,7 +699,8 @@ function DS() {
                 { time: timeEnd,   value: boxTop },
             ]);
             s.applyOptions({ baseValue: { type: 'price', price: boxBottom } });
-            this.smcSeriesRefs.push(s);
+            if (!window._smcSeriesRefs) window._smcSeriesRefs = [];
+            window._smcSeriesRefs.push(s);
             return s;
         },
 

@@ -81,271 +81,298 @@
   <body x-data="DS()">
     <header class="terminal-header">
       <div class="header-left">
-        <div class="timezone-block">
-          <span class="timezone-label">TIMEZONE</span>
-          <div class="time-row mono">
-            <div>
-              <span class="txt-amber">IST</span>
-              <span id="ist-clock">--:--:--</span>
-            </div>
-            <div>
-              <span class="txt-muted">UTC</span>
-              <span id="utc-clock">--:--:--</span>
-            </div>
+        <!-- Spartan Logo Icon -->
+        <svg class="header-logo" viewBox="0 0 512 512" fill="var(--accent)" width="32" height="32" style="margin-right:8px; filter: drop-shadow(2px 2px 0px rgba(0,0,0,0.15));">
+          <path d="M256 0C114.6 0 0 114.6 0 256s114.6 256 256 256 256-114.6 256-256S397.4 0 256 0zm0 464c-114.7 0-208-93.3-208-208S141.3 48 256 48s208 93.3 208 208-93.3 208-208 208z"/>
+          <path d="M256 96c-13.3 0-24 10.7-24 24v56h48v-56c0-13.3-10.7-24-24-24zm-64 80c0-8.8-7.2-16-16-16s-16 7.2-16 16v96c0 53 43 96 96 96s96-43 96-96v-96c0-8.8-7.2-16-16-16s-16 7.2-16 16v56h-128v-56zm201.4 69.4c-6.2-6.2-16.4-6.2-22.6 0L336 280.8V232c0-8.8-7.2-16-16-16s-16 7.2-16 16v80c0 8.8 7.2 16 16 16h80c8.8 0 16-7.2 16-16s-7.2-16-16-16h-48.8l34.8-34.8c6.2-6.2 6.2-16.4 0-22.6z"/>
+        </svg>
+        <div class="title-block">
+          <h1 style="display: flex; align-items: center; gap: 8px;">
+            GUARDEER OS <span class="badge yellow" style="font-size: 10px; padding: 1px 4px;">v4.1</span>
+          </h1>
+          <div class="subtitle">INSTITUTIONAL SMC COMMAND TERMINAL</div>
+        </div>
+      </div>
+      
+      <div class="header-right">
+        <!-- Timezone Box -->
+        <div class="control-box">
+          <span class="box-label">TIMEZONE</span>
+          <div class="box-values mono">
+            <div>IST <span id="ist-clock">--:--:--</span></div>
+            <div>UTC <span id="utc-clock">--:--:--</span></div>
           </div>
         </div>
-      </div>
-      <div class="header-center">
-        <h1>GUARDEER OS</h1>
-        <div class="subtitle">INSTITUTIONAL SMC COMMAND TERMINAL</div>
-      </div>
-      <div class="header-right">
-        <!-- Palette selector -->
-        <div class="control-panel">
-          <span class="meta-label">THEME</span>
-          <button class="palette-btn" @click="setPalette('stranger-things')">
-            ST
-          </button>
-          <button class="palette-btn" @click="setPalette('breaking-bad')">
-            BB
-          </button>
-          <button class="palette-btn" @click="setPalette('dark')">DK</button>
-          <button class="palette-btn" @click="setPalette('demon-slayer')">
-            DS
-          </button>
-          <button class="palette-btn" @click="setPalette('pirates')">PR</button>
-          <input
-            type="color"
-            id="customColorPicker"
-            class="custom-picker"
-            value="#b53b2a"
-            title="Custom accent colour"
-          />
+        <!-- Server Box -->
+        <div class="control-box">
+          <span class="box-label">SERVER</span>
+          <div class="box-value mono" style="display: flex; align-items: center; gap: 6px;">
+            <span class="status-dot-inline" style="width: 6px; height: 6px; border-radius: 50%; background: #00ff88; display: inline-block; box-shadow: 0 0 4px #00ff88;"></span>
+            VPS-01 v4.1
+          </div>
         </div>
-        <!-- Theme toggle -->
-        <div class="control-panel">
-          <span class="meta-label">MODE</span>
-          <button
-            class="theme-toggle"
-            :class="theme_mode"
-            @click="toggleTheme()"
-          >
-            🌓
-          </button>
-        </div>
-        <!-- Bot control -->
-        <div class="control-panel">
-          <span class="meta-label">CONTROL</span>
-          <span class="status-dot" :class="bot_status ? '' : 'inactive'"></span>
-          <span
-            :class="bot_status ? 'txt-green' : 'txt-red'"
-            x-text="bot_status ? 'RUNNING' : 'STOPPED'"
-          ></span>
-          <button
-            class="btn-toggle"
-            :class="bot_status ? 'active-on' : ''"
-            @click="toggleBot(true)"
-          >
-            ON
-          </button>
-          <button
-            class="btn-toggle"
-            :class="!bot_status ? 'active-off' : ''"
-            @click="toggleBot(false)"
-          >
-            OFF
-          </button>
-        </div>
-        <!-- SMC Toggles -->
-        <div class="control-panel" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
-          <span class="meta-label">SMC Overlay</span>
-          <button
-            @click="showHTFBias = !showHTFBias; renderSMCMap(lastSMCMap)"
-            x-bind:class="showHTFBias ? 'smc-btn active' : 'smc-btn'"
-          >HTF BIAS</button>
-          <button
-            @click="showStructure = !showStructure; renderSMCMap(lastSMCMap)"
-            x-bind:class="showStructure ? 'smc-btn active' : 'smc-btn'"
-          >STRUCTURE</button>
-          <button
-            @click="showPOIs = !showPOIs; renderSMCMap(lastSMCMap)"
-            x-bind:class="showPOIs ? 'smc-btn active' : 'smc-btn'"
-          >POIs</button>
-          <button
-            @click="showLTFTrigger = !showLTFTrigger; renderSMCMap(lastSMCMap)"
-            x-bind:class="showLTFTrigger ? 'smc-btn active' : 'smc-btn'"
-          >LTF TRIGGER</button>
-          <button
-            @click="showRRTool = !showRRTool; renderSMCMap(lastSMCMap)"
-            x-bind:class="showRRTool ? 'smc-btn active' : 'smc-btn'"
-          >R/R TOOL</button>
-        </div>
-        <div class="meta-item">
-          <span class="meta-label">SERVER</span>
-          <span class="meta-val mono"
-            >VPS-01 <span class="txt-muted">v4.1</span></span
-          >
-        </div>
-        <div class="meta-item">
-          <span class="meta-label">LATENCY</span>
-          <span class="meta-val mono" :class="latency_ms ? (latency_ms < 100 ? 'txt-green' : 'txt-amber') : 'txt-muted'">
+        <!-- Latency Box -->
+        <div class="control-box">
+          <span class="box-label">LATENCY</span>
+          <div class="box-value mono" :class="latency_ms ? (latency_ms < 100 ? 'txt-green' : 'txt-amber') : 'txt-muted'">
             <span x-text="latency_ms ? latency_ms + 'ms' : '--'">--</span>
-          </span>
+          </div>
         </div>
-        <div class="meta-item">
-          <span class="meta-label">ACCOUNT</span>
-          <span
-            class="meta-val mono txt-amber"
-            x-text="account_name || 'REAL-01'"
-            >REAL-01</span
-          >
+        <!-- Account Box -->
+        <div class="control-box">
+          <span class="box-label">ACCOUNT</span>
+          <div class="box-value mono txt-amber" x-text="account_name || 'REAL-01'">REAL-01</div>
         </div>
       </div>
     </header>
 
-    <main class="dashboard-container">
-      <!-- Symbol Tab Bar -->
-      <div class="symbol-tab-bar" x-show="Object.keys(bot_states).length > 0" style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px;">
-        <template x-for="sym in Object.keys(bot_states)">
-          <button 
-            class="symbol-tab-btn" 
-            :class="active_symbol === sym ? 'active' : ''" 
-            @click="selectSymbol(sym)"
-            x-text="sym">
-          </button>
-        </template>
+    <!-- Top Sub-Header Control Bar -->
+    <div class="control-bar-header">
+      <!-- Theme Switcher -->
+      <div class="control-panel">
+        <span class="meta-label">THEME</span>
+        <button class="palette-btn" :class="palette === 'stranger-things' ? 'active' : ''" @click="setPalette('stranger-things')">ST</button>
+        <button class="palette-btn" :class="palette === 'breaking-bad' ? 'active' : ''" @click="setPalette('breaking-bad')">BB</button>
+        <button class="palette-btn" :class="palette === 'dark' ? 'active' : ''" @click="setPalette('dark')">DK</button>
+        <button class="palette-btn" :class="palette === 'demon-slayer' ? 'active' : ''" @click="setPalette('demon-slayer')">DS</button>
+        <button class="palette-btn" :class="palette === 'pirates' ? 'active' : ''" @click="setPalette('pirates')">PR</button>
+        <input type="color" id="customColorPicker" class="custom-picker" value="#b53b2a" title="Custom accent colour" />
       </div>
 
-      <section class="top-row-grid">
-        <!-- Account Overview -->
-        <div class="terminal-panel">
-          <div class="panel-header">
-            <div class="panel-title">Account Overview</div>
-          </div>
-          <div class="panel-body">
-            <div class="data-row">
-              <span class="data-label">LOGIN</span
-              ><span class="data-value mono" x-text="account_login || '--'"
-                >--</span
-              >
-            </div>
-            <div class="data-row">
-              <span class="data-label">SERVER</span
-              ><span class="data-value mono" x-text="account_server || '--'"
-                >--</span
-              >
-            </div>
-            <div class="data-row">
-              <span class="data-label">EQUITY</span
-              ><span class="data-value mono txt-green" x-text="fmt(equity)"
-                >$0.00</span
-              >
-            </div>
-            <div class="data-row">
-              <span class="data-label">BALANCE</span
-              ><span class="data-value mono txt-green" x-text="fmt(balance)"
-                >$0.00</span
-              >
-            </div>
-            <div class="data-row">
-              <span class="data-label">DAILY P&L</span
-              ><span
-                class="data-value mono"
-                :class="pnl_today >= 0 ? 'txt-green' : 'txt-red'"
-                x-text="fmt(pnl_today)"
-                >$0.00</span
-              >
-            </div>
-            <div class="data-row">
-              <span class="data-label">DAILY %</span
-              ><span
-                class="data-value mono"
-                :class="pnl_today_pct >= 0 ? 'txt-green' : 'txt-red'"
-                x-text="(pnl_today_pct >= 0 ? '+' : '') + pnl_today_pct.toFixed(2) + '%'"
-                >+0.00%</span
-              >
-            </div>
-            <div class="data-row">
-              <span class="data-label">WEEKLY P&L</span
-              ><span
-                class="data-value mono"
-                :class="pnl_week >= 0 ? 'txt-green' : 'txt-red'"
-                x-text="fmt(pnl_week)"
-                >$0.00</span
-              >
-            </div>
-            <div class="data-row">
-              <span class="data-label">OVERALL P&L</span
-              ><span
-                class="data-value mono"
-                :class="pnl_total >= 0 ? 'txt-green' : 'txt-red'"
-                x-text="fmt(pnl_total)"
-                >$0.00</span
-              >
-            </div>
-          </div>
+      <!-- Mode Toggle -->
+      <div class="control-panel">
+        <span class="meta-label">MODE</span>
+        <button class="theme-toggle" :class="theme_mode" @click="toggleTheme()">🌓</button>
+      </div>
+
+      <!-- Control ON/OFF -->
+      <div class="control-panel">
+        <span class="meta-label">CONTROL</span>
+        <span class="status-val" :class="bot_status ? 'txt-green' : 'txt-red'" x-text="bot_status ? 'RUNNING' : 'STOPPED'"></span>
+        <button class="btn-toggle" :class="bot_status ? 'active-on' : ''" @click="toggleBot(true)">ON</button>
+        <button class="btn-toggle" :class="!bot_status ? 'active-off' : ''" @click="toggleBot(false)">OFF</button>
+      </div>
+
+      <!-- SMC Overlay Toggles -->
+      <div class="control-panel">
+        <span class="meta-label">SMC Overlay</span>
+        <button @click="showHTFBias = !showHTFBias; renderSMCMap(lastSMCMap)" :class="showHTFBias ? 'smc-btn active' : 'smc-btn'">HTF BIAS</button>
+        <button @click="showStructure = !showStructure; renderSMCMap(lastSMCMap)" :class="showStructure ? 'smc-btn active' : 'smc-btn'">STRUCTURE</button>
+        <button @click="showPOIs = !showPOIs; renderSMCMap(lastSMCMap)" :class="showPOIs ? 'smc-btn active' : 'smc-btn'">POIs</button>
+        <button @click="showLTFTrigger = !showLTFTrigger; renderSMCMap(lastSMCMap)" :class="showLTFTrigger ? 'smc-btn active' : 'smc-btn'">LTF TRIGGER</button>
+        <button @click="showRRTool = !showRRTool; renderSMCMap(lastSMCMap)" :class="showRRTool ? 'smc-btn active' : 'smc-btn'">R/R TOOL</button>
+      </div>
+    </div>
+
+    <!-- Main Workspace Container -->
+    <main class="dashboard-container">
+      
+      <!-- Symbol Tab Bar / Dropdown Selector -->
+      <div class="symbol-tab-bar" x-show="Object.keys(bot_states).length > 0">
+        <div class="symbol-tabs-group">
+          <template x-for="sym in Object.keys(bot_states)">
+            <button 
+              class="symbol-tab-btn" 
+              :class="active_symbol === sym ? 'active' : ''" 
+              @click="selectSymbol(sym)"
+              x-text="sym">
+            </button>
+          </template>
         </div>
-        <!-- News Filter -->
-        <div class="terminal-panel">
-          <div class="panel-header">
-            <div class="panel-title">News Filter</div>
-          </div>
-          <div class="panel-body">
-            <div class="filter-tabs">
-              <span class="txt-muted">IMPACT:</span>
-              <span
-                class="filter-tab"
-                :class="news_filter === 'ALL' ? 'active' : ''"
-                @click="news_filter='ALL'"
-                >ALL</span
-              >
-              <span
-                class="filter-tab"
-                :class="news_filter === 'HIGH' ? 'active' : ''"
-                @click="news_filter='HIGH'"
-                >HIGH</span
-              >
-              <span
-                class="filter-tab"
-                :class="news_filter === 'MED' ? 'active' : ''"
-                @click="news_filter='MED'"
-                >MED</span
-              >
-              <span
-                class="filter-tab"
-                :class="news_filter === 'LOW' ? 'active' : ''"
-                @click="news_filter='LOW'"
-                >LOW</span
-              >
+        
+        <!-- Timeframe indicators -->
+        <div class="timeframe-selector-header">
+          <template x-for="tf in ['M1','M5','M15','M30','H1','H4','D1']">
+            <button
+              class="tf-btn"
+              :class="current_tf === tf ? 'active' : ''"
+              @click="changeTimeframe(tf)"
+              x-text="tf"
+            ></button>
+          </template>
+        </div>
+        
+        <!-- Status Indicator badges -->
+        <div class="header-status-badge">
+          <span class="badge yellow" x-text="session || 'WEEKEND_CLOSED'">WEEKEND_CLOSED</span>
+          <span class="badge" x-text="'$' + (current_price ? Number(current_price).toFixed(2) : '--')">$--</span>
+        </div>
+      </div>
+
+      <!-- Split Layout Row: Chart (Left) + Sidebar (Right) -->
+      <div class="workspace-split-row">
+        
+        <!-- Chart Region -->
+        <div class="chart-region-wrapper terminal-panel">
+          <div class="chart-inner-flex">
+            <!-- Lightweight Chart Container -->
+            <div class="chart-container-shell" style="height: 60vh; flex: 1;">
+              <div id="chart-container" style="width: 100%; height: 100%"></div>
             </div>
-            <div>
-              <template x-for="item in getFilteredNews()"
-                ><div class="data-row mono" style="font-size: 12px">
-                  <span class="txt-muted" x-text="item.time"></span
-                  ><span
-                    :class="item.impact === 'HIGH' ? 'txt-red' : item.impact === 'MED' ? 'txt-amber' : 'txt-muted'"
-                    x-text="item.impact"
-                  ></span
-                  ><span
-                    class="txt-main"
-                    style="flex: 1; text-align: right"
-                    x-text="item.title"
-                  ></span></div
-              ></template>
-              <div
-                x-show="getFilteredNews().length === 0"
-                class="txt-muted mono"
-                style="text-align: center"
-              >
+          </div>
+
+          <!-- Timeline bar below chart -->
+          <div class="timeline-bar">
+            <div class="timeline-tabs">
+              <button class="timeline-btn">1D</button>
+              <button class="timeline-btn">5D</button>
+              <button class="timeline-btn">1M</button>
+              <button class="timeline-btn">3M</button>
+              <button class="timeline-btn">6M</button>
+              <button class="timeline-btn">YTD</button>
+              <button class="timeline-btn">1Y</button>
+              <button class="timeline-btn">5Y</button>
+              <button class="timeline-btn active">ALL</button>
+            </div>
+            <div class="timeline-meta">
+              <span class="mono" x-text="new Date().toLocaleTimeString() + ' (IST)'"></span>
+              <button class="timeline-meta-btn">%</button>
+              <button class="timeline-meta-btn">log</button>
+              <button class="timeline-meta-btn active">auto</button>
+            </div>
+          </div>
+
+          <!-- News Filter -->
+          <div class="news-filter-bottom-chart" style="border-top: 2px solid var(--border-strong); padding: 12px 16px; background: var(--paper);">
+            <div class="filter-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <span class="panel-title" style="font-size: 11px; font-weight: 800; text-transform: uppercase; color: var(--accent);">News Filter</span>
+              <div class="filter-tabs" style="display: flex; gap: 6px;">
+                <span class="txt-muted" style="font-size: 10px; margin-right: 4px; display: flex; align-items: center;">IMPACT:</span>
+                <span class="filter-tab" :class="news_filter === 'ALL' ? 'active' : ''" @click="news_filter='ALL'">ALL</span>
+                <span class="filter-tab" :class="news_filter === 'HIGH' ? 'active' : ''" @click="news_filter='HIGH'">HIGH</span>
+                <span class="filter-tab" :class="news_filter === 'MED' ? 'active' : ''" @click="news_filter='MED'">MED</span>
+                <span class="filter-tab" :class="news_filter === 'LOW' ? 'active' : ''" @click="news_filter='LOW'">LOW</span>
+              </div>
+            </div>
+            <div class="news-list-container" style="max-height: 120px; overflow-y: auto;">
+              <template x-for="item in getFilteredNews()">
+                <div class="data-row mono" style="font-size: 11px; padding: 6px 0; border-bottom: 1px dotted var(--border-soft); display: flex; justify-content: space-between;">
+                  <span class="txt-muted" style="width: 80px;" x-text="item.time"></span>
+                  <span :class="item.impact === 'HIGH' ? 'txt-red' : item.impact === 'MED' ? 'txt-amber' : 'txt-muted'" style="width: 60px; font-weight: bold;" x-text="item.impact"></span>
+                  <span class="txt-main" style="flex:1; text-align:right;" x-text="item.title"></span>
+                </div>
+              </template>
+              <div x-show="getFilteredNews().length === 0" class="txt-muted mono" style="text-align: center; font-size: 11px; padding: 12px 0;">
                 NO EVENTS (<span x-text="news_filter"></span>)
               </div>
             </div>
-            <div class="data-row mono">
-              <span class="txt-muted">NEXT EVENT:</span
-              ><span class="txt-amber" x-text="news.time">--</span>
-            </div>
           </div>
         </div>
+
+        <!-- Sidebar Region (Right Column, 25%) -->
+        <div class="sidebar-region-column">
+          <!-- Account Overview -->
+          <div class="terminal-panel">
+            <div class="panel-header">
+              <div class="panel-title">Account Overview</div>
+            </div>
+            <div class="panel-body">
+              <div class="data-row">
+                <span class="data-label">LOGIN</span>
+                <span class="data-value mono" x-text="account_login || '--'">--</span>
+              </div>
+              <div class="data-row">
+                <span class="data-label">SERVER</span>
+                <span class="data-value mono" x-text="account_server || '--'">--</span>
+              </div>
+              <div class="data-row">
+                <span class="data-label">EQUITY</span>
+                <span class="data-value mono txt-green" x-text="fmt(equity)">$0.00</span>
+              </div>
+              <div class="data-row">
+                <span class="data-label">BALANCE</span>
+                <span class="data-value mono txt-green" x-text="fmt(balance)">$0.00</span>
+              </div>
+              <div class="data-row">
+                <span class="data-label">DAILY P&L</span>
+                <span class="data-value mono" :class="pnl_today >= 0 ? 'txt-green' : 'txt-red'" x-text="fmt(pnl_today)">$0.00</span>
+              </div>
+              <div class="data-row">
+                <span class="data-label">DAILY %</span>
+                <span class="data-value mono" :class="pnl_today_pct >= 0 ? 'txt-green' : 'txt-red'" x-text="(pnl_today_pct >= 0 ? '+' : '') + pnl_today_pct.toFixed(2) + '%'">+0.00%</span>
+              </div>
+              <div class="data-row">
+                <span class="data-label">WEEKLY P&L</span>
+                <span class="data-value mono" :class="pnl_week >= 0 ? 'txt-green' : 'txt-red'" x-text="fmt(pnl_week)">$0.00</span>
+              </div>
+              <div class="data-row highlight">
+                <span class="data-label">OVERALL P&L</span>
+                <span class="data-value mono highlight-pnl" :class="pnl_total >= 0 ? 'txt-green' : 'txt-red'" x-text="fmt(pnl_total)">$0.00</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Narrative Engine -->
+          <div class="terminal-panel">
+            <div class="panel-header">
+              <div class="panel-title">Narrative Engine</div>
+            </div>
+            <div class="panel-body">
+              <div class="narrative-grid-row">
+                <div class="narrative-stats-side">
+                  <div class="data-row">
+                    <span class="data-label">D1 BIAS</span>
+                    <span class="data-value" :class="d1_bias === 'BULLISH' ? 'txt-green' : d1_bias === 'BEARISH' ? 'txt-red' : 'txt-muted'" x-text="d1_bias">--</span>
+                  </div>
+                  <div class="data-row">
+                    <span class="data-label">H4 BIAS</span>
+                    <span class="data-value" :class="h4_bias === 'BULLISH' ? 'txt-green' : h4_bias === 'BEARISH' ? 'txt-red' : 'txt-muted'" x-text="h4_bias">--</span>
+                  </div>
+                  <div class="data-row">
+                    <span class="data-label">STRUCTURE</span>
+                    <span class="data-value txt-amber" x-text="structure || '--'">--</span>
+                  </div>
+                  <div class="data-row">
+                    <span class="data-label">SESSION</span>
+                    <span class="data-value txt-amber" x-text="session || '--'">--</span>
+                  </div>
+                  <div class="data-row">
+                    <span class="data-label">SIGNAL</span>
+                    <span class="data-value" :class="signal_engine.action === 'BUY' ? 'txt-green' : signal_engine.action === 'SELL' ? 'txt-red' : 'txt-muted'" x-text="signal_engine.action || 'NO_TRADE'">--</span>
+                  </div>
+                  <div class="data-row">
+                    <span class="data-label">CONFIDENCE</span>
+                    <span class="data-value mono txt-gold" x-text="signal_engine.confidence + '%'">0%</span>
+                  </div>
+                  <div class="narrative-box">
+                    <span x-text="signal_engine.reason || 'Scanning...'">Scanning...</span>
+                  </div>
+                </div>
+                <div class="gates-list-side mono">
+                  <div class="gates-header-title">SMC GATES (8 REQUIRED)</div>
+                  <div class="gates-scroll-list">
+                    <template x-for="(gate_info, idx) in getGatesArray()">
+                      <div class="gate-list-item">
+                        <span x-text="(idx+1)+'.'"></span>
+                        <span x-text="gate_info.name" style="flex:1"></span>
+                        <span :class="gate_info.passed ? 'txt-green' : 'txt-red'" x-text="gate_info.passed ? '✔' : '✘'"></span>
+                      </div>
+                    </template>
+                    <div x-show="getGatesArray().length === 0" class="txt-muted" style="text-align: center">
+                      NO GATES REGISTERED
+                    </div>
+                  </div>
+                  <div class="progress-bar-container">
+                    <div class="progress-bar-bg">
+                      <div class="progress-bar-fill" :style="`width: ${signal_engine.confidence}%`"></div>
+                    </div>
+                    <div class="progress-bar-labels">
+                      <span>MATCH: <span x-text="getPassedGatesCount()">0</span>/8</span>
+                      <span x-text="signal_engine.confidence + '%'">0%</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Bottom Columns Row: System Status, Open Positions, Closed Trades -->
+      <section class="bottom-row-grid">
+        
         <!-- System Status -->
         <div class="terminal-panel">
           <div class="panel-header">
@@ -353,227 +380,43 @@
           </div>
           <div class="panel-body">
             <div class="status-indicator-row">
-              <span>MT5 CONNECTED</span>
-              <div class="status-dot-group">
-                <div
-                  class="status-dot"
-                  :class="(_health.mt5_connected === 'ok') ? '' : 'inactive'"
-                ></div>
-                <span
-                  class="mono"
-                  :class="_health.mt5_connected === 'ok' ? 'txt-green' : _health.mt5_connected === 'warning' ? 'txt-amber' : 'txt-red'"
-                  x-text="_health.mt5_connected === 'ok' ? 'LIVE' : _health.mt5_connected === 'warning' ? 'DELAYED' : 'DOWN'"
-                ></span>
-              </div>
+              <span>MTS CONNECTED</span>
+              <span class="status-val txt-green" x-text="_health.mt5_connected === 'ok' ? 'LIVE' : 'DOWN'">LIVE</span>
             </div>
             <div class="status-indicator-row">
               <span>DATA FETCHING</span>
-              <div class="status-dot-group">
-                <div
-                  class="status-dot"
-                  :class="ws_connected ? '' : 'inactive'"
-                ></div>
-                <span
-                  class="mono"
-                  :class="ws_connected ? 'txt-green' : 'txt-red'"
-                  x-text="ws_connected ? 'LIVE' : 'DOWN'"
-                ></span>
-              </div>
+              <span class="status-val txt-green" x-text="ws_connected ? 'LIVE' : 'DOWN'">LIVE</span>
             </div>
             <div class="status-indicator-row">
               <span>VPS RECEIVING</span>
-              <div class="status-dot-group">
-                <div
-                  class="status-dot"
-                  :class="_health.trader_alive ? '' : 'inactive'"
-                ></div>
-                <span
-                  class="mono"
-                  :class="_health.trader_alive ? 'txt-green' : 'txt-red'"
-                  x-text="_health.trader_alive ? 'LIVE' : 'DOWN'"
-                ></span>
-              </div>
+              <span class="status-val txt-green" x-text="_health.trader_alive ? 'LIVE' : 'DOWN'">LIVE</span>
             </div>
             <div class="status-indicator-row">
               <span>STRATEGY ENGINE</span>
-              <div class="status-dot-group">
-                <div
-                  class="status-dot"
-                  :class="_health.strategy_engine ? '' : 'inactive'"
-                ></div>
-                <span
-                  class="mono"
-                  :class="_health.strategy_engine ? 'txt-green' : 'txt-red'"
-                  x-text="_health.strategy_engine ? 'LIVE' : 'DOWN'"
-                ></span>
-              </div>
+              <span class="status-val txt-green" x-text="_health.strategy_engine ? 'LIVE' : 'DOWN'">LIVE</span>
             </div>
             <div class="status-indicator-row">
               <span>SYNC STATUS</span>
-              <div class="status-dot-group">
-                <div
-                  class="status-dot"
-                  :class="_health.data_feed ? '' : 'inactive'"
-                ></div>
-                <span
-                  class="mono"
-                  :class="_health.data_feed ? 'txt-green' : 'txt-red'"
-                  x-text="_health.data_feed ? 'SYNCED' : 'HALTED'"
-                ></span>
-              </div>
-            </div>
-            <div class="status-indicator-row">
-              <span class="txt-muted">LAST WEBHOOK:</span
-              ><span
-                class="mono txt-amber"
-                x-text="_health.webhook_age_seconds + 's ago'"
-              ></span>
+              <span class="status-val txt-green" x-text="_health.data_feed ? 'SYNCED' : 'HALTED'">SYNCED</span>
             </div>
             <div class="data-row mono">
-              <span class="txt-muted">LAST UPDATE:</span
-              ><span class="txt-main" id="last-update-ts">--:--:--</span>
+              <span class="txt-muted">LAST WEBHOOK:</span>
+              <span class="mono txt-amber" x-text="_health.webhook_age_seconds + 's ago'">--</span>
+            </div>
+            <div class="data-row mono">
+              <span class="txt-muted">LAST UPDATE:</span>
+              <span class="txt-main" id="last-update-ts">--:--:--</span>
             </div>
           </div>
         </div>
-        <!-- Narrative Engine -->
-        <div class="terminal-panel">
-          <div class="panel-header">
-            <div class="panel-title">Narrative Engine</div>
-          </div>
-          <div class="panel-body">
-            <div
-              style="display: grid; grid-template-columns: 1fr 1.2fr; gap: 12px"
-            >
-              <div>
-                <div class="data-row">
-                  <span class="data-label">D1 BIAS</span
-                  ><span
-                    class="data-value"
-                    :class="d1_bias === 'BULLISH' ? 'txt-green' : d1_bias === 'BEARISH' ? 'txt-red' : 'txt-muted'"
-                    x-text="d1_bias"
-                    >--</span
-                  >
-                </div>
-                <div class="data-row">
-                  <span class="data-label">H4 BIAS</span
-                  ><span
-                    class="data-value"
-                    :class="h4_bias === 'BULLISH' ? 'txt-green' : h4_bias === 'BEARISH' ? 'txt-red' : 'txt-muted'"
-                    x-text="h4_bias"
-                    >--</span
-                  >
-                </div>
-                <div class="data-row">
-                  <span class="data-label">STRUCTURE</span
-                  ><span class="data-value txt-amber" x-text="structure || '--'"
-                    >--</span
-                  >
-                </div>
-                <div class="data-row">
-                  <span class="data-label">SESSION</span
-                  ><span class="data-value txt-amber" x-text="session || '--'"
-                    >--</span
-                  >
-                </div>
-                <div class="data-row">
-                  <span class="data-label">SIGNAL</span
-                  ><span
-                    class="data-value"
-                    :class="signal_engine.action === 'BUY' ? 'txt-green' : signal_engine.action === 'SELL' ? 'txt-red' : 'txt-muted'"
-                    x-text="signal_engine.action || 'NO_TRADE'"
-                  ></span>
-                </div>
-                <div class="data-row">
-                  <span class="data-label">CONFIDENCE</span
-                  ><span
-                    class="data-value mono txt-gold"
-                    x-text="signal_engine.confidence + '%'"
-                    >0%</span
-                  >
-                </div>
-                <div class="narrative-box">
-                  <span x-text="signal_engine.reason || 'Scanning...'"></span>
-                </div>
-              </div>
-              <div class="mono">
-                <div style="font-size: 10px">SMC GATES (8 REQUIRED)</div>
-                <div>
-                  <template x-for="(gate_info, idx) in getGatesArray()"
-                    ><div class="gate-list-item">
-                      <span x-text="(idx+1)+'.'"></span
-                      ><span x-text="gate_info.name" style="flex: 1"></span
-                      ><span
-                        :class="gate_info.passed ? 'txt-green' : 'txt-red'"
-                        x-text="gate_info.passed ? '✔' : '✘'"
-                      ></span></div
-                  ></template>
-                  <div
-                    x-show="getGatesArray().length === 0"
-                    class="txt-muted"
-                    style="text-align: center"
-                  >
-                    NO GATES REGISTERED
-                  </div>
-                </div>
-                <div style="margin-top: 4px">
-                  <div class="progress-bar-bg">
-                    <div
-                      class="progress-bar-fill"
-                      :style="`width: ${signal_engine.confidence}%`"
-                    ></div>
-                  </div>
-                  <div style="display: flex; justify-content: space-between">
-                    <span
-                      >MATCH:
-                      <span x-text="getPassedGatesCount()">0</span>/8</span
-                    ><span x-text="signal_engine.confidence + '%'">0%</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
 
-      <!-- Chart Region -->
-      <div class="terminal-panel">
-        <div class="chart-controls-bar">
-          <div class="chart-meta-left">
-            <span class="chart-symbol mono" x-text="active_symbol || 'XAUUSD'">XAUUSD</span>
-            <span
-              class="badge"
-              x-text="'$' + (current_price ? Number(current_price).toFixed(2) : '--')"
-              >$--</span
-            >
-            <span class="badge" x-text="session || '--'">--</span>
-            <span class="badge" x-text="d1_bias || '--'">--</span>
-          </div>
-          <div class="timeframe-selector">
-            <template x-for="tf in ['M1','M5','M15','M30','H1','H4','D1']">
-              <button
-                class="tf-btn"
-                :class="current_tf === tf ? 'active' : ''"
-                @click="changeTimeframe(tf)"
-                x-text="tf"
-              ></button>
-            </template>
-          </div>
-        </div>
-        <div class="chart-container-shell" style="height: 60vh">
-          <div id="chart-container" style="width: 100%; height: 100%"></div>
-        </div>
-      </div>
-
-      <!-- Bottom row: Open Positions + Closed Trades -->
-      <section class="bottom-row-grid">
+        <!-- Open Positions -->
         <div class="terminal-panel">
           <div class="panel-header">
             <div class="panel-title">Open Positions</div>
-            <span class="txt-muted mono" x-text="trades.length + ' ACTIVE'"
-              >0 ACTIVE</span
-            >
+            <span class="txt-muted mono" x-text="trades.length + ' ACTIVE'">0 ACTIVE</span>
           </div>
-          <div class="panel-body" style="padding: 0">
+          <div class="panel-body" style="padding:0">
             <div class="table-wrapper">
               <table class="terminal-table">
                 <thead>
@@ -584,67 +427,38 @@
                     <th>LOT</th>
                     <th>ENTRY</th>
                     <th>P&L</th>
-                    <th>SL</th>
-                    <th>TP</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <template x-for="t in trades" :key="t.id"
-                    ><tr>
+                  <template x-for="t in trades" :key="t.id">
+                    <tr>
                       <td class="mono" x-text="t.id">--</td>
                       <td class="mono" x-text="t.symbol">XAUUSD</td>
-                      <td
-                        class="mono"
-                        :class="t.type === 'BUY' ? 'txt-green' : 'txt-red'"
-                        x-text="t.type"
-                      >
-                        --
-                      </td>
-                      <td class="mono" x-text="t.lot_size">0.000</td>
+                      <td class="mono" :class="t.type === 'BUY' ? 'txt-green' : 'txt-red'" x-text="t.type">--</td>
+                      <td class="mono" x-text="t.lot_size">0.00</td>
                       <td class="mono" x-text="t.entry">0.00</td>
-                      <td
-                        class="mono"
-                        :class="t.pnl >= 0 ? 'txt-green' : 'txt-red'"
-                        x-text="(t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2)"
-                      >
-                        0.00
-                      </td>
-                      <td class="mono" x-text="t.sl || '--'">--</td>
-                      <td class="mono" x-text="t.tp || '--'">--</td>
-                    </tr></template
-                  >
+                      <td class="mono" :class="t.pnl >= 0 ? 'txt-green' : 'txt-red'" x-text="(t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2)">0.00</td>
+                    </tr>
+                  </template>
                   <tr x-show="trades.length === 0">
-                    <td
-                      colspan="8"
-                      class="txt-muted"
-                      style="text-align: center"
-                    >
-                      NO OPEN POSITIONS
-                    </td>
+                    <td colspan="6" class="txt-muted" style="text-align: center; padding: 20px;">NO OPEN POSITIONS</td>
                   </tr>
                 </tbody>
               </table>
             </div>
             <div class="table-footer mono">
-              FLOAT P&L:
-              <span
-                :class="getOpenTotalPnl() >= 0 ? 'txt-green' : 'txt-red'"
-                x-text="(getOpenTotalPnl() >= 0 ? '+$' : '-$') + Math.abs(getOpenTotalPnl()).toFixed(2)"
-                >$0.00</span
-              >
+              FLOAT P&L: <span :class="getOpenTotalPnl() >= 0 ? 'txt-green' : 'txt-red'" x-text="(getOpenTotalPnl() >= 0 ? '+$' : '-$') + Math.abs(getOpenTotalPnl()).toFixed(2)">$0.00</span>
             </div>
           </div>
         </div>
+
+        <!-- Closed Trades -->
         <div class="terminal-panel">
           <div class="panel-header">
             <div class="panel-title">Closed Trades</div>
-            <span
-              class="txt-muted mono"
-              x-text="closed_trades.length + ' RECENT'"
-              >0 RECENT</span
-            >
+            <span class="txt-muted mono" x-text="closed_trades.length + ' RECENT'">0 RECENT</span>
           </div>
-          <div class="panel-body" style="padding: 0">
+          <div class="panel-body" style="padding:0">
             <div class="table-wrapper">
               <table class="terminal-table">
                 <thead>
@@ -658,119 +472,91 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <template x-for="ct in closed_trades" :key="ct.id"
-                    ><tr>
+                  <template x-for="ct in closed_trades" :key="ct.id">
+                    <tr>
                       <td class="mono" x-text="ct.id">--</td>
                       <td class="mono" x-text="ct.symbol">XAUUSD</td>
-                      <td
-                        class="mono"
-                        :class="ct.type === 'BUY' ? 'txt-green' : 'txt-red'"
-                        x-text="ct.type"
-                      >
-                        --
-                      </td>
+                      <td class="mono" :class="ct.type === 'BUY' ? 'txt-green' : 'txt-red'" x-text="ct.type">--</td>
                       <td class="mono" x-text="ct.entry">0.00</td>
                       <td class="mono" x-text="ct.exit">0.00</td>
-                      <td
-                        class="mono"
-                        :class="ct.pnl >= 0 ? 'txt-green' : 'txt-red'"
-                        x-text="(ct.pnl >= 0 ? '+' : '') + ct.pnl.toFixed(2)"
-                      >
-                        0.00
-                      </td>
-                    </tr></template
-                  >
+                      <td class="mono" :class="ct.pnl >= 0 ? 'txt-green' : 'txt-red'" x-text="(ct.pnl >= 0 ? '+' : '') + ct.pnl.toFixed(2)">0.00</td>
+                    </tr>
+                  </template>
                   <tr x-show="closed_trades.length === 0">
-                    <td
-                      colspan="6"
-                      class="txt-muted"
-                      style="text-align: center"
-                    >
-                      NO RECENT CLOSED TRADES
-                    </td>
+                    <td colspan="6" class="txt-muted" style="text-align: center; padding: 20px;">NO RECENT CLOSED TRADES</td>
                   </tr>
                 </tbody>
               </table>
             </div>
             <div class="table-footer mono">
-              TOTAL CLOSED P&L:
-              <span
-                :class="getClosedTotalPnl() >= 0 ? 'txt-green' : 'txt-red'"
-                x-text="(getClosedTotalPnl() >= 0 ? '+$' : '-$') + Math.abs(getClosedTotalPnl()).toFixed(2)"
-                >$0.00</span
-              >
+              TOTAL CLOSED P&L: <span :class="getClosedTotalPnl() >= 0 ? 'txt-green' : 'txt-red'" x-text="(getClosedTotalPnl() >= 0 ? '+$' : '-$') + Math.abs(getClosedTotalPnl()).toFixed(2)">$0.00</span>
             </div>
           </div>
         </div>
+
       </section>
     </main>
 
+    <!-- Mobile Sticky Navigation Bar -->
+    <div class="mobile-sticky-nav-bar">
+      <button class="nav-tab active" title="Dashboard">📋<span class="nav-label">Dashboard</span></button>
+      <button class="nav-tab" title="Positions">💼<span class="nav-label">Positions</span></button>
+      <button class="nav-tab" title="Trades">📊<span class="nav-label">Trades</span></button>
+      <button class="nav-tab" title="Alerts">🔔<span class="nav-label">Alerts</span></button>
+      <button class="nav-tab" title="More">⚙️<span class="nav-label">More</span></button>
+    </div>
+
+    <!-- Command Status Footer -->
     <footer class="terminal-footer mono">
       <div class="footer-left-meta">
-        <span>GUARDEER OS v4.1</span
-        ><span>INSTITUTIONAL SMC COMMAND TERMINAL</span
-        ><span
-          >UPTIME:
-          <span
-            x-text="Math.floor(_health.vps_uptime_seconds/3600) + 'h ' + (Math.floor(_health.vps_uptime_seconds/60)%60) + 'm'"
-            >--</span
-          ></span
-        >
+        <span>VPS: <span :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'ONLINE' : 'OFFLINE'">ONLINE</span></span>
+        <span>ACTIVE PRICE: <span class="txt-gold mono" x-text="fmt_price(current_price)">$--</span></span>
+        <span>SESSION: <span class="txt-amber" x-text="session || 'WEEKEND_CLOSED'">WEEKEND_CLOSED</span></span>
+        <span>UPTIME: <span x-text="Math.floor(_health.vps_uptime_seconds/3600) + 'h ' + (Math.floor(_health.vps_uptime_seconds/60)%60) + 'm'">--</span></span>
       </div>
       <div class="footer-right-meta">
-        <span
-          >VPS:
-          <span
-            :class="ws_connected ? 'txt-green' : 'txt-red'"
-            x-text="ws_connected ? 'ONLINE' : 'OFFLINE'"
-          ></span></span
-        ><span
-          >WEBSOCKET:
-          <span
-            :class="ws_connected ? 'txt-green' : 'txt-red'"
-            x-text="ws_connected ? 'ACTIVE' : 'DISCONNECTED'"
-          ></span></span
-        ><span
-          >PRICE:
-          <span class="txt-gold mono" x-text="fmt_price(current_price)"
-            >$--</span
-          ></span
-        ><span
-          >SESSION:
-          <span class="txt-amber" x-text="session || '--'">--</span></span
-        >
+        <button class="btn-footer-expand" id="footer-debug-btn" onclick="toggleDebugLogs()">SYSTEM DIAGNOSTIC LOGS [EXPAND] →</button>
       </div>
     </footer>
 
     <script>
       // Custom colour picker – overrides any palette
       const picker = document.getElementById("customColorPicker");
+      
+      function setAccentInk(hexColor) {
+        let hex = hexColor.replace('#', '');
+        // handle 3-digit shorthand hex
+        if (hex.length === 3) {
+          hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+        }
+        const r = parseInt(hex.substring(0, 2), 16);
+        const g = parseInt(hex.substring(2, 4), 16);
+        const b = parseInt(hex.substring(4, 6), 16);
+        const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+        const inkColor = (yiq >= 128) ? '#000000' : '#ffffff';
+        document.body.style.setProperty('--accent-ink', inkColor);
+      }
+
       if (picker) {
         picker.addEventListener("input", (e) => {
           const color = e.target.value;
           document.body.setAttribute("data-palette", "custom");
           document.body.style.setProperty("--accent", color);
+          setAccentInk(color);
           safeStorage.setItem("gos_palette", "custom");
           safeStorage.setItem("custom_accent", color);
-          // Also update the Alpine store if needed
-          if (window.Alpine && Alpine.store("theme")) {
-            Alpine.store("theme").setCustomColor(color);
-          }
         });
         const saved = safeStorage.getItem("custom_accent");
         if (saved && safeStorage.getItem("gos_palette") === "custom") {
           picker.value = saved;
           document.body.style.setProperty("--accent", saved);
+          setAccentInk(saved);
         }
       }
     </script>
 
     <!-- System Debug Terminal -->
-    <div class="debug-panel" style="margin: 20px 20px 80px 20px;">
-      <div class="debug-header" onclick="toggleDebugLogs()">
-        <span class="debug-title">⚙️ SYSTEM DIAGNOSTIC LOGS</span>
-        <button class="debug-toggle-btn" id="debug-toggle-btn">[COLLAPSE]</button>
-      </div>
+    <div class="debug-panel" id="debug-panel-container" style="margin: 20px 20px 80px 20px; display: none;">
       <div class="debug-content" id="debug-log-content">
         <div class="log-line log-info">[SYSTEM] Diagnostic logger initialized. Waiting for connections/logs...</div>
       </div>
@@ -778,14 +564,18 @@
 
     <script>
       function toggleDebugLogs() {
-        const content = document.getElementById('debug-log-content');
-        const btn = document.getElementById('debug-toggle-btn');
-        if (content.style.display === 'none') {
-          content.style.display = 'block';
-          btn.innerText = '[COLLAPSE]';
+        const container = document.getElementById('debug-panel-container');
+        const footerBtn = document.getElementById('footer-debug-btn');
+        if (container.style.display === 'none') {
+          container.style.display = 'block';
+          if (footerBtn) footerBtn.innerText = 'SYSTEM DIAGNOSTIC LOGS [COLLAPSE] ↓';
+          // Smooth scroll to view logs
+          setTimeout(() => {
+            container.scrollIntoView({ behavior: 'smooth', block: 'end' });
+          }, 50);
         } else {
-          content.style.display = 'none';
-          btn.innerText = '[EXPAND]';
+          container.style.display = 'none';
+          if (footerBtn) footerBtn.innerText = 'SYSTEM DIAGNOSTIC LOGS [EXPAND] →';
         }
       }
       
@@ -793,7 +583,10 @@
       setTimeout(() => {
         const errorLogs = window.terminalLogs.filter(l => l.type === 'error' || l.type === 'critical');
         if (errorLogs.length === 0) {
-          toggleDebugLogs();
+          const container = document.getElementById('debug-panel-container');
+          if (container && container.style.display !== 'none') {
+            toggleDebugLogs();
+          }
         }
       }, 3000);
     </script>
