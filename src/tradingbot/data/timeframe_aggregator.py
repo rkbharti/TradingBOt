@@ -23,7 +23,8 @@ class MultiTimeframeFractal:
             'M15': mt5.TIMEFRAME_M15,
             'H1': mt5.TIMEFRAME_H1,
             'H4': mt5.TIMEFRAME_H4,
-            'D1': mt5.TIMEFRAME_D1
+            'D1': mt5.TIMEFRAME_D1,
+            'W1': mt5.TIMEFRAME_W1
         }
     
     def fetch_data(self, timeframe_name: str, bars=300, debug=False):
@@ -97,6 +98,7 @@ class MultiTimeframeFractal:
                 "H1": 60,
                 "H4": 240,
                 "D1": 1440,
+                "W1": 10080,
             }.get(timeframe_name)
 
             is_stale = False

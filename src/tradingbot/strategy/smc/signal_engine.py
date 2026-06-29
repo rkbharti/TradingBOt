@@ -981,15 +981,18 @@ class SignalEngine:
 
         elif w1_bias in {"BULLISH", "BEARISH"}:
 
-            direction = w1_bias
-            reason = "W1_DOMINANT"
-
-            agreement_score = self.config.w1_weight
-
             is_pullback = (
-                d1_bias not in {direction, "NEUTRAL"} or
-                h4_bias not in {direction, "NEUTRAL"}
+                d1_bias not in {w1_bias, "NEUTRAL"} or
+                h4_bias not in {w1_bias, "NEUTRAL"}
             )
+            
+            if is_pullback:
+                # W1 is ultimate draw. If D1 or H4 contradict, trade the pullback.
+                direction = d1_bias if d1_bias not in {w1_bias, "NEUTRAL"} else h4_bias
+                reason = "W1_PULLBACK_MODE"
+            else:
+                direction = w1_bias
+                reason = "W1_DOMINANT"
 
         # ------------------------------------------------------------
         # D1 DOMINANT
@@ -997,15 +1000,17 @@ class SignalEngine:
 
         elif d1_bias in {"BULLISH", "BEARISH"}:
 
-            direction = d1_bias
+            is_pullback = h4_bias not in {d1_bias, "NEUTRAL"}
 
-            is_pullback = h4_bias not in {direction, "NEUTRAL"}
-
-            reason = (
-                "D1_DOMINANT_H4_PULLBACK"
-                if is_pullback
-                else "D1_DOMINANT"
-            )
+            if is_pullback:
+                # ✅ Pullback Mode (NotebookLM Validated)
+                # We actively hunt for counter-trend setups (H4 direction) 
+                # down to the D1 continuation zone.
+                direction = h4_bias
+                reason = "PULLBACK_MODE_ACTIVE"
+            else:
+                direction = d1_bias
+                reason = "D1_DOMINANT"
 
             agreement_score = self.config.d1_weight
 
@@ -1749,6 +1754,25 @@ class SignalEngine:
             return [sorted_pois[0], sorted_pois[-1]]
 
         candidates = _select_decisional_and_extreme(candidates, sweep.direction)
+
+        # ✅ HTF Anchoring (NotebookLM Validated)
+        # Discard M15 POIs that do not sit strictly inside an unmitigated H4 or H1 POI box
+        anchored_candidates = []
+        for m15_poi in candidates:
+            is_anchored = False
+            for htf_poi in htf_pois:
+                # Check if M15 bounds overlap or sit inside the HTF bounds
+                if not (m15_poi.low > htf_poi.high or m15_poi.high < htf_poi.low):
+                    is_anchored = True
+                    break
+            
+            if is_anchored:
+                anchored_candidates.append(m15_poi)
+        
+        candidates = anchored_candidates
+
+        if not candidates:
+            return {"passed": False, "reason": "M15_POI_NOT_ANCHORED_TO_HTF"}, []
 
         # ─── FIX #2: OB+FVG Pairing Validation ──────────────────────────
         # Helper: Ensure POI has BOTH Order Block AND Fair Value Gap

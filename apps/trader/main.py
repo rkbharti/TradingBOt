@@ -2313,12 +2313,14 @@ class XAUUSDTradingBot:
         h1_raw  = self.mtf.fetch_data("H1")
         h4_raw  = self.mtf.fetch_data("H4")
         d1_raw  = self.mtf.fetch_data("D1")
+        w1_raw  = self.mtf.fetch_data("W1")
 
         m5_df  = m5_raw.get("df")  if isinstance(m5_raw,  dict) else m5_raw
         m15_df = m15_raw.get("df") if isinstance(m15_raw, dict) else m15_raw
         h1_df  = h1_raw.get("df")  if isinstance(h1_raw,  dict) else h1_raw   # ✅ Fix 1
         h4_df  = h4_raw.get("df")  if isinstance(h4_raw,  dict) else h4_raw
         d1_df  = d1_raw.get("df")  if isinstance(d1_raw,  dict) else d1_raw
+        w1_df  = w1_raw.get("df")  if isinstance(w1_raw,  dict) else w1_raw
 
         latest = m5_df.iloc[-1] if m5_df is not None and len(m5_df) > 0 else None
 
@@ -2329,7 +2331,7 @@ class XAUUSDTradingBot:
         if m5_df is not None and m15_df is not None:
             self.scan_presession_pois(m5_df, m15_df, now_ny)
 
-        if any(df is None or len(df) == 0 for df in [m5_df, m15_df, h4_df, d1_df]):
+        if any(df is None or len(df) == 0 for df in [m5_df, m15_df, h4_df, d1_df, w1_df]):
             print("❌ One or more timeframe DataFrames unavailable — skipping cycle")
             return
 
@@ -2348,6 +2350,7 @@ class XAUUSDTradingBot:
                 h1_df=h1_df,         # ✅ Fix 1: H1 primary structure layer
                 h4_df=h4_df,
                 d1_df=d1_df,
+                w1_df=w1_df,
                 now_utc=datetime.now(timezone.utc),
                 asian_session_pois=self.asian_session_pois,
                 m1=m1_raw,
@@ -2454,8 +2457,10 @@ class XAUUSDTradingBot:
         htf_gate_early = result.gates.get("step_1_htf_bias", {})
         self._cycle_data.update({
             "current_bias": current_bias,
+            "w1_bias":      htf_gate_early.get("w1_bias", "NEUTRAL"),
             "d1_bias":      htf_gate_early.get("d1_bias", "NEUTRAL"),
             "h4_bias":      htf_gate_early.get("h4_bias", "NEUTRAL"),
+            "is_pullback":  htf_gate_early.get("is_pullback", False),
             "action":       result.action,
             "direction":    result.direction,
             "confidence":   result.confidence_score,
@@ -2813,8 +2818,10 @@ class XAUUSDTradingBot:
                 "M1": self.mtf.fetch_data("M1", debug=False),
                 "M5": self.mtf.fetch_data("M5", debug=False),
                 "M15": self.mtf.fetch_data("M15", debug=False),
+                "H1": self.mtf.fetch_data("H1", debug=False),
                 "H4": self.mtf.fetch_data("H4", debug=False),
                 "D1": self.mtf.fetch_data("D1", debug=False),
+                "W1": self.mtf.fetch_data("W1", debug=False),
             }
 
             missing = []
@@ -2873,8 +2880,10 @@ class XAUUSDTradingBot:
 
             m5_df = mtf_map["M5"]["df"]
             m15_df = mtf_map["M15"]["df"]
+            h1_df = mtf_map["H1"]["df"]
             h4_df = mtf_map["H4"]["df"]
             d1_df = mtf_map["D1"]["df"]
+            w1_df = mtf_map["W1"]["df"]
 
         except Exception as e:
             print(f"  ❌ FAIL — {e}")
@@ -2891,8 +2900,10 @@ class XAUUSDTradingBot:
             result = self.signal_engine.evaluate(
                 m5_df=m5_df,
                 m15_df=m15_df,
+                h1_df=h1_df,
                 h4_df=h4_df,
                 d1_df=d1_df,
+                w1_df=w1_df,
                 now_utc=datetime.now(timezone.utc),
                 asian_session_pois=self.asian_session_pois,
                 m1=m1_raw,
