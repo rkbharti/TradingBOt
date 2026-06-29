@@ -23,13 +23,13 @@ module.exports = {
       }
     },
     {
-      name: "bot_xagusd",
+      name: "bot_btcusd",
       script: ".venv/Scripts/python.exe",
       args: "apps/trader/main.py",
       interpreter: "none",
       watch: false,
       env: {
-        SYMBOL: "XAGUSD",
+        SYMBOL: "BTCUSD",
         CONTROL_PORT: 5002,
         RISK_PER_TRADE: "0.25"
       }
