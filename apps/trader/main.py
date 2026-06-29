@@ -447,7 +447,11 @@ class XAUUSDTradingBot:
         try:
             if hasattr(self.signal_engine, "news_filter") and self.signal_engine.news_filter:
                 events = self.signal_engine.news_filter._get_events(datetime.now(timezone.utc))
-                for e in events:
+                target_currencies = self.signal_engine.news_filter.get_target_currencies(self.symbol)
+                
+                filtered_events = [e for e in events if e.get("country", "").upper() in target_currencies]
+
+                for e in filtered_events:
                     e_time = self.signal_engine.news_filter._parse_event_time(e.get("time", ""))
                     time_lbl = e_time.strftime("%H:%M UTC") if e_time else "--:--"
                     news_events_formatted.append({
@@ -456,7 +460,7 @@ class XAUUSDTradingBot:
                         "title": str(e.get("event", "Unknown Event"))
                     })
                 upcoming = []
-                for e in events:
+                for e in filtered_events:
                     e_time = self.signal_engine.news_filter._parse_event_time(e.get("time", ""))
                     if e_time and e_time > datetime.now(timezone.utc):
                         upcoming.append(e_time)

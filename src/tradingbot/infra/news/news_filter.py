@@ -54,14 +54,9 @@ class NewsFilter:
         self._cache: list = []
         self._cache_ts: Optional[datetime] = None
 
-    def is_news_blackout(self, now_utc: Optional[datetime] = None, symbol: str = "XAUUSD") -> tuple[bool, Optional[str]]:
-        now = now_utc or datetime.now(timezone.utc)
-        events = self._get_events(now)
-        blackout_delta = timedelta(minutes=self.blackout_minutes)
-
-        # Determine currencies to block based on symbol
+    @staticmethod
+    def get_target_currencies(symbol: str) -> set:
         symbol_upper = symbol.upper()
-        # strip any broker suffixes (e.g., .pro, .raw, .a, .b, .m)
         clean_symbol = "".join(c for c in symbol_upper if c.isalpha())
         
         if len(clean_symbol) == 6:
@@ -74,11 +69,19 @@ class NewsFilter:
             else:
                 target_currencies = {"USD", "US"}
                 
-        # Also map USD/US to block both
         if "USD" in target_currencies:
             target_currencies.add("US")
         if "US" in target_currencies:
             target_currencies.add("USD")
+            
+        return target_currencies
+
+    def is_news_blackout(self, now_utc: Optional[datetime] = None, symbol: str = "XAUUSD") -> tuple[bool, Optional[str]]:
+        now = now_utc or datetime.now(timezone.utc)
+        events = self._get_events(now)
+        blackout_delta = timedelta(minutes=self.blackout_minutes)
+
+        target_currencies = self.get_target_currencies(symbol)
 
         for event in events:
             if event.get("impact", "").lower() != BLOCK_IMPACT:
@@ -197,11 +200,7 @@ class NewsFilter:
                     "time": item.get("date", ""),
                 })
 
-            filtered = [
-                e for e in normalized_events
-                if e.get("impact", "").lower() == BLOCK_IMPACT
-            ]
-            return filtered
+            return normalized_events
 
         except Exception as e:
             logger.error(f"ForexFactory news fetch error: {e} — news filter disabled for this cycle")
