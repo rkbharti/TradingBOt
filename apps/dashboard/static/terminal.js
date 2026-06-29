@@ -693,6 +693,17 @@ function DS() {
         },
 
         _addBoxSeries(timeStart, timeEnd, boxTop, boxBottom, fillColor, borderColor) {
+            // Ensure timeStart and timeEnd are numbers
+            if (typeof timeStart === 'string') timeStart = Math.floor(new Date(timeStart).getTime() / 1000);
+            if (typeof timeEnd === 'string') timeEnd = Math.floor(new Date(timeEnd).getTime() / 1000);
+
+            // Ensure timeEnd is strictly greater than timeStart to prevent Lightweight Charts crash
+            // especially when using simulated future dates from backtesting where Date.now() is behind.
+            if (timeEnd <= timeStart || isNaN(timeEnd) || isNaN(timeStart)) {
+                timeEnd = (timeStart || Math.floor(Date.now()/1000)) + 3600 * 4; 
+                timeStart = timeStart || Math.floor(Date.now()/1000);
+            }
+            
             const s = _chart.addAreaSeries({
                 lineColor: borderColor || 'transparent',
                 topColor: fillColor,
@@ -703,10 +714,12 @@ function DS() {
                 priceLineVisible: false,
                 crosshairMarkerVisible: false,
             });
-            s.setData([
-                { time: timeStart, value: boxTop },
-                { time: timeEnd,   value: boxTop },
-            ]);
+            try {
+                s.setData([
+                    { time: timeStart, value: boxTop },
+                    { time: timeEnd,   value: boxTop },
+                ]);
+            } catch(e) { console.warn('[CHART] Failed to add box series:', e); }
             s.applyOptions({ baseValue: { type: 'price', price: boxBottom } });
             if (!window._smcSeriesRefs) window._smcSeriesRefs = [];
             window._smcSeriesRefs.push(s);
