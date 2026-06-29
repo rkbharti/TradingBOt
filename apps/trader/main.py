@@ -2259,7 +2259,7 @@ class XAUUSDTradingBot:
                     "zone_strength": 0, "current_zone": "CLOSED", "zones": {},
                 },
             )
-            print(f"🔎 Weekend dashboard POST success: {dashboard_ok}")
+            print(f"🔎 Inactive dashboard POST success: {dashboard_ok}")
             return  # ← Gap 3 fix: stop here, do not fall through to active-market code
 
         # ── Fetch market data ─────────────────────────────────────────────────
