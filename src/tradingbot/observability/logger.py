@@ -15,7 +15,8 @@ class ObservationLogger:
         os.makedirs(self.base_dir, exist_ok=True)
 
         self.today = date.today().isoformat()
-        self.file_path = os.path.join(self.base_dir, f"{self.today}.json")
+        symbol = os.getenv("SYMBOL", "UNKNOWN")
+        self.file_path = os.path.join(self.base_dir, f"{self.today}_{symbol}.json")
 
         self.data = self._load_or_init()
 

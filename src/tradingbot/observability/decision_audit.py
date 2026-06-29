@@ -345,7 +345,10 @@ class AuditLogger:
 class OBObservationLogger:
     """Legacy shim — kept so existing imports don't break."""
 
-    def __init__(self, path: str = "research/ob_observations.json") -> None:
+    def __init__(self, path: str = None) -> None:
+        if path is None:
+            symbol = os.getenv("SYMBOL", "UNKNOWN")
+            path = f"research/ob_observations_{symbol}.json"
         self.path = Path(path)
         self._lock = Lock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
