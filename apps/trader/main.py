@@ -675,6 +675,7 @@ class XAUUSDTradingBot:
             },
             "news_items": self.news_events_formatted,
             "news_time": self.news_time_str,
+            "chart_data": self._cycle_data.get("chart_data", []),
             # ✅ Fix 5/7: CBDR SD levels and Asian range for dashboard chart overlay
             "cbdr": self.cbdr_levels if self.cbdr_levels else {},
             "asian_range": {
@@ -684,13 +685,17 @@ class XAUUSDTradingBot:
         }
 
         try:
-            json_str = json.dumps(snapshot, default=str)
+            print_snapshot = dict(snapshot)
+            if "chart_data" in print_snapshot:
+                print_snapshot["chart_data"] = []
+                
+            json_str = json.dumps(print_snapshot, default=str)
             print("__CYCLE_JSON__:" + json_str)
             # ── Send to dashboard VPS ──
             import requests
             try:
                 try:
-                    payload_dict = json.loads(json_str)
+                    payload_dict = json.loads(json.dumps(snapshot, default=str)) # Use full snapshot here
                     payload_dict["smc_map"] = self.last_smc_map if hasattr(self, "last_smc_map") else {}
                     json_str = json.dumps(payload_dict, default=str)
                 except Exception as js_err:
@@ -2270,6 +2275,11 @@ class XAUUSDTradingBot:
         market_data, current_price = self.fetch_and_prepare()
         if market_data is None or current_price is None:
             return
+            
+        try:
+            self._cycle_data["chart_data"] = market_data.to_dict(orient="records")
+        except Exception:
+            pass
         latest = market_data.iloc[-1]
         bid = float(current_price.get("bid", current_price))
         ask = float(current_price.get("ask", bid))
