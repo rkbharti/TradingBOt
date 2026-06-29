@@ -686,7 +686,6 @@ class XAUUSDTradingBot:
             import requests
             try:
                 try:
-                    import json
                     payload_dict = json.loads(json_str)
                     payload_dict["smc_map"] = self.last_smc_map if hasattr(self, "last_smc_map") else {}
                     json_str = json.dumps(payload_dict, default=str)
@@ -1845,6 +1844,11 @@ class XAUUSDTradingBot:
 
         bal = float(acct.balance)
         eq = float(acct.equity)
+
+        # Protect against MT5 returning 0.0 during maintenance or connection glitches
+        if bal <= 0.1 or eq <= 0.1:
+            print(f"⚠️ Warning: Invalid balance/equity read from MT5 (bal={bal}, eq={eq}). Skipping risk monitor to prevent false lockdown.")
+            return
 
         # Update all-time peaks
         updated = False
