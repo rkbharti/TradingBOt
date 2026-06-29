@@ -433,7 +433,7 @@ class XAUUSDTradingBot:
         self.closed_trades: list       = []
         self.max_positions             = 3
         self.max_lot_size              = 2.0
-        self.risk_per_trade_percent    = 0.5
+        self.risk_per_trade_percent    = float(os.getenv("RISK_PER_TRADE", "0.25"))
         self.current_session           = "UNKNOWN"
         self.dry_run                   = DRY_RUN
         self.waiting_for_confirmation  = False
