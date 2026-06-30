@@ -460,11 +460,13 @@
 
         <!-- Open Positions -->
         <div class="terminal-panel">
-          <div class="panel-header">
+          <div class="panel-header desktop-only">
             <div class="panel-title">Open Positions</div>
             <span class="txt-muted mono" x-text="trades.length + ' ACTIVE'">0 ACTIVE</span>
           </div>
-          <div class="panel-body" style="padding:0">
+
+          <!-- Desktop Layout -->
+          <div class="panel-body desktop-only" style="padding:0">
             <div class="table-wrapper">
               <table class="terminal-table">
                 <thead>
@@ -496,6 +498,45 @@
             </div>
             <div class="table-footer mono">
               FLOAT P&L: <span :class="getOpenTotalPnl() >= 0 ? 'txt-green' : 'txt-red'" x-text="(getOpenTotalPnl() >= 0 ? '+$' : '-$') + Math.abs(getOpenTotalPnl()).toFixed(2)">$0.00</span>
+            </div>
+          </div>
+
+          <!-- Mobile iOS Card Layout -->
+          <div class="panel-body mobile-only mob-card" x-data="{ expanded: false }" @click="expanded = !expanded">
+            <div class="mob-hero-section">
+              <div class="mob-hero-header">
+                <span class="mob-hero-title">OPEN POSITIONS</span>
+                <span class="badge yellow" style="font-size: 9px; padding: 1px 6px;" x-text="trades.length + ' ACTIVE'">0 ACTIVE</span>
+              </div>
+              <div class="mob-hero-value-row">
+                <span class="mob-hero-value" 
+                      :class="getOpenTotalPnl() >= 0 ? 'txt-green' : 'txt-red'"
+                      x-text="trades.length > 0 ? ((getOpenTotalPnl() >= 0 ? '+$' : '-$') + Math.abs(getOpenTotalPnl()).toFixed(2)) : 'NO POSITIONS'">
+                  NO POSITIONS
+                </span>
+              </div>
+              <div class="mob-subtext" x-show="trades.length > 0">
+                Running float profit/loss. Tap to view active position details.
+              </div>
+              <div class="mob-subtext" x-show="trades.length === 0">
+                No active orders in the market.
+              </div>
+            </div>
+
+            <!-- Collapsible details -->
+            <div class="mob-details-collapse" x-show="expanded && trades.length > 0" x-transition style="display: none;" @click.stop>
+              <template x-for="t in trades" :key="t.id">
+                <div class="mob-position-item">
+                  <div class="mob-position-main-row">
+                    <span class="mob-position-symbol" x-text="t.symbol"></span>
+                    <span class="mob-position-type" :class="t.type === 'BUY' ? 'txt-green' : 'txt-red'" x-text="t.type + ' ' + t.lot_size + ' LOT'"></span>
+                  </div>
+                  <div class="mob-position-sub-row">
+                    <span class="mob-position-entry">Entry: <span class="mono" x-text="t.entry"></span></span>
+                    <span class="mob-position-pnl" :class="t.pnl >= 0 ? 'txt-green' : 'txt-red'" x-text="(t.pnl >= 0 ? '+$' : '-$') + Math.abs(t.pnl).toFixed(2)"></span>
+                  </div>
+                </div>
+              </template>
             </div>
           </div>
         </div>

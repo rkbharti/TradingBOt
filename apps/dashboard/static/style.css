@@ -951,6 +951,41 @@ body::before {
   .mob-detail-val {
     font-weight: 700;
   }
+
+  /* Open Positions Widget specific mobile styles */
+  .mob-position-item {
+    border-bottom: 1px dotted var(--border-soft);
+    padding: 8px 0;
+  }
+  .mob-position-item:last-child {
+    border-bottom: none;
+  }
+  .mob-position-main-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+  }
+  .mob-position-symbol {
+    font-weight: 800;
+    font-size: 13px;
+  }
+  .mob-position-type {
+    font-weight: 800;
+    font-size: 11px;
+  }
+  .mob-position-sub-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--ink-light);
+  }
+  .mob-position-entry {
+    font-weight: 600;
+  }
+  .mob-position-pnl {
+    font-weight: 700;
+  }
 }
 
 /* --- Narrative Engine inside Sidebar layout adjustments --- */
