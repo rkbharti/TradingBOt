@@ -793,33 +793,93 @@ body::before {
     grid-template-columns: repeat(2, 1fr);
   }
   
+  /* Premium iOS-style Control Panel Header Card */
   .control-bar-header {
-    margin: 10px;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
+    background: var(--paper-dark) !important;
+    border: 1.5px solid var(--border-strong) !important;
+    border-radius: 12px !important;
+    padding: 12px !important;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4) !important;
+    margin: 12px 16px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 12px !important;
+    align-items: stretch !important;
   }
-  
-  .symbol-tab-bar {
-    margin: 10px;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
+  .control-panel {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+    justify-content: center !important;
+    align-items: center !important;
+    width: 100% !important;
   }
-  .symbol-tabs-group, .timeframe-selector-header, .header-status-badge {
-    justify-content: center;
+  .control-panel .meta-label {
+    width: 100% !important;
+    text-align: center !important;
+    margin-bottom: 4px !important;
+    font-size: 10px !important;
+    letter-spacing: 1px !important;
   }
 
+  /* Premium iOS-style Symbol Tab Bar Card */
+  .symbol-tab-bar {
+    background: var(--paper-dark) !important;
+    border: 1.5px solid var(--border-strong) !important;
+    border-radius: 12px !important;
+    padding: 12px !important;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 12px !important;
+    margin: 12px 16px !important;
+    align-items: stretch !important;
+  }
+  .symbol-tabs-group, .timeframe-selector-header, .header-status-badge {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+    justify-content: center !important;
+    align-items: center !important;
+    width: 100% !important;
+  }
+  .symbol-tab-btn, .tf-btn {
+    flex: 1 1 auto !important;
+    text-align: center !important;
+    min-width: 62px !important;
+    margin: 0 !important;
+  }
+  .header-status-badge {
+    margin-top: 4px !important;
+  }
+
+  /* Main Workspace Split layout for Mobile */
   .workspace-split-row {
-    flex-direction: column;
-    margin: 10px;
-    gap: 16px;
+    display: flex !important;
+    flex-direction: column !important;
+    margin: 12px 16px !important;
+    gap: 16px !important;
   }
   .chart-region-wrapper, .sidebar-region-column {
-    width: 100%;
+    width: 100% !important;
   }
   .bottom-row-grid {
-    margin: 10px;
+    display: flex !important;
+    flex-direction: column !important;
+    margin: 12px 16px !important;
+    gap: 16px !important;
+  }
+
+  /* Override Desktop panel limits to prevent clipping */
+  .bottom-row-grid .panel-body, .panel-body {
+    max-height: none !important;
+    overflow: visible !important;
+    overflow-y: visible !important;
+  }
+
+  /* Hide drawing toolbar on mobile to maximize chart width */
+  .chart-drawing-toolbar {
+    display: none !important;
   }
   
   /* Sticky Bottom Navigation Bar for Phones */
