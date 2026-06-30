@@ -351,10 +351,12 @@
 
           <!-- Narrative Engine -->
           <div class="terminal-panel">
-            <div class="panel-header">
+            <div class="panel-header desktop-only">
               <div class="panel-title">Narrative Engine</div>
             </div>
-            <div class="panel-body">
+
+            <!-- Desktop Layout -->
+            <div class="panel-body desktop-only">
               <div class="narrative-grid-row">
                 <div class="narrative-stats-side">
                   <div class="data-row">
@@ -407,6 +409,72 @@
                       <span>MATCH: <span x-text="getPassedGatesCount()">0</span>/8</span>
                       <span x-text="signal_engine.confidence + '%'">0%</span>
                     </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Mobile iOS Card Layout -->
+            <div class="panel-body mobile-only mob-card" x-data="{ expanded: false }" @click="expanded = !expanded">
+              <div class="mob-hero-section">
+                <div class="mob-hero-header">
+                  <span class="mob-hero-title">SMC SYSTEM SIGNAL</span>
+                  <span class="badge" 
+                        :class="signal_engine.action === 'BUY' ? 'active-on' : signal_engine.action === 'SELL' ? 'active-off' : ''"
+                        style="font-size: 10px; padding: 2px 8px; font-weight: 800;"
+                        x-text="signal_engine.action || 'NO TRADE'">
+                    NO TRADE
+                  </span>
+                </div>
+                <div class="mob-hero-value-row">
+                  <span class="mob-hero-value txt-gold" x-text="signal_engine.confidence + '%'">0%</span>
+                  <span style="font-size: 14px; font-weight: 700; color: var(--ink-light); margin-left: 8px;">Confidence</span>
+                </div>
+                
+                <!-- Match Progress Bar -->
+                <div class="progress-bar-container" style="margin-top: 4px;">
+                  <div class="progress-bar-bg" style="border-radius: 4px; overflow: hidden; height: 6px;">
+                    <div class="progress-bar-fill" :style="`width: ${signal_engine.confidence}%`"></div>
+                  </div>
+                  <div class="progress-bar-labels" style="margin-top: 4px; font-size: 10px;">
+                    <span>CONFLUENCE GATES MATCH: <span class="txt-amber font-mono" x-text="getPassedGatesCount()">0</span>/8</span>
+                  </div>
+                </div>
+                
+                <div class="mob-subtext" style="margin-top: 6px;" x-text="signal_engine.reason || 'Scanning market structure...'">
+                  Scanning market structure...
+                </div>
+              </div>
+
+              <!-- Collapsible details -->
+              <div class="mob-details-collapse" x-show="expanded" x-transition style="display: none;" @click.stop>
+                <div class="gates-header-title" style="margin-top: 4px; font-size: 10px; font-weight: 800; color: var(--ink-faint);">CHECKLIST CONFLUENCIES:</div>
+                <div class="mob-gates-list" style="margin-bottom: 12px; font-family: monospace;">
+                  <template x-for="(gate_info, idx) in getGatesArray()">
+                    <div class="mob-gate-row">
+                      <span class="mob-gate-index" x-text="(idx+1) + '.'"></span>
+                      <span class="mob-gate-name" x-text="gate_info.name"></span>
+                      <span class="mob-gate-status" :class="gate_info.passed ? 'txt-green' : 'txt-red'" x-text="gate_info.passed ? '✔' : '✘'"></span>
+                    </div>
+                  </template>
+                </div>
+
+                <div class="mob-details-grid" style="border-top: 1px dotted var(--border-soft); padding-top: 10px;">
+                  <div class="mob-detail-cell">
+                    <span class="mob-detail-cell-label">D1 Bias</span>
+                    <span class="mob-detail-cell-val" :class="d1_bias === 'BULLISH' ? 'txt-green' : d1_bias === 'BEARISH' ? 'txt-red' : 'txt-muted'" x-text="d1_bias">--</span>
+                  </div>
+                  <div class="mob-detail-cell">
+                    <span class="mob-detail-cell-label">H4 Bias</span>
+                    <span class="mob-detail-cell-val" :class="h4_bias === 'BULLISH' ? 'txt-green' : h4_bias === 'BEARISH' ? 'txt-red' : 'txt-muted'" x-text="h4_bias">--</span>
+                  </div>
+                  <div class="mob-detail-cell">
+                    <span class="mob-detail-cell-label">Structure</span>
+                    <span class="mob-detail-cell-val txt-amber" x-text="structure || '--'">--</span>
+                  </div>
+                  <div class="mob-detail-cell">
+                    <span class="mob-detail-cell-label">Session</span>
+                    <span class="mob-detail-cell-val txt-amber" x-text="session || '--'">--</span>
                   </div>
                 </div>
               </div>

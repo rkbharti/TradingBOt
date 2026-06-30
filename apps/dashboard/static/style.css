@@ -1047,6 +1047,31 @@ body::before {
     font-size: 12px;
     font-weight: 700;
   }
+
+  /* Narrative / Gates specific mobile styles */
+  .mob-gate-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    padding: 4px 0;
+    border-bottom: 1px dashed rgba(255, 255, 255, 0.05);
+  }
+  .mob-gate-row:last-child {
+    border-bottom: none;
+  }
+  .mob-gate-index {
+    color: var(--ink-faint);
+    margin-right: 6px;
+    font-weight: 800;
+  }
+  .mob-gate-name {
+    flex: 1;
+    color: var(--ink-light);
+  }
+  .mob-gate-status {
+    font-weight: 800;
+  }
 }
 
 /* --- Narrative Engine inside Sidebar layout adjustments --- */
