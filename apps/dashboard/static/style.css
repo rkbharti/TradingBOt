@@ -940,7 +940,7 @@ body::before {
     overflow: visible !important;
   }
   .chart-container-shell {
-    height: 380px !important; /* Fixed clear height for chart on mobile */
+    height: 440px !important; /* Stable higher mobile height for optimal candle layout */
     overflow: visible !important;
   }
   #chart-container {

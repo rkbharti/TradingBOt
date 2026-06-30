@@ -180,17 +180,7 @@
           </template>
         </div>
         
-        <!-- Timeframe indicators -->
-        <div class="timeframe-selector-header">
-          <template x-for="tf in ['M1','M5','M15','M30','H1','H4','D1']">
-            <button
-              class="tf-btn"
-              :class="current_tf === tf ? 'active' : ''"
-              @click="changeTimeframe(tf)"
-              x-text="tf"
-            ></button>
-          </template>
-        </div>
+
         
         <!-- Status Indicator badges -->
         <div class="header-status-badge">
@@ -245,14 +235,14 @@
               </div>
             </div>
             <div class="news-list-container" style="max-height: 120px; overflow-y: auto;">
-              <template x-for="item in getFilteredNews()">
+              <template x-for="item in (bot_states[active_symbol]?.news_items || []).filter(i => news_filter === 'ALL' || i.impact === news_filter)">
                 <div class="data-row mono" style="font-size: 11px; padding: 6px 0; border-bottom: 1px dotted var(--border-soft); display: flex; justify-content: space-between;">
                   <span class="txt-muted" style="width: 80px;" x-text="item.time"></span>
                   <span :class="item.impact === 'HIGH' ? 'txt-red' : item.impact === 'MED' ? 'txt-amber' : 'txt-muted'" style="width: 60px; font-weight: bold;" x-text="item.impact"></span>
                   <span class="txt-main" style="flex:1; text-align:right;" x-text="item.title"></span>
                 </div>
               </template>
-              <div x-show="getFilteredNews().length === 0" class="txt-muted mono" style="text-align: center; font-size: 11px; padding: 12px 0;">
+              <div x-show="(bot_states[active_symbol]?.news_items || []).filter(i => news_filter === 'ALL' || i.impact === news_filter).length === 0" class="txt-muted mono" style="text-align: center; font-size: 11px; padding: 12px 0;">
                 NO EVENTS (<span x-text="news_filter"></span>)
               </div>
             </div>
@@ -282,7 +272,7 @@
             <!-- Collapsible details -->
             <div class="mob-details-collapse" x-show="expanded" x-transition style="display: none;" @click.stop>
               <div style="max-height: 180px; overflow-y: auto;">
-                <template x-for="item in getFilteredNews()">
+                <template x-for="item in (bot_states[active_symbol]?.news_items || []).filter(i => news_filter === 'ALL' || i.impact === news_filter)">
                   <div class="mob-news-item">
                     <div class="mob-news-time-impact">
                       <span class="mono txt-amber" x-text="item.time"></span>
@@ -294,7 +284,7 @@
                     <span class="mob-news-title" x-text="item.title"></span>
                   </div>
                 </template>
-                <div x-show="getFilteredNews().length === 0" class="txt-muted text-center font-mono" style="padding: 10px 0; font-size: 11px;">
+                <div x-show="(bot_states[active_symbol]?.news_items || []).filter(i => news_filter === 'ALL' || i.impact === news_filter).length === 0" class="txt-muted text-center font-mono" style="padding: 10px 0; font-size: 11px;">
                   NO EVENTS (<span x-text="news_filter"></span>)
                 </div>
               </div>
