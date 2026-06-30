@@ -1117,6 +1117,29 @@ body::before {
     justify-content: space-between;
     width: 100%;
   }
+
+  /* News Widget specific mobile styles */
+  .mob-news-item {
+    border-bottom: 1px dotted var(--border-soft);
+    padding: 8px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .mob-news-item:last-child {
+    border-bottom: none;
+  }
+  .mob-news-time-impact {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .mob-news-title {
+    font-size: 11px;
+    color: var(--ink);
+    font-weight: 600;
+  }
 }
 
 /* --- Narrative Engine inside Sidebar layout adjustments --- */

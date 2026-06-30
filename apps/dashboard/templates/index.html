@@ -233,7 +233,7 @@
           </div>
 
           <!-- News Filter -->
-          <div class="news-filter-bottom-chart" style="border-top: 2px solid var(--border-strong); padding: 12px 16px; background: var(--paper);">
+          <div class="news-filter-bottom-chart desktop-only" style="border-top: 2px solid var(--border-strong); padding: 12px 16px; background: var(--paper);">
             <div class="filter-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
               <span class="panel-title" style="font-size: 11px; font-weight: 800; text-transform: uppercase; color: var(--accent);">News Filter</span>
               <div class="filter-tabs" style="display: flex; gap: 6px;">
@@ -254,6 +254,49 @@
               </template>
               <div x-show="getFilteredNews().length === 0" class="txt-muted mono" style="text-align: center; font-size: 11px; padding: 12px 0;">
                 NO EVENTS (<span x-text="news_filter"></span>)
+              </div>
+            </div>
+          </div>
+
+          <!-- Mobile iOS Card Layout -->
+          <div class="mobile-only mob-card" x-data="{ expanded: false }" @click="expanded = !expanded" style="margin: 12px 16px 16px 16px;">
+            <div class="mob-hero-section">
+              <div class="mob-hero-header">
+                <span class="mob-hero-title">NEWS FILTER & ALERTS</span>
+                <div class="filter-tabs" style="display: flex; gap: 4px;" @click.stop>
+                  <span class="filter-tab" :class="news_filter === 'ALL' ? 'active' : ''" @click="news_filter='ALL'">ALL</span>
+                  <span class="filter-tab" :class="news_filter === 'HIGH' ? 'active' : ''" @click="news_filter='HIGH'">HIGH</span>
+                </div>
+              </div>
+              <div class="mob-hero-value-row">
+                <span class="mob-hero-value txt-amber" 
+                      x-text="news.time && news.time !== '--' ? news.time : 'NO VOLATILITY'">
+                  NO VOLATILITY
+                </span>
+              </div>
+              <div class="mob-subtext">
+                Current session news calendar. Tap to view details.
+              </div>
+            </div>
+
+            <!-- Collapsible details -->
+            <div class="mob-details-collapse" x-show="expanded" x-transition style="display: none;" @click.stop>
+              <div style="max-height: 180px; overflow-y: auto;">
+                <template x-for="item in getFilteredNews()">
+                  <div class="mob-news-item">
+                    <div class="mob-news-time-impact">
+                      <span class="mono txt-amber" x-text="item.time"></span>
+                      <span :class="item.impact === 'HIGH' ? 'txt-red' : item.impact === 'MED' ? 'txt-amber' : 'txt-muted'" 
+                            style="font-weight: bold;" 
+                            x-text="item.impact">
+                      </span>
+                    </div>
+                    <span class="mob-news-title" x-text="item.title"></span>
+                  </div>
+                </template>
+                <div x-show="getFilteredNews().length === 0" class="txt-muted text-center font-mono" style="padding: 10px 0; font-size: 11px;">
+                  NO EVENTS (<span x-text="news_filter"></span>)
+                </div>
               </div>
             </div>
           </div>
