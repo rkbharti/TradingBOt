@@ -495,7 +495,6 @@
                 <div class="mob-gates-list" style="margin-bottom: 12px; font-family: monospace;">
                   <template x-for="(gate_info, idx) in getGatesArray()">
                     <div class="mob-gate-row">
-                      <span class="mob-gate-index" x-text="(idx+1) + '.'"></span>
                       <span class="mob-gate-name" x-text="gate_info.name"></span>
                       <span class="mob-gate-status" :class="gate_info.passed ? 'txt-green' : 'txt-red'" x-text="gate_info.passed ? '✔' : '✘'"></span>
                     </div>
@@ -787,14 +786,7 @@
       </section>
     </main>
 
-    <!-- Mobile Sticky Navigation Bar -->
-    <div class="mobile-sticky-nav-bar">
-      <button class="nav-tab active" title="Dashboard">📋<span class="nav-label">Dashboard</span></button>
-      <button class="nav-tab" title="Positions">💼<span class="nav-label">Positions</span></button>
-      <button class="nav-tab" title="Trades">📊<span class="nav-label">Trades</span></button>
-      <button class="nav-tab" title="Alerts">🔔<span class="nav-label">Alerts</span></button>
-      <button class="nav-tab" title="More">⚙️<span class="nav-label">More</span></button>
-    </div>
+
 
     <!-- Command Status Footer -->
     <footer class="terminal-footer mono">

@@ -783,17 +783,6 @@ body::before {
 }
 
 @media (max-width: 768px) {
-  body {
-    --paper: #0c0c0c !important;
-    --paper-dark: #121212 !important;
-    --ink: #ffffff !important;
-    --ink-light: #cccccc !important;
-    --ink-faint: #777777 !important;
-    --accent: #ffd300 !important;
-    --border-strong: #333333 !important;
-    --border-soft: #222222 !important;
-    padding-bottom: 80px !important;
-  }
   
   .terminal-header {
     flex-direction: column;
@@ -867,6 +856,35 @@ body::before {
   }
   .terminal-footer {
     display: none !important;
+  }
+
+  /* Strip desktop borders & shadows on mobile */
+  .terminal-panel {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+  }
+  .terminal-panel::after {
+    display: none !important;
+  }
+
+  /* Hide sticky bottom navbar entirely */
+  .mobile-sticky-nav-bar {
+    display: none !important;
+  }
+
+  /* Layout flex wrapping for chart & dynamic trade plan overlay */
+  .chart-region-wrapper {
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: visible !important;
+  }
+  .chart-container-shell {
+    height: 380px !important; /* Fixed clear height for chart on mobile */
+    overflow: visible !important;
+  }
+  #chart-container {
+    height: 100% !important;
   }
 
   /* Mobile Redesign Utilities */
@@ -1075,10 +1093,14 @@ body::before {
 
   /* Trade Plan Overlay (SMC Summary Box) Mobile Card styles */
   #smc-summary-box {
-    top: 8px !important;
-    left: 8px !important;
-    right: 8px !important;
-    background: rgba(18, 12, 10, 0.9) !important;
+    position: relative !important;
+    top: auto !important;
+    left: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+    margin: 12px 0 0 0 !important;
+    width: 100% !important;
+    background: var(--paper-dark) !important;
     border: 1.5px solid var(--border-strong) !important;
     border-radius: 12px !important;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5) !important;
