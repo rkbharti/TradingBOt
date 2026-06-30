@@ -57,7 +57,9 @@ class NewsFilter:
     @staticmethod
     def get_target_currencies(symbol: str) -> set:
         symbol_upper = symbol.upper()
-        clean_symbol = "".join(c for c in symbol_upper if c.isalpha())
+        # Remove broker suffix (e.g. .pro, .raw, .a, .b)
+        base_part = symbol_upper.split('.')[0]
+        clean_symbol = "".join(c for c in base_part if c.isalpha())
         
         if len(clean_symbol) == 6:
             base = clean_symbol[:3]
