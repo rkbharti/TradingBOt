@@ -321,8 +321,15 @@ class MultiTimeframeFractal:
         """
         results = {}
         
+        tf_bars = {
+            'D1': 1200,
+            'H4': 1000,
+            'H1': 1000,
+            'M15': 2000,
+            'M5': 1000
+        }
         for tf in ['D1', 'H4', 'H1', 'M15', 'M5']:
-            analysis = self.analyze_timeframe(tf, bars=300)
+            analysis = self.analyze_timeframe(tf, bars=tf_bars.get(tf, 300))
             if analysis:
                 results[tf] = analysis
         

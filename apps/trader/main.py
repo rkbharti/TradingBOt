@@ -2305,15 +2305,14 @@ class XAUUSDTradingBot:
         except Exception as _ve:
             print(f"⚠️ Candle sync check failed: {_ve}")
 
-        # ── Fetch all timeframe DataFrames ────────────────────────────────────
-        m1_raw  = self.mtf.fetch_data("M1")
-        m5_raw  = self.mtf.fetch_data("M5")
-        m15_raw = self.mtf.fetch_data("M15")
+        m1_raw  = self.mtf.fetch_data("M1", bars=1000)
+        m5_raw  = self.mtf.fetch_data("M5", bars=1000)
+        m15_raw = self.mtf.fetch_data("M15", bars=2000)
         # ✅ Fix 1: Fetch H1 as primary structure mapping layer (creator: IDM/BOS/CHoCH on 1H)
-        h1_raw  = self.mtf.fetch_data("H1")
-        h4_raw  = self.mtf.fetch_data("H4")
-        d1_raw  = self.mtf.fetch_data("D1")
-        w1_raw  = self.mtf.fetch_data("W1")
+        h1_raw  = self.mtf.fetch_data("H1", bars=1000)
+        h4_raw  = self.mtf.fetch_data("H4", bars=1000)
+        d1_raw  = self.mtf.fetch_data("D1", bars=1200)
+        w1_raw  = self.mtf.fetch_data("W1", bars=500)
 
         m5_df  = m5_raw.get("df")  if isinstance(m5_raw,  dict) else m5_raw
         m15_df = m15_raw.get("df") if isinstance(m15_raw, dict) else m15_raw
@@ -2815,13 +2814,13 @@ class XAUUSDTradingBot:
         print("\n[GATE 3] Multi-Timeframe DataFrames")
         try:
             mtf_map = {
-                "M1": self.mtf.fetch_data("M1", debug=False),
-                "M5": self.mtf.fetch_data("M5", debug=False),
-                "M15": self.mtf.fetch_data("M15", debug=False),
-                "H1": self.mtf.fetch_data("H1", debug=False),
-                "H4": self.mtf.fetch_data("H4", debug=False),
-                "D1": self.mtf.fetch_data("D1", debug=False),
-                "W1": self.mtf.fetch_data("W1", debug=False),
+                "M1": self.mtf.fetch_data("M1", bars=1000, debug=False),
+                "M5": self.mtf.fetch_data("M5", bars=1000, debug=False),
+                "M15": self.mtf.fetch_data("M15", bars=2000, debug=False),
+                "H1": self.mtf.fetch_data("H1", bars=1000, debug=False),
+                "H4": self.mtf.fetch_data("H4", bars=1000, debug=False),
+                "D1": self.mtf.fetch_data("D1", bars=1200, debug=False),
+                "W1": self.mtf.fetch_data("W1", bars=500, debug=False),
             }
 
             missing = []
@@ -2894,7 +2893,7 @@ class XAUUSDTradingBot:
         print("-" * 65)
         try:
             try:
-                m1_raw = self.mtf.fetch_data("M1", debug=False)
+                m1_raw = self.mtf.fetch_data("M1", bars=1000, debug=False)
             except Exception:
                 m1_raw = None
             result = self.signal_engine.evaluate(
