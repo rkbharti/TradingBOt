@@ -375,10 +375,12 @@
         
         <!-- System Status -->
         <div class="terminal-panel">
-          <div class="panel-header">
+          <div class="panel-header desktop-only">
             <div class="panel-title">System Status</div>
           </div>
-          <div class="panel-body">
+          
+          <!-- Desktop Layout -->
+          <div class="panel-body desktop-only">
             <div class="status-indicator-row">
               <span>MTS CONNECTED</span>
               <span class="status-val txt-green" x-text="_health.mt5_connected === 'ok' ? 'LIVE' : 'DOWN'">LIVE</span>
@@ -406,6 +408,52 @@
             <div class="data-row mono">
               <span class="txt-muted">LAST UPDATE:</span>
               <span class="txt-main" id="last-update-ts">--:--:--</span>
+            </div>
+          </div>
+
+          <!-- Mobile iOS Card Layout -->
+          <div class="panel-body mobile-only mob-card" x-data="{ expanded: false }" @click="expanded = !expanded">
+            <div class="mob-hero-section">
+              <div class="mob-hero-header">
+                <span class="mob-hero-title">SYSTEM STATUS</span>
+                <span class="mob-status-dot-pulse" 
+                      :class="(_health.mt5_connected === 'ok' && ws_connected && _health.trader_alive && _health.strategy_engine) ? 'active' : 'inactive'">
+                </span>
+              </div>
+              <div class="mob-hero-value-row">
+                <span class="mob-hero-value" 
+                      :class="(_health.mt5_connected === 'ok' && ws_connected && _health.trader_alive && _health.strategy_engine) ? 'txt-green' : 'txt-red'"
+                      x-text="(_health.mt5_connected === 'ok' && ws_connected && _health.trader_alive && _health.strategy_engine) ? 'SYSTEM LIVE' : 'SYSTEM OFFLINE'">
+                  SYSTEM LIVE
+                </span>
+              </div>
+              <div class="mob-subtext">
+                Last connection heartbeat <span class="mono txt-amber" x-text="_health.webhook_age_seconds + 's ago'">--</span>. Tap for details.
+              </div>
+            </div>
+            
+            <!-- Collapsible details -->
+            <div class="mob-details-collapse" x-show="expanded" x-transition style="display: none;">
+              <div class="mob-detail-row">
+                <span class="mob-detail-label">MT5 Terminal</span>
+                <span class="mob-detail-val" :class="_health.mt5_connected === 'ok' ? 'txt-green' : 'txt-red'" x-text="_health.mt5_connected === 'ok' ? 'LIVE' : 'OFFLINE'"></span>
+              </div>
+              <div class="mob-detail-row">
+                <span class="mob-detail-label">Data Fetch Stream</span>
+                <span class="mob-detail-val" :class="ws_connected ? 'txt-green' : 'txt-red'" x-text="ws_connected ? 'LIVE' : 'OFFLINE'"></span>
+              </div>
+              <div class="mob-detail-row">
+                <span class="mob-detail-label">VPS Background Agent</span>
+                <span class="mob-detail-val" :class="_health.trader_alive ? 'txt-green' : 'txt-red'" x-text="_health.trader_alive ? 'LIVE' : 'OFFLINE'"></span>
+              </div>
+              <div class="mob-detail-row">
+                <span class="mob-detail-label">SMC Strategy Engine</span>
+                <span class="mob-detail-val" :class="_health.strategy_engine ? 'txt-green' : 'txt-red'" x-text="_health.strategy_engine ? 'LIVE' : 'OFFLINE'"></span>
+              </div>
+              <div class="mob-detail-row">
+                <span class="mob-detail-label">Market Sync Status</span>
+                <span class="mob-detail-val" :class="_health.data_feed ? 'txt-green' : 'txt-red'" x-text="_health.data_feed ? 'SYNCED' : 'HALTED'"></span>
+              </div>
             </div>
           </div>
         </div>

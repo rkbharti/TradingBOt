@@ -94,6 +94,8 @@ body.light-theme[data-palette] {
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+.mobile-only { display: none !important; }
+
 
 body {
   background: var(--paper);
@@ -865,6 +867,89 @@ body::before {
   }
   .terminal-footer {
     display: none !important;
+  }
+
+  /* Mobile Redesign Utilities */
+  .desktop-only { display: none !important; }
+  .mobile-only { display: block !important; }
+
+  /* iOS widget style base */
+  .mob-card {
+    background: var(--paper-dark) !important;
+    border: 1.5px solid var(--border-strong) !important;
+    border-radius: 12px !important;
+    padding: 16px !important;
+    margin-bottom: 12px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4) !important;
+    position: relative;
+    cursor: pointer;
+  }
+  .mob-hero-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .mob-hero-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .mob-hero-title {
+    font-size: 10px;
+    font-weight: 800;
+    color: var(--ink-faint);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+  .mob-status-dot-pulse {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+  .mob-status-dot-pulse.active {
+    background: #00ff88;
+    box-shadow: 0 0 8px #00ff88;
+  }
+  .mob-status-dot-pulse.inactive {
+    background: var(--danger);
+    box-shadow: 0 0 8px var(--danger);
+  }
+  .mob-hero-value-row {
+    display: flex;
+    align-items: baseline;
+  }
+  .mob-hero-value {
+    font-size: 26px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+  }
+  .mob-subtext {
+    font-size: 10px;
+    color: var(--ink-light);
+    line-height: 1.4;
+  }
+  
+  /* Collapsible Details */
+  .mob-details-collapse {
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px dotted var(--border-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .mob-detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+  }
+  .mob-detail-label {
+    color: var(--ink-light);
+    font-weight: 600;
+  }
+  .mob-detail-val {
+    font-weight: 700;
   }
 }
 
