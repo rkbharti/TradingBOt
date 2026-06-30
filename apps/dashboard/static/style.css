@@ -986,6 +986,41 @@ body::before {
   .mob-position-pnl {
     font-weight: 700;
   }
+
+  /* Closed Trades Widget specific mobile styles */
+  .mob-trade-item {
+    border-bottom: 1px dotted var(--border-soft);
+    padding: 8px 0;
+  }
+  .mob-trade-item:last-child {
+    border-bottom: none;
+  }
+  .mob-trade-main-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+  }
+  .mob-trade-symbol {
+    font-weight: 800;
+    font-size: 13px;
+  }
+  .mob-trade-type {
+    font-weight: 800;
+    font-size: 11px;
+  }
+  .mob-trade-sub-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--ink-light);
+  }
+  .mob-trade-range {
+    font-weight: 600;
+  }
+  .mob-trade-pnl {
+    font-weight: 700;
+  }
 }
 
 /* --- Narrative Engine inside Sidebar layout adjustments --- */
