@@ -1021,6 +1021,32 @@ body::before {
   .mob-trade-pnl {
     font-weight: 700;
   }
+
+  /* Account Overview specific mobile styles */
+  .mob-details-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px dotted var(--border-soft);
+  }
+  .mob-detail-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .mob-detail-cell-label {
+    font-size: 9px;
+    font-weight: 800;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .mob-detail-cell-val {
+    font-size: 12px;
+    font-weight: 700;
+  }
 }
 
 /* --- Narrative Engine inside Sidebar layout adjustments --- */

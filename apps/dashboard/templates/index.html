@@ -263,10 +263,12 @@
         <div class="sidebar-region-column">
           <!-- Account Overview -->
           <div class="terminal-panel">
-            <div class="panel-header">
+            <div class="panel-header desktop-only">
               <div class="panel-title">Account Overview</div>
             </div>
-            <div class="panel-body">
+
+            <!-- Desktop Layout -->
+            <div class="panel-body desktop-only">
               <div class="data-row">
                 <span class="data-label">LOGIN</span>
                 <span class="data-value mono" x-text="account_login || '--'">--</span>
@@ -298,6 +300,51 @@
               <div class="data-row highlight">
                 <span class="data-label">OVERALL P&L</span>
                 <span class="data-value mono highlight-pnl" :class="pnl_total >= 0 ? 'txt-green' : 'txt-red'" x-text="fmt(pnl_total)">$0.00</span>
+              </div>
+            </div>
+
+            <!-- Mobile iOS Card Layout -->
+            <div class="panel-body mobile-only mob-card">
+              <div class="mob-hero-section">
+                <div class="mob-hero-header">
+                  <span class="mob-hero-title">ACCOUNT EQUITY</span>
+                  <span class="badge yellow" style="font-size: 9px; padding: 1px 6px;" x-text="account_name || 'REAL-01'">REAL-01</span>
+                </div>
+                <div class="mob-hero-value-row">
+                  <span class="mob-hero-value txt-green" x-text="fmt(equity)">$0.00</span>
+                </div>
+                <div class="mob-subtext">
+                  Live account equity valuation.
+                </div>
+              </div>
+
+              <div class="mob-details-grid">
+                <div class="mob-detail-cell">
+                  <span class="mob-detail-cell-label">Balance</span>
+                  <span class="mob-detail-cell-val" x-text="fmt(balance)">$0.00</span>
+                </div>
+                <div class="mob-detail-cell">
+                  <span class="mob-detail-cell-label">Daily Return</span>
+                  <span class="mob-detail-cell-val" 
+                        :class="pnl_today >= 0 ? 'txt-green' : 'txt-red'" 
+                        x-text="fmt(pnl_today) + ' (' + (pnl_today_pct >= 0 ? '+' : '') + pnl_today_pct.toFixed(2) + '%)'">
+                    $0.00 (+0.00%)
+                  </span>
+                </div>
+                <div class="mob-detail-cell">
+                  <span class="mob-detail-cell-label">Overall Return</span>
+                  <span class="mob-detail-cell-val highlight-pnl" 
+                        :class="pnl_total >= 0 ? 'txt-green' : 'txt-red'" 
+                        x-text="fmt(pnl_total)">
+                    $0.00
+                  </span>
+                </div>
+                <div class="mob-detail-cell">
+                  <span class="mob-detail-cell-label">Credentials</span>
+                  <span class="mob-detail-cell-val font-mono" style="font-size: 10px;" x-text="account_login + ' @ ' + account_server">
+                    --
+                  </span>
+                </div>
               </div>
             </div>
           </div>
